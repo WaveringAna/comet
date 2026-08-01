@@ -120,8 +120,9 @@ impl Harness for MockHarness {
                 };
                 tokio::time::sleep(pause).await;
                 let _ = tx.send(AgentEvent::TextDelta {
-                    text: "Before I wire the reconciliation path I need two decisions from you.\n\n"
-                        .into(),
+                    text:
+                        "Before I wire the reconciliation path I need two decisions from you.\n\n"
+                            .into(),
                 });
                 tokio::time::sleep(pause).await;
                 let answers = request_input(question_script()).await.unwrap_or_default();
@@ -246,24 +247,61 @@ impl Harness for MockHarness {
             )
             .into(),
         });
-        // With the code knob, also exercise a MULTILINE Exec command — the
-        // round-9 chip breaker shape ("set -e\nfixture_in_original=0"): the
-        // Run chip must stay one 30px line.
+        // With the code knob, also exercise a MIXED tool sequence — reads,
+        // a failing multiline Exec (the round-9 chip breaker shape), an edit,
+        // one more read — so the transcript's run consolidation has something
+        // to chew on: "Read a, b" · "ran grep, wc, cargo · 1 failed" ·
+        // "Edit c" · "Read d", every run one hard-truncated 30px line.
         let code_tool_events = mock_code
             .then(|| {
+                let call = |id: &str, call: comet_proto::ToolCall| AgentEvent::ToolCall {
+                    id: id.into(),
+                    call,
+                };
+                let ok = |id: &str, output: &str| AgentEvent::ToolResult {
+                    id: id.into(),
+                    is_error: false,
+                    output: Some(output.into()),
+                    output_truncated: false,
+                };
+                let read = |id: &str, path: &str| {
+                    call(id, comet_proto::ToolCall::ReadFile { path: path.into() })
+                };
                 [
-                    AgentEvent::ToolCall {
-                        id: "mock-code-tool".into(),
-                        call: comet_proto::ToolCall::Exec {
+                    read("mock-read-1", "crates/ui/src/transcript.rs"),
+                    ok("mock-read-1", "…"),
+                    read("mock-read-2", "crates/ui/src/composer.rs"),
+                    ok("mock-read-2", "…"),
+                    call(
+                        "mock-code-tool",
+                        comet_proto::ToolCall::Exec {
                             command: "set -e\nfixture_in_original=0\ngrep -rn \"veil\" crates/ui/src | wc -l".into(),
                         },
-                    },
+                    ),
+                    ok("mock-code-tool", "3"),
+                    call(
+                        "mock-exec-2",
+                        comet_proto::ToolCall::Exec {
+                            command: "cargo test -p comet-ui".into(),
+                        },
+                    ),
                     AgentEvent::ToolResult {
-                        id: "mock-code-tool".into(),
-                        is_error: false,
-                        output: Some("3".into()),
+                        id: "mock-exec-2".into(),
+                        is_error: true,
+                        output: Some("error: 1 test failed".into()),
                         output_truncated: false,
                     },
+                    call(
+                        "mock-edit-1",
+                        comet_proto::ToolCall::EditFile {
+                            path: "crates/ui/src/theme.rs".into(),
+                            old_string: None,
+                            new_string: None,
+                        },
+                    ),
+                    ok("mock-edit-1", "…"),
+                    read("mock-read-3", "crates/ui/src/rail.rs"),
+                    ok("mock-read-3", "…"),
                 ]
             })
             .into_iter()
@@ -299,7 +337,11 @@ impl Harness for MockHarness {
                         let chars: Vec<char> = text.chars().collect();
                         chars
                             .chunks(n)
-                            .map(|c| Ok(AgentEvent::TextDelta { text: c.iter().collect() }))
+                            .map(|c| {
+                                Ok(AgentEvent::TextDelta {
+                                    text: c.iter().collect(),
+                                })
+                            })
                             .collect::<Vec<_>>()
                     }
                     other => vec![other],

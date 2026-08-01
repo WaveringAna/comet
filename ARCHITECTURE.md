@@ -204,10 +204,21 @@ feature spec `docs/research/feature-inventory.md` §1.
   drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
   Each chat also gets an **agent terminal**: a read-only command feed (the turn's `exec` tool
   calls in arrival order — `$ command` per row, spinner while running, ✕ on failure) pinned as
-  the leftmost tab, titled "<model>'s terminal". Consecutive exec calls collapse in the
-  transcript to a single "ran N command(s)" row; clicking it opens the dock, focuses the agent
-  tab, scrolls to the first command of that turn, and flashes it (non-exec tool calls break the
-  group and keep their regular chips). The feed follows its tail xterm-style: while the scroll
+  the leftmost tab, titled "<model>'s terminal". In the transcript a run of consecutive tool
+  calls is ONE collapsed summary line — a glyph, "Ran cargo, git · edited 2 files · read 3
+  files" (program names parsed out of the shell strings — chains split on unquoted
+  separators, wrappers/builtins skipped, `sh -c "…"` payloads re-parsed; a parenthesized
+  count keeps multiplicity visible), and a trailing chevron. Clicking it opens the call
+  lines: consecutive same-kind calls consolidate into one line ("read
+  crates/ui/src/{transcript.rs,composer.rs}" — siblings fold into brace groups), shell
+  commands keep one verbatim line each. While a call is still in flight the collapsed group
+  shows THAT line and nothing else, spinner in its glyph slot, so a live turn reads as what
+  the agent is doing right now. Nothing in a group paints brighter than the summary and
+  failures never recolor a row — they say "· N failed" in words. The full detail list of a
+  consolidated line rides a hover tooltip (the app's first tooltip — gpui gives a builder
+  hook, no card). Clicking a command line opens the dock, focuses the agent tab,
+  scrolls to that command, and flashes it. The feed follows its tail
+  xterm-style: while the scroll
   offset is pinned to the bottom, any change to the `(feed_len, tail_expansion_lines)`
   fingerprint one-shot `scroll_to_bottom`s the latest command into view; scrolling back
   disengages the follow (new commands never yank), scrolling to the bottom re-engages it,

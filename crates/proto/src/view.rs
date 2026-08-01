@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Project};
+use crate::{AuthState, Chat, ChatIndicator, Project, Session, SessionStatus};
 
 // ---------------------------------------------------------------------------
 // Connection + status
@@ -309,6 +309,130 @@ pub fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Leading program names of a shell command string, in segment order WITH
+/// duplicates (multiplicity is the caller's signal — eight `git` segments
+/// should not read as one). For summarizing exec runs: "ran git, cargo".
+///
+/// Models chain commands in one shell call (`git log --oneline && git status`,
+/// multi-line scripts), so the string is split into segments on `&&`, `||`,
+/// `;`, `|`, and newlines OUTSIDE quotes (`grep "a; b"` stays one segment),
+/// then each segment contributes its first real word: `VAR=val` prefixes,
+/// wrappers (`sudo`, `env`, …), flags, and pure builtins (`cd`, `export`,
+/// `set`) are skipped, and paths are basenamed (`/usr/bin/git` → `git`).
+///
+/// This is a heuristic, not a shell grammar — subshells and wrapper args are
+/// not modeled. The worst case is an odd name on a summary line, never a
+/// behavior change; an unparseable command yields an empty list and the
+/// caller falls back to a bare count.
+pub fn command_names(command: &str) -> Vec<String> {
+    split_shell_segments(command)
+        .iter()
+        .flat_map(|segment| segment_names(segment, false))
+        .collect()
+}
+
+/// Split on unquoted `&`, `|`, `;`, `\n`. Single quotes are literal, double
+/// quotes allow backslash escapes, backslash escapes the next byte outside
+/// single quotes. Separator and slice indices only ever land on ASCII bytes,
+/// so UTF-8 content passes through untouched.
+fn split_shell_segments(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let mut segments = Vec::with_capacity(4);
+    let mut start = 0;
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => i += 1, // skip the escaped byte too
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'&' | b'|' | b';' | b'\n' if !in_single && !in_double => {
+                segments.push(&command[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    segments.push(&command[start..]);
+    segments
+}
+
+/// The program names of one shell segment: its first real word, basenamed.
+/// Wrappers (`sudo foo` → `foo`) are stepped through; a shell wrapper (`sh
+/// -c "…"`, `bash script.sh`) contributes the names of its PAYLOAD, parsed as
+/// its own command string one level deep — agents wrap chains that way
+/// constantly, and naming the shell hides the real work. Segments that are
+/// only assignments, flags, or a builtin contribute nothing.
+fn segment_names(segment: &str, nested: bool) -> Vec<String> {
+    /// Commands that execute another command — skip them to name the payload.
+    const WRAPPERS: [&str; 6] = ["sudo", "env", "command", "time", "nice", "nohup"];
+    /// Shells invoked with a script (`-c "…"` or a file path).
+    const SHELLS: [&str; 6] = ["bash", "sh", "zsh", "nu", "dash", "fish"];
+    /// Shell builtins that read as noise in a summary (and never name a
+    /// payload worth showing).
+    const BUILTINS: [&str; 6] = ["cd", "export", "set", "source", ".", "umask"];
+    let mut words = segment.split_whitespace();
+    while let Some(word) = words.next() {
+        if is_assignment(word) {
+            continue;
+        }
+        let bare = word
+            .rsplit('/')
+            .next()
+            .unwrap_or(word)
+            .trim_matches(|c| c == '"' || c == '\'');
+        if bare.is_empty() {
+            continue;
+        }
+        if BUILTINS.contains(&bare) {
+            return Vec::new();
+        }
+        if WRAPPERS.contains(&bare) || bare.starts_with('-') {
+            continue;
+        }
+        if !nested && SHELLS.contains(&bare) {
+            // Words still carry their original quotes, so re-joining
+            // reconstructs the payload's quoting exactly — peel a matched
+            // pair of surrounding quotes (`-c "…"`) or the inner chain's
+            // separators would stay protected.
+            let payload = words
+                .filter(|w| !w.starts_with('-'))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let payload = payload.trim();
+            let payload = if payload.len() >= 2
+                && ((payload.starts_with('"') && payload.ends_with('"'))
+                    || (payload.starts_with('\'') && payload.ends_with('\'')))
+            {
+                &payload[1..payload.len() - 1]
+            } else {
+                payload
+            };
+            return split_shell_segments(payload)
+                .iter()
+                .flat_map(|s| segment_names(s, true))
+                .collect();
+        }
+        return vec![bare.to_string()];
+    }
+    Vec::new()
+}
+
+/// A leading `VAR=val` shell assignment word.
+fn is_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("{n} {one}")
@@ -327,7 +451,9 @@ pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
 fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
     use crate::ToolCall;
     match call {
-        ToolCall::Exec { command } => ("Run", command.clone()),
+        // "Exec", not "Run": every tool line reads `Label detail`, and the
+        // shell must sit in that column like any other kind.
+        ToolCall::Exec { command } => ("Exec", command.clone()),
         ToolCall::ReadFile { path } => ("Read", path.clone()),
         ToolCall::WriteFile { path, .. } => ("Write", path.clone()),
         ToolCall::EditFile { path, .. } => ("Edit", path.clone()),
@@ -353,13 +479,72 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
     }
 }
 
-/// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
+/// Collapse a run's details into one line, folding paths that share a parent
+/// into brace groups: `["a/b/x.rs", "a/b/y.rs", "t/z"]` reads
+/// `a/b/{x.rs,y.rs}, t/z`. Shell-brace notation because it is the one
+/// shorthand every reader of this app already parses at a glance, and it
+/// keeps a long list to one honest line instead of an ellipsis.
+///
+/// Groups keep first-appearance order, exact repeats collapse, and anything
+/// without a parent directory (patterns, queries, bare names) passes through
+/// untouched — a brace group of one is never worth the punctuation.
+pub fn coalesce_paths(details: &[String]) -> String {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for detail in details {
+        let (dir, base) = match detail.rsplit_once('/') {
+            Some((dir, base)) if !dir.is_empty() && !base.is_empty() => (dir, base),
+            _ => ("", detail.as_str()),
+        };
+        match groups.iter_mut().find(|(d, _)| *d == dir) {
+            Some((_, bases)) => {
+                if !bases.contains(&base) {
+                    bases.push(base);
+                }
+            }
+            // Groups keep insertion order — the run reads in call order.
+            None => groups.push((dir, vec![base])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(dir, bases)| match (dir.is_empty(), bases.as_slice()) {
+            (true, _) => bases.join(", "),
+            (false, [only]) => format!("{dir}/{only}"),
+            (false, many) => format!("{dir}/{{{}}}", many.join(",")),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// "ran cargo, git" / "ran cargo, git, npm, … (9)" / "ran 3 commands" — how a
+/// run of shell commands names itself. The names come from the commands
+/// themselves ([`command_names`]); the parenthesized count appears when the
+/// calls outnumber the names shown, so eight `git` calls don't read as one,
+/// and an unparseable set falls back to the bare count.
+pub fn ran_commands(names: &[String], count: usize) -> String {
+    const MAX_NAMES: usize = 3;
+    if names.is_empty() {
+        return format!("ran {}", plural(count, "command", "commands"));
+    }
+    let shown = names.len().min(MAX_NAMES);
+    let mut s = format!("ran {}", names[..shown].join(", "));
+    if names.len() > MAX_NAMES {
+        s.push_str(", …");
+    }
+    if count > shown {
+        s.push_str(&format!(" ({count})"));
+    }
+    s
+}
+
+/// The ToolGroup summary line — "Ran cargo, git · edited 2 files".
 ///
 /// Takes `(call, is_error)` pairs so each viewport can keep its own row model;
 /// the summary itself is one implementation for both.
 pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     use crate::ToolCall;
     let mut commands = 0usize;
+    let mut cmd_names: Vec<String> = Vec::new();
     let mut edited: Vec<&str> = Vec::new();
     let mut reads = 0usize;
     let mut searches = 0usize;
@@ -372,7 +557,14 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
             failed += 1;
         }
         match call {
-            ToolCall::Exec { .. } => commands += 1,
+            ToolCall::Exec { command } => {
+                commands += 1;
+                for name in command_names(command) {
+                    if !cmd_names.contains(&name) {
+                        cmd_names.push(name);
+                    }
+                }
+            }
             ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => {
                 if !edited.contains(&path.as_str()) {
                     edited.push(path);
@@ -395,7 +587,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     }
     let mut segments: Vec<String> = Vec::new();
     if commands > 0 {
-        segments.push(format!("ran {}", plural(commands, "command", "commands")));
+        segments.push(ran_commands(&cmd_names, commands));
     }
     if !edited.is_empty() {
         segments.push(format!("edited {}", plural(edited.len(), "file", "files")));
@@ -583,5 +775,167 @@ mod checkout_tests {
             checkout_label(CheckoutKind::NewWorktree, Some(&plain("main"))),
             "New worktree"
         );
+    }
+}
+
+#[cfg(test)]
+mod command_names_tests {
+    use super::command_names;
+
+    #[test]
+    fn plain_commands_name_themselves() {
+        assert_eq!(command_names("git log --oneline"), ["git"]);
+        assert_eq!(command_names("/usr/bin/git status"), ["git"]);
+        assert_eq!(command_names("cargo test -p comet-ui"), ["cargo"]);
+    }
+
+    #[test]
+    fn chains_split_on_unquoted_separators() {
+        assert_eq!(
+            command_names("git log --oneline && git merge-base HEAD origin/main"),
+            ["git", "git"]
+        );
+        assert_eq!(
+            command_names("cargo build; cargo test || echo no"),
+            ["cargo", "cargo", "echo"]
+        );
+        assert_eq!(
+            command_names("grep -rn \"veil\" crates/ui/src | wc -l"),
+            ["grep", "wc"]
+        );
+        assert_eq!(command_names("set -e\nfixture=0\ngrep -c \"x\""), ["grep"]);
+    }
+
+    #[test]
+    fn quoted_separators_do_not_split() {
+        assert_eq!(command_names("grep -rn \"a; b\" ."), ["grep"]);
+        assert_eq!(command_names("awk '{print $1}' f"), ["awk"]);
+        assert_eq!(command_names("echo 'a && b'"), ["echo"]);
+    }
+
+    #[test]
+    fn prefixes_and_wrappers_are_stepped_through() {
+        assert_eq!(command_names("FOO=bar BAZ=1 cargo build"), ["cargo"]);
+        assert_eq!(command_names("sudo systemctl restart x"), ["systemctl"]);
+        assert_eq!(command_names("env FOO=1 make"), ["make"]);
+        // Assignments alone parse to nothing — the caller shows a bare count.
+        assert!(command_names("fixture_in_original=0").is_empty());
+    }
+
+    #[test]
+    fn shell_payloads_are_parsed_one_level_deep() {
+        assert_eq!(
+            command_names("bash -c \"git status && cargo test\""),
+            ["git", "cargo"]
+        );
+        assert_eq!(command_names("sh -lc 'npm run build'"), ["npm"]);
+        assert_eq!(command_names("bash scripts/deploy.sh"), ["deploy.sh"]);
+        // The shell itself never surfaces as the name.
+        assert!(!command_names("bash -c \"true\"").contains(&"bash".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod group_summary_tests {
+    use super::*;
+    use crate::ToolCall;
+
+    fn exec(c: &str) -> (ToolCall, bool) {
+        (ToolCall::Exec { command: c.into() }, false)
+    }
+    fn read(p: &str) -> (ToolCall, bool) {
+        (ToolCall::ReadFile { path: p.into() }, false)
+    }
+
+    #[test]
+    fn commands_name_themselves_in_the_summary() {
+        // Names, not a bare count — the summary is the only line a collapsed
+        // group shows, so "Ran 3 commands" would hide what actually ran.
+        assert_eq!(
+            tool_group_summary(&[exec("cargo test"), exec("git status")]),
+            "Ran cargo, git"
+        );
+        // Repeats collapse to one name, and the count returns to say how many.
+        assert_eq!(
+            tool_group_summary(&[exec("git add ."), exec("git commit"), exec("git push")]),
+            "Ran git (3)"
+        );
+        // Unparseable commands keep the old bare-count shape.
+        assert_eq!(tool_group_summary(&[exec("FOO=1")]), "Ran 1 command");
+    }
+
+    #[test]
+    fn segments_join_in_kind_order_with_failures_last() {
+        let tools = [
+            read("a.rs"),
+            exec("cargo build"),
+            (
+                ToolCall::EditFile {
+                    path: "b.rs".into(),
+                    old_string: None,
+                    new_string: None,
+                },
+                true,
+            ),
+        ];
+        assert_eq!(
+            tool_group_summary(&tools),
+            "Ran cargo · edited 1 file · read 1 file · 1 failed"
+        );
+    }
+
+    #[test]
+    fn ran_commands_caps_the_name_list() {
+        let names = |ns: &[&str]| ns.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(ran_commands(&names(&["cargo"]), 1), "ran cargo");
+        assert_eq!(
+            ran_commands(&names(&["a", "b", "c", "d"]), 4),
+            "ran a, b, c, … (4)"
+        );
+        assert_eq!(ran_commands(&[], 2), "ran 2 commands");
+    }
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    use super::*;
+
+    fn paths(ps: &[&str]) -> Vec<String> {
+        ps.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn siblings_fold_into_one_brace_group() {
+        assert_eq!(
+            coalesce_paths(&paths(&[
+                "crates/ui/src/transcript.rs",
+                "crates/ui/src/composer.rs"
+            ])),
+            "crates/ui/src/{transcript.rs,composer.rs}"
+        );
+        // Groups keep call order; a lone file in its directory stays whole.
+        assert_eq!(
+            coalesce_paths(&paths(&[
+                "foo/bar/buzz.rs",
+                "foo/bar/fizz.rs",
+                "test/test2"
+            ])),
+            "foo/bar/{buzz.rs,fizz.rs}, test/test2"
+        );
+        // An interleaved directory still folds into its first appearance.
+        assert_eq!(
+            coalesce_paths(&paths(&["a/x", "b/y", "a/z"])),
+            "a/{x,z}, b/y"
+        );
+    }
+
+    #[test]
+    fn non_paths_pass_through_untouched() {
+        // Patterns and bare names have no parent: braces would be noise.
+        assert_eq!(coalesce_paths(&paths(&["veil", "spring"])), "veil, spring");
+        assert_eq!(coalesce_paths(&paths(&["a.rs"])), "a.rs");
+        // Exact repeats collapse — reading one file twice reads once.
+        assert_eq!(coalesce_paths(&paths(&["a/b.rs", "a/b.rs"])), "a/b.rs");
+        assert_eq!(coalesce_paths(&[]), "");
     }
 }

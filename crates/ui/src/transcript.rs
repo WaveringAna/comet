@@ -1,5 +1,5 @@
 //! The conversation view: virtualized transcript with block-granularity rows,
-//! stick-to-bottom, tool-group folding, and streaming markdown.
+//! stick-to-bottom, consolidated tool-run lines, and streaming markdown.
 //!
 //! Row model (docs/research/mugen-pretext.md §3):
 //! - one row per BLOCK: user message = one bubble row; assistant messages split
@@ -42,7 +42,7 @@ use crate::markdown::highlight::{Lang, LineCarry, Token, lang_for_tag, tokenize_
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
-use crate::motion::{self, AnimationExt as _, RESIZE};
+use crate::motion::{self, AnimationExt as _};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -60,20 +60,27 @@ pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
 pub const GAP_TURN: f32 = 14.0;
 /// Vertical gap between blocks within a turn.
 pub const GAP_BLOCK: f32 = 8.0;
+/// Air around a tool group. A run is its own beat between two things the
+/// agent said — it needs more room than the gap between paragraphs, not
+/// less, or the reply reads as one undifferentiated column.
+pub const GAP_TOOLS: f32 = 14.0;
 /// Transcript column max width (comet 46rem).
 pub const MAX_CONTENT_WIDTH: f32 = 736.0;
-/// Tool chip row height / gap — analytic, so fold heights need no measurement.
-/// A row is the guide rail + a 30px chip card centered in it (comet
-/// tool-chip.tsx: `TOOL_CHIP_HEIGHT = 38`, card `h-[30px]`); rows stack with no
-/// gap so the rail reads continuous.
-pub const CHIP_HEIGHT: f32 = 38.0;
-pub const CHIP_GAP: f32 = 0.0;
-pub const CHIP_CARD_HEIGHT: f32 = 30.0;
-const CHIPS_TOP_PAD: f32 = 2.0;
-/// How long a user fold toggle keeps its height tween armed: the RESIZE
-/// spec's 200ms plus margin. Past this the fold renders statically — an armed
-/// tween replays on remount, i.e. on every scroll-back-into-view.
-const FOLD_TWEEN_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
+/// One tool line: plain text, no card — the summary and each call under it
+/// are single truncated lines of this height, stacked with no gap. (Cards
+/// and pills made every reply look interrupted by a panel; the terminal
+/// viewport reached the same conclusion, see `comet_tui`.)
+pub const TOOL_LINE_HEIGHT: f32 = 24.0;
+/// The summary sits in the reply's own flow, so it reads at body size; the
+/// call lines under it step down once, and no further — they are quiet, not
+/// fine print. Nothing in a group is brighter than the summary.
+pub const TOOL_SUMMARY_SIZE: f32 = 14.0;
+const TOOL_LABEL_SIZE: f32 = 13.0;
+const TOOL_DETAIL_SIZE: f32 = 12.5;
+/// Icon column: the summary's glyph sits at the reply's left edge, each call
+/// line's a small hang inside it.
+const TOOL_ICON_SIZE: f32 = 13.0;
+const TOOL_ROW_PAD: f32 = 9.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a FIXED-height strip (load-state flips never shift the virtualizer).
 pub const ATT_THUMB_W: f32 = 112.0;
@@ -224,7 +231,6 @@ pub enum RowKind {
     },
     ToolGroup {
         tools: Arc<Vec<ToolItem>>,
-        auto_open: bool,
     },
     InputChip {
         /// First question's header (chat-view.tsx `InputChip`: the resolved
@@ -283,7 +289,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
+fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
     let mut acc = Vec::with_capacity(tools.len() * 8 + 1);
     for t in tools {
         acc.extend_from_slice(t.id.as_bytes());
@@ -292,7 +298,6 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
     }
-    acc.push(auto_open as u8);
     fnv1a(&acc)
 }
 
@@ -340,33 +345,28 @@ pub fn rows_for_entry(
     }
 
     // Assistant/system: split parts into block rows, folding consecutive tools.
-    let last_part_ix = entry.parts.len().saturating_sub(1);
     let mut group_ix = 0usize;
     let mut pending_group: Vec<ToolItem> = Vec::new();
-    let mut group_last_part_ix = 0usize;
 
-    let flush_group =
-        |rows: &mut Vec<Row>, group: &mut Vec<ToolItem>, group_ix: &mut usize, last_ix: usize| {
-            if group.is_empty() {
-                return;
-            }
-            let tools = std::mem::take(group);
-            let auto_open = streaming && last_ix == last_part_ix;
-            rows.push(Row {
-                id: format!("{}#g{}", entry.id, group_ix).into(),
-                version: tool_fingerprint(&tools, auto_open),
-                turn_start: false,
-                kind: RowKind::ToolGroup {
-                    tools: Arc::new(tools),
-                    auto_open,
-                },
-                entry_id: entry.id.clone().into(),
-                timestamp: None,
-            });
-            *group_ix += 1;
-        };
+    let flush_group = |rows: &mut Vec<Row>, group: &mut Vec<ToolItem>, group_ix: &mut usize| {
+        if group.is_empty() {
+            return;
+        }
+        let tools = std::mem::take(group);
+        rows.push(Row {
+            id: format!("{}#g{}", entry.id, group_ix).into(),
+            version: tool_fingerprint(&tools),
+            turn_start: false,
+            kind: RowKind::ToolGroup {
+                tools: Arc::new(tools),
+            },
+            entry_id: entry.id.clone().into(),
+            timestamp: None,
+        });
+        *group_ix += 1;
+    };
 
-    for (part_ix, part) in entry.parts.iter().enumerate() {
+    for part in &entry.parts {
         match part {
             MessagePart::Tool {
                 id,
@@ -380,15 +380,9 @@ pub fn rows_for_entry(
                     is_error: *is_error,
                     resolved: *resolved,
                 });
-                group_last_part_ix = part_ix;
             }
             other => {
-                flush_group(
-                    &mut rows,
-                    &mut pending_group,
-                    &mut group_ix,
-                    group_last_part_ix,
-                );
+                flush_group(&mut rows, &mut pending_group, &mut group_ix);
                 match other {
                     MessagePart::Text { id: part_id, text } => {
                         if text.trim().is_empty() {
@@ -479,12 +473,7 @@ pub fn rows_for_entry(
             }
         }
     }
-    flush_group(
-        &mut rows,
-        &mut pending_group,
-        &mut group_ix,
-        group_last_part_ix,
-    );
+    flush_group(&mut rows, &mut pending_group, &mut group_ix);
 
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
@@ -619,17 +608,21 @@ fn part_prefix(id: &str) -> &str {
 /// Vertical gap opening `row` given its predecessor: turn gap at turn starts;
 /// the markdown block gap between sibling block rows split from the same text
 /// part — matching the live row's internal spacing exactly, so the
-/// live→split handoff cannot shift a pixel; the block gap otherwise.
+/// live→split handoff cannot shift a pixel; the tight tool gap on either side
+/// of a tool group; the block gap otherwise.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     if row.turn_start {
         return GAP_TURN;
     }
     let is_md = |k: &RowKind| matches!(k, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
+    let is_tools = |k: &RowKind| matches!(k, RowKind::ToolGroup { .. });
     let same_part_markdown = prev.is_some_and(|p| {
         is_md(&p.kind) && is_md(&row.kind) && part_prefix(&p.id) == part_prefix(&row.id)
     });
     if same_part_markdown {
         render::MD_BLOCK_GAP
+    } else if is_tools(&row.kind) || prev.is_some_and(|p| is_tools(&p.kind)) {
+        GAP_TOOLS
     } else {
         GAP_BLOCK
     }
@@ -655,42 +648,118 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
     Some((prefix..old.len() - suffix, new.len() - suffix - prefix))
 }
 
-// ---------------------------------------------------------------------------
-// Tool summaries / chips (pure)
-// ---------------------------------------------------------------------------
+/// One call inside a run: the deep-link anchor, its single-lined detail, and
+/// whether it failed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunItem {
+    /// The `MessagePart::Tool` id.
+    pub id: SharedString,
+    /// Path, pattern, query, or the command text — already single-lined by
+    /// `tool_chip_content`.
+    pub detail: String,
+    pub failed: bool,
+}
 
-/// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
-///
-/// The rule lives in `comet_proto::view` so the terminal viewport reports the
-/// same summary; this only adapts the row model's [`ToolItem`] to it.
-pub fn tool_group_summary(tools: &[ToolItem]) -> String {
+/// One line of an expanded group: a run of consecutive same-kind tool calls —
+/// "read foo, bar, baz". Shell commands are the exception: a run of them
+/// keeps ONE LINE PER CALL, because the command text is the information and
+/// each call deep-links to its own place in the agent terminal's feed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolRun {
+    /// The kind label ("read", "edit", …) — the run key; exec runs are "exec".
+    pub label: &'static str,
+    /// The kind's glyph, shown at the head of the line.
+    pub icon: &'static str,
+    pub items: Vec<RunItem>,
+    /// Shell commands: one line per call, never a summary.
+    pub is_exec: bool,
+}
+
+impl ToolRun {
+    /// Failed members — the line's "· N failed" suffix. Never a color: a red
+    /// row is an alarm, and a tool that failed is just news.
+    pub fn failures(&self) -> usize {
+        self.items.iter().filter(|i| i.failed).count()
+    }
+}
+
+/// Fold a group's tools into order-preserving runs of consecutive same-kind
+/// calls: [read, read, exec, read] → "read a, b" · "exec ls" · "read c". The
+/// label is unique per `ToolCall` variant, so runs merge exactly when their
+/// rendered line would repeat.
+pub fn consolidate_runs(tools: &[ToolItem]) -> Vec<ToolRun> {
+    let mut runs: Vec<ToolRun> = Vec::new();
+    for tool in tools {
+        let (label, detail) = tool_chip_content(&tool.call);
+        let label = lower_label(label);
+        let is_exec = matches!(tool.call, ToolCall::Exec { .. });
+        let item = RunItem {
+            id: tool.id.clone(),
+            detail,
+            failed: tool.is_error,
+        };
+        match runs.last_mut() {
+            Some(last) if last.label == label && last.is_exec == is_exec => last.items.push(item),
+            _ => runs.push(ToolRun {
+                label,
+                icon: tool_icon_path(&tool.call),
+                items: vec![item],
+                is_exec,
+            }),
+        }
+    }
+    runs
+}
+
+/// Labels read lowercase beside their glyph: the icon already announces the
+/// kind, so a capital just makes the line shout over the summary above it.
+pub fn lower_label(label: &'static str) -> &'static str {
+    match label {
+        "Exec" => "exec",
+        "Read" => "read",
+        "Write" => "write",
+        "Edit" => "edit",
+        "Patch" => "patch",
+        "Search" => "search",
+        "Glob" => "glob",
+        "Fetch" => "fetch",
+        "Web" => "web",
+        "Todo" => "todo",
+        "MCP" => "mcp",
+        "Tool" => "tool",
+        other => other,
+    }
+}
+
+/// The glyph for a tool call (comet tool-chip.tsx `toolIcon`, Solar set).
+pub fn tool_icon_path(call: &ToolCall) -> &'static str {
+    match call {
+        ToolCall::Exec { .. } => crate::icons::TERMINAL,
+        ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,
+        ToolCall::WriteFile { .. } => crate::icons::DOCUMENT_ADD,
+        ToolCall::EditFile { .. } => crate::icons::PEN,
+        ToolCall::Search { .. } => crate::icons::MAGNIFER,
+        ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
+        ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
+        ToolCall::Todo { .. } => crate::icons::CHECKLIST,
+        ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
+    }
+}
+
+/// The call the agent is running RIGHT NOW — the last unresolved one. A
+/// collapsed group shows this single line while work is in flight, so a live
+/// run reads as "what is it doing" instead of a wall of finished calls; when
+/// the last result lands the line goes away and the summary stands alone.
+pub fn latest_running(tools: &[ToolItem]) -> Option<&ToolItem> {
+    tools.iter().rev().find(|t| !t.resolved)
+}
+
+/// The collapsed group's one line — "Ran cargo, git · edited 2 files". Shared
+/// with the terminal viewport (`comet_proto::view`): a run must summarize
+/// identically on every surface.
+pub fn group_summary(tools: &[ToolItem]) -> String {
     let pairs: Vec<(ToolCall, bool)> = tools.iter().map(|t| (t.call.clone(), t.is_error)).collect();
     comet_proto::view::tool_group_summary(&pairs)
-}
-
-/// True when every item in the group is a shell command.
-pub fn exec_only(tools: &[ToolItem]) -> bool {
-    !tools.is_empty()
-        && tools
-            .iter()
-            .all(|t| matches!(t.call, ToolCall::Exec { .. }))
-}
-
-/// "ran 1 command" / "ran 3 commands · 1 failed" — the deep-link pill label.
-/// The failure count carries real weight here: it's the only transcript
-/// signal left for a failed command (the group summary counts only non-exec
-/// failures now that commands never render as chips).
-pub fn ran_commands_label(count: usize, failed: usize) -> String {
-    let base = if count == 1 {
-        "ran 1 command".to_string()
-    } else {
-        format!("ran {count} commands")
-    };
-    if failed > 0 {
-        format!("{base} · {failed} failed")
-    } else {
-        base
-    }
 }
 
 // `single_line` and the per-kind chip label/detail are shared with the terminal
@@ -699,14 +768,6 @@ pub fn ran_commands_label(count: usize, failed: usize) -> String {
 // literal newline breaks gpui's ellipsis logic and would be a cursor move in a
 // cell grid).
 pub use comet_proto::view::{single_line, tool_chip_content};
-
-/// Analytic expanded-chips height — no measurement needed for the fold tween.
-pub fn chips_height(count: usize) -> f32 {
-    if count == 0 {
-        return 0.0;
-    }
-    CHIPS_TOP_PAD + count as f32 * CHIP_HEIGHT + (count as f32 - 1.0) * CHIP_GAP
-}
 
 // ---------------------------------------------------------------------------
 // Working indicator flavour (pure; rendered by the shell strip)
@@ -859,24 +920,6 @@ struct CachedRows {
     rows: Vec<Row>,
 }
 
-#[derive(Default, Clone, Copy)]
-struct FoldState {
-    /// User pin (click); `None` follows the auto-open rule.
-    open: Option<bool>,
-    /// Bumped per toggle — keys the 200ms height tween.
-    epoch: usize,
-    /// Height at the moment of the toggle (the tween's start). The destination
-    /// is always the *current* target height, so content growth after a toggle
-    /// snaps instead of replaying a stale tween.
-    from: f32,
-    /// When the toggle happened. The tween is armed only for a short window
-    /// after the click: gpui replays an element's animation on REMOUNT, and a
-    /// virtualized row scrolling back into view is a remount — an armed-forever
-    /// tween made every once-collapsed group flash open→closed on each
-    /// reappearance (user report).
-    toggled_at: Option<Instant>,
-}
-
 /// Events the shell listens for.
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
@@ -893,7 +936,6 @@ pub struct Transcript {
     row_cache: HashMap<String, CachedRows>,
     live_parsers: HashMap<String, IncrementalParser>,
     tree_cache: HashMap<String, (usize, Arc<BlockTree>)>,
-    folds: HashMap<SharedString, FoldState>,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -914,6 +956,11 @@ pub struct Transcript {
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
     highlights: HighlightStore,
+    /// Tool groups the user opened. Groups are COLLAPSED by default — a
+    /// settled group is one summary line, and only a click (or a call still
+    /// running) shows more. Keyed by row id, which is stable while the group
+    /// streams, so an expansion survives the group growing.
+    expanded_groups: std::collections::HashSet<SharedString>,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
     /// tick) — restick and escape are direction-aware
@@ -980,12 +1027,12 @@ impl Transcript {
             row_cache: HashMap::new(),
             live_parsers: HashMap::new(),
             tree_cache: HashMap::new(),
-            folds: HashMap::new(),
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             highlights: HighlightStore::default(),
+            expanded_groups: std::collections::HashSet::new(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
             pinned: true,
@@ -1234,10 +1281,10 @@ impl Transcript {
             self.row_cache.clear();
             self.live_parsers.clear();
             self.tree_cache.clear();
-            self.folds.clear();
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
+            self.expanded_groups.clear();
             self.list.reset(0);
             self.pinned = true;
             self.spring.reset();
@@ -1353,19 +1400,6 @@ impl Transcript {
             );
         }
         rows
-    }
-
-    fn toggle_fold(&mut self, row_id: SharedString, tool_count: usize, auto_open: bool) {
-        let entry = self.folds.entry(row_id).or_default();
-        let currently_open = entry.open.unwrap_or(auto_open);
-        entry.from = if currently_open {
-            chips_height(tool_count)
-        } else {
-            0.0
-        };
-        entry.open = Some(!currently_open);
-        entry.epoch += 1;
-        entry.toggled_at = Some(Instant::now());
     }
 
     // ---- attachment read-back (user-attachments.tsx + transcript cache) ----
@@ -1702,9 +1736,7 @@ impl Transcript {
                 }
                 el
             }
-            RowKind::ToolGroup { tools, auto_open } => {
-                self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
-            }
+            RowKind::ToolGroup { tools } => self.render_tool_group(&row.id, tools, &theme, cx),
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
@@ -1862,194 +1894,136 @@ impl Transcript {
         out
     }
 
+    /// A tool group is ONE summary line, collapsed: "Ran cargo, git · edited
+    /// 2 files" behind a chevron. Clicking it opens the call lines beneath —
+    /// consolidated runs of same-kind calls ("Read a, b, c"), one `$ command`
+    /// line per shell call. While a call is still running the group shows
+    /// that one line even when collapsed, so a live turn reads as what the
+    /// agent is doing right now.
     fn render_tool_group(
         &mut self,
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
-        auto_open: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Commands never render as chips — the agent terminal's feed owns
-        // them. The group's Exec items become a "ran N commands" deep-link
-        // pill in the header; the fold (when non-command tools remain) works
-        // as before over the non-exec remainder.
-        let exec_ids: Vec<String> = tools
-            .iter()
-            .filter(|t| matches!(t.call, ToolCall::Exec { .. }))
-            .map(|t| t.id.to_string())
-            .collect();
-        let chips_tools: Vec<ToolItem> = tools
-            .iter()
-            .filter(|t| !matches!(t.call, ToolCall::Exec { .. }))
-            .cloned()
-            .collect();
-
-        let fold = self.folds.get(row_id).copied().unwrap_or_default();
-        let open = fold.open.unwrap_or(auto_open);
-        let target = if open {
-            chips_height(chips_tools.len())
-        } else {
-            0.0
-        };
-
-        // Header (comet tool-group.tsx): a small chevron tile centered over the
-        // chips' guide rail, then the quiet 12px summary.
-        let header = div()
-            .id(SharedString::from(format!("{row_id}-hdr")))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .px(px(4.0))
-            .h(px(26.0))
-            .text_size(px(12.0))
-            // Quiet even when children failed: agents routinely have failed
-            // probes mid-work, and a red HEADER read as "this whole step
-            // broke" (user report). Failures still show on the individual
-            // chips (destructive tint, comet tool-chip.tsx) and in the
-            // summary's "· N failed" count.
-            .text_color(theme.text_muted);
-
-        // Fold affordance — only when non-command chips exist to unfold.
-        let header = if chips_tools.is_empty() {
-            header
-        } else {
-            let summary = tool_group_summary(&chips_tools);
-            let toggle_id = row_id.clone();
-            let chip_count = chips_tools.len();
-            header
+        let expanded = self.expanded_groups.contains(row_id);
+        let toggle_id = row_id.clone();
+        let mut column = div().flex().flex_col().child(
+            div()
+                .id(SharedString::from(format!("{row_id}-summary")))
+                .h(px(TOOL_LINE_HEIGHT))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.0))
                 .cursor_pointer()
-                .hover(|s| s.text_color(Theme::dark().text))
+                // No indent and no tint, ever: the summary is a sentence
+                // in the reply's own column, just a quieter one. The
+                // chevron trails the text so nothing pushes it right.
+                .text_size(px(TOOL_SUMMARY_SIZE))
+                .text_color(theme.text_faint)
+                .hover(|s| s.text_color(theme.text_muted))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_fold(toggle_id.clone(), chip_count, auto_open);
-                    cx.notify();
+                    this.toggle_group(&toggle_id, cx);
                 }))
                 .child(
+                    // The group's own mark, at the reply's left edge:
+                    // sliders, because a run is the agent adjusting
+                    // things rather than saying them.
                     div()
-                        .size(px(18.0))
                         .flex_none()
-                        .rounded(px(5.0))
-                        .bg(crate::theme::white_alpha(0.06))
+                        .size(px(TOOL_ICON_SIZE))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(10.0))
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .child(SharedString::from(if open { "▾" } else { "▸" })),
+                        .child(
+                            crate::icons::icon(crate::icons::TUNING)
+                                .size(px(TOOL_ICON_SIZE))
+                                .text_color(theme.text_faint),
+                        ),
                 )
                 .child(
                     div()
                         .min_w_0()
                         .truncate()
-                        .child(SharedString::from(summary)),
+                        .child(SharedString::from(group_summary(tools))),
                 )
-        };
-
-        // The commands deep-link: a quiet pill with a terminal glyph, opening
-        // the agent-terminal dock anchored at THIS group's commands. Never a
-        // fold toggle — stop_propagation keeps a mixed group's header click
-        // from also firing when the pill is the target.
-        let header = if exec_ids.is_empty() {
-            header
-        } else {
-            let pill_ids = exec_ids.clone();
-            let exec_failed = tools
-                .iter()
-                .filter(|t| matches!(t.call, ToolCall::Exec { .. }) && t.is_error)
-                .count();
-            let label = ran_commands_label(exec_ids.len(), exec_failed);
-            header.child(
-                div()
-                    .id(SharedString::from(format!("{row_id}-exec")))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .flex_none()
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(Theme::dark().text))
-                    .on_click(cx.listener(move |_this, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(TranscriptEvent::OpenAgentTerminal {
-                            tool_ids: pill_ids.clone(),
-                        });
-                    }))
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .flex_none()
-                            .rounded(px(5.0))
-                            // A failed command tints the tile red — visible
-                            // without opening the dock.
-                            .bg(if exec_failed > 0 {
-                                theme.danger.opacity(0.12)
-                            } else {
-                                crate::theme::white_alpha(0.06)
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                crate::icons::icon(crate::icons::TERMINAL)
-                                    .size(px(10.0))
-                                    .text_color(if exec_failed > 0 {
-                                        theme.danger
-                                    } else {
-                                        theme.text_muted.opacity(0.7)
-                                    }),
-                            ),
-                    )
-                    .child(div().flex_none().child(SharedString::from(label))),
-            )
-        };
-
-        if chips_tools.is_empty() {
-            return div().flex().flex_col().child(header).into_any_element();
+                .child(
+                    // gpui paints an svg with its OWN color — it does not
+                    // inherit the row's, so the chevron says it here.
+                    crate::icons::icon(if expanded {
+                        crate::icons::ALT_ARROW_DOWN
+                    } else {
+                        crate::icons::ALT_ARROW_RIGHT
+                    })
+                    .size(px(9.0))
+                    .text_color(theme.text_faint),
+                ),
+        );
+        let running_id = latest_running(tools).map(|t| t.id.clone());
+        if expanded {
+            let runs = consolidate_runs(tools);
+            let mut ix = 0usize;
+            for run in &runs {
+                if run.is_exec {
+                    // Commands stay verbatim, one line each, deep-linked to
+                    // their own place in the agent terminal's feed.
+                    for item in &run.items {
+                        let live = running_id.as_ref() == Some(&item.id);
+                        let key = format!("cmd{ix}");
+                        column = column.child(command_line(row_id, &key, item, live, theme, cx));
+                        ix += 1;
+                    }
+                } else {
+                    let live = run.items.iter().any(|i| running_id.as_ref() == Some(&i.id));
+                    column = column.child(run_line(row_id, ix, run, live, theme, cx));
+                    ix += 1;
+                }
+            }
+        } else if let Some(running) = latest_running(tools) {
+            // Collapsed and still working: the one line worth showing is what
+            // the agent is doing right now.
+            let (label, detail) = tool_chip_content(&running.call);
+            column = column.child(match &running.call {
+                ToolCall::Exec { .. } => command_line(
+                    row_id,
+                    "live",
+                    &RunItem {
+                        id: running.id.clone(),
+                        detail,
+                        failed: running.is_error,
+                    },
+                    true,
+                    theme,
+                    cx,
+                ),
+                _ => tool_row(
+                    row_id,
+                    "live",
+                    lower_label(label),
+                    tool_icon_path(&running.call),
+                    detail,
+                    true,
+                    theme,
+                )
+                .into_any_element(),
+            });
         }
+        column.into_any_element()
+    }
 
-        let chips = div()
-            .pt(px(CHIPS_TOP_PAD))
-            .flex()
-            .flex_col()
-            .gap(px(CHIP_GAP))
-            .children(chips_tools.iter().map(|tool| tool_chip(tool, theme)));
-
-        // Fold body: 200ms committed-height tween on a USER toggle only — and
-        // only within a short window of the click. Auto-open (streaming) and
-        // content growth never tween, and a SETTLED fold renders at its static
-        // height: leaving the tween armed replayed it on every remount, which
-        // in a virtualized list means every scroll-back-into-view (only `open`
-        // toggles animate — composes with the stick spring).
-        let animating = fold.epoch > 0
-            && fold
-                .toggled_at
-                .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
-        let body: AnyElement = if animating {
-            let from = fold.from;
-            div()
-                .overflow_hidden()
-                .child(chips)
-                .with_animation(
-                    SharedString::from(format!("{row_id}-fold{}", fold.epoch)),
-                    RESIZE.animation(),
-                    move |el, t| el.h(px(motion::lerp(from, target, t))),
-                )
-                .into_any_element()
-        } else {
-            div()
-                .overflow_hidden()
-                .h(px(target))
-                .child(chips)
-                .into_any_element()
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(body)
-            .into_any_element()
+    /// Open/close a group and re-splice its row: the list caches measured
+    /// heights, so a row that changed height must be replaced, not just
+    /// repainted.
+    fn toggle_group(&mut self, row_id: &SharedString, cx: &mut Context<Self>) {
+        if !self.expanded_groups.remove(row_id) {
+            self.expanded_groups.insert(row_id.clone());
+        }
+        if let Some(ix) = self.rows.iter().position(|r| &r.id == row_id) {
+            self.list.splice(ix..ix + 1, 1);
+        }
+        cx.notify();
     }
 }
 
@@ -2177,104 +2151,207 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
         .into_any_element()
 }
 
-/// A small glyph standing in for the tool's icon (comet uses an icon set; a
-/// quiet monochrome character keeps the tile without shipping SVGs).
-/// The glyph for a tool call (comet tool-chip.tsx `toolIcon`, Solar set).
-fn tool_icon_path(call: &ToolCall) -> &'static str {
-    match call {
-        ToolCall::Exec { .. } => crate::icons::COMMAND,
-        ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,
-        ToolCall::WriteFile { .. } => crate::icons::DOCUMENT_ADD,
-        ToolCall::EditFile { .. } => crate::icons::PEN,
-        ToolCall::Search { .. } => crate::icons::MAGNIFER,
-        ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
-        ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
-        ToolCall::Todo { .. } => crate::icons::CHECKLIST,
-        ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
+/// A hover tooltip listing a consolidated run's full detail lines — the
+/// app's first tooltip (gpui gives a builder hook, no card). Consolidation
+/// truncates to one line; the full list rides here so nothing is hidden.
+struct RunTooltip {
+    lines: Vec<String>,
+    /// Exec commands read better in the mono face; paths stay sans.
+    mono: bool,
+}
+
+impl Render for RunTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let font = if self.mono {
+            theme.font_mono.clone()
+        } else {
+            theme.font_sans.clone()
+        };
+        // Width from the longest line (~7.2px per 12px glyph, erring wide),
+        // clamped to a definite value: gpui only soft-wraps against a
+        // DEFINITE width (a content-sized max_w box lays lines out unwrapped
+        // and clips them), but a fixed 480 leaves short lists in an empty
+        // box. Past the clamp, whitespace_normal wraps — nothing clips.
+        let longest = self
+            .lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        let width = (longest as f32 * 7.2 + 20.0).clamp(140.0, 480.0);
+        div()
+            .w(px(width))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .px(px(8.0))
+            .py(px(6.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .font_family(font)
+            .text_size(px(12.0))
+            .text_color(theme.text_muted)
+            .children(self.lines.iter().map(|line| {
+                div()
+                    .whitespace_normal()
+                    .child(SharedString::from(line.clone()))
+            }))
     }
 }
 
-/// One tool chip row: a guide rail on the left (continuous across stacked
-/// chips — the rail spans the row's full height) threading the chips to their
-/// group toggle, then the chip card (comet tool-chip.tsx).
-fn tool_chip(tool: &ToolItem, theme: &Theme) -> AnyElement {
-    let (label, detail) = tool_chip_content(&tool.call);
-    let tint = if tool.is_error {
-        theme.danger
-    } else {
-        theme.text_muted
-    };
+/// One call line: a glyph, the lowercase kind, then the detail —
+/// `▤ read crates/ui/src/{a.rs,b.rs}`. Every kind takes this exact shape
+/// (the shell is just "exec"), and nothing here paints brighter than the
+/// summary above it: the group is one quiet stack, not a table.
+///
+/// The row owns the color and children only dim against it; a child that
+/// painted its own color would ignore the row's hover.
+fn tool_row(
+    row_id: &SharedString,
+    key: &str,
+    label: &'static str,
+    icon: &'static str,
+    detail: String,
+    running: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let id = SharedString::from(format!("{row_id}-{key}"));
     div()
-        .h(px(CHIP_HEIGHT))
-        .w_full()
-        .flex_none()
+        .id(id.clone())
+        .h(px(TOOL_LINE_HEIGHT))
+        .pl(px(TOOL_ROW_PAD))
         .flex()
         .flex_row()
         .items_center()
-        // Guide rail: hairline centered under the header's chevron tile.
+        .gap(px(6.0))
+        .text_color(theme.text_faint)
         .child(
             div()
-                .ml(px(12.0))
-                .h_full()
-                .w(px(1.0))
                 .flex_none()
-                .bg(crate::theme::white_alpha(0.08)),
+                .size(px(TOOL_ICON_SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(if running {
+                    // The same mini gradient spinner the working strip uses,
+                    // so "in flight" reads identically wherever it appears.
+                    crate::loaders::mini_gradient_spinner(
+                        SharedString::from(format!("{id}-spin")),
+                        2.0,
+                    )
+                    .into_any_element()
+                } else {
+                    crate::icons::icon(icon)
+                        .size(px(TOOL_ICON_SIZE - 1.0))
+                        .text_color(theme.text_faint)
+                        .into_any_element()
+                }),
         )
         .child(
             div()
-                .ml(px(12.0))
-                .h(px(CHIP_CARD_HEIGHT))
+                .flex_none()
+                .text_size(px(TOOL_LABEL_SIZE))
+                .child(SharedString::from(label)),
+        )
+        .child(
+            div()
                 .min_w_0()
                 .flex_1()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .overflow_hidden()
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(crate::theme::white_alpha(0.07))
-                .bg(crate::theme::white_alpha(0.03))
-                .px(px(8.0))
-                .text_size(px(12.0))
-                .child(
-                    // Icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
-                    // icon size-3).
-                    div()
-                        .size(px(18.0))
-                        .flex_none()
-                        .rounded(px(5.0))
-                        .bg(crate::theme::white_alpha(0.08))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(tool_icon_path(&tool.call))
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(tint)
-                        .child(SharedString::from(label)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(if tool.is_error {
-                            theme.danger
-                        } else {
-                            theme.text.opacity(0.85)
-                        })
-                        .child(SharedString::from(detail)),
-                ),
+                .truncate()
+                .opacity(0.8)
+                .font_family(theme.font_mono.clone())
+                .text_size(px(TOOL_DETAIL_SIZE))
+                .child(SharedString::from(detail)),
         )
+}
+
+/// One consolidated same-kind run on a single line: sibling paths fold into
+/// brace groups (`crates/ui/src/{transcript.rs,composer.rs}`), and whatever
+/// still overflows truncates — row heights are uniform by construction, and
+/// the untruncated list rides the hover tooltip. Clicking opens the dock at
+/// this run's calls: every tool is in the agent terminal's history, so every
+/// line here leads somewhere.
+fn run_line(
+    row_id: &SharedString,
+    ix: usize,
+    run: &ToolRun,
+    running: bool,
+    theme: &Theme,
+    cx: &mut Context<Transcript>,
+) -> AnyElement {
+    let details: Vec<String> = run.items.iter().map(|i| i.detail.clone()).collect();
+    let mut detail = comet_proto::view::coalesce_paths(&details);
+    let failures = run.failures();
+    if failures > 0 {
+        // Failures never recolor the line — a red row is an alarm, and a
+        // tool that failed is just news. It says so in words instead.
+        detail = format!("{detail} · {failures} failed");
+    }
+    let tool_ids: Vec<String> = run.items.iter().map(|i| i.id.to_string()).collect();
+    let line = tool_row(
+        row_id,
+        &format!("run{ix}"),
+        run.label,
+        run.icon,
+        detail,
+        running,
+        theme,
+    )
+    .cursor_pointer()
+    .hover(|s| s.text_color(theme.text))
+    .on_click(cx.listener(move |_this, _, _, cx| {
+        cx.stop_propagation();
+        cx.emit(TranscriptEvent::OpenAgentTerminal {
+            tool_ids: tool_ids.clone(),
+        });
+    }));
+    if run.items.len() > 1 {
+        line.tooltip(move |_window, cx| {
+            cx.new(|_| RunTooltip {
+                lines: details.clone(),
+                mono: true,
+            })
+            .into()
+        })
         .into_any_element()
+    } else {
+        line.into_any_element()
+    }
+}
+
+/// One shell command, verbatim. Clicking opens the agent terminal dock at
+/// this command's place in the feed — the transcript shows what ran, the
+/// dock owns the output.
+fn command_line(
+    row_id: &SharedString,
+    key: &str,
+    item: &RunItem,
+    running: bool,
+    theme: &Theme,
+    cx: &mut Context<Transcript>,
+) -> AnyElement {
+    let tool_ids = vec![item.id.to_string()];
+    tool_row(
+        row_id,
+        key,
+        "exec",
+        crate::icons::TERMINAL,
+        item.detail.clone(),
+        running,
+        theme,
+    )
+    .cursor_pointer()
+    .hover(|s| s.text_color(theme.text))
+    .on_click(cx.listener(move |_this, _, _, cx| {
+        cx.stop_propagation();
+        cx.emit(TranscriptEvent::OpenAgentTerminal {
+            tool_ids: tool_ids.clone(),
+        });
+    }))
+    .into_any_element()
 }
 
 fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
@@ -2660,9 +2737,10 @@ mod tests {
         // Sibling markdown blocks from the same part: md block gap.
         assert_eq!(top_gap_for(Some(&rows[0]), &rows[1]), render::MD_BLOCK_GAP);
         assert_eq!(top_gap_for(Some(&rows[1]), &rows[2]), render::MD_BLOCK_GAP);
-        // Markdown → tool group and tool group → next part: block gap.
-        assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), GAP_BLOCK);
-        assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), GAP_BLOCK);
+        // Markdown → tool group and tool group → next part: the tight tool
+        // gap on both sides — a group belongs to the text around it.
+        assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), GAP_TOOLS);
+        assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), GAP_TOOLS);
         // Turn starts get the turn gap regardless.
         assert_eq!(top_gap_for(None, &rows[0]), GAP_TURN);
     }
@@ -2688,36 +2766,6 @@ mod tests {
         };
         assert_eq!(tools.len(), 2);
         assert!(rows[0].turn_start && !rows[1].turn_start);
-    }
-
-    #[test]
-    fn trailing_group_auto_opens_only_while_streaming() {
-        let parts = vec![text_part("t0", "hi"), tool_part("a", "ls")];
-        let streaming = assistant("m3", MessageStatus::Streaming, parts.clone());
-        let rows = rows_for_entry(&streaming, false, &mut parse);
-        let RowKind::ToolGroup { auto_open, .. } = rows[1].kind else {
-            panic!()
-        };
-        assert!(auto_open, "trailing group opens while streaming");
-
-        let complete = assistant("m3", MessageStatus::Complete, parts);
-        let rows = rows_for_entry(&complete, false, &mut parse);
-        let RowKind::ToolGroup { auto_open, .. } = rows[1].kind else {
-            panic!()
-        };
-        assert!(!auto_open);
-
-        // A non-trailing group never auto-opens.
-        let mid = assistant(
-            "m4",
-            MessageStatus::Streaming,
-            vec![tool_part("a", "ls"), text_part("t0", "hi")],
-        );
-        let rows = rows_for_entry(&mid, false, &mut parse);
-        let RowKind::ToolGroup { auto_open, .. } = rows[0].kind else {
-            panic!()
-        };
-        assert!(!auto_open);
     }
 
     #[test]
@@ -2816,15 +2864,21 @@ mod tests {
     }
 
     #[test]
-    fn tool_group_summaries() {
-        let exec = |c: &str| ToolItem {
-            id: "e".into(),
+    fn consolidate_runs_preserves_order_and_merges_same_kind() {
+        let exec = |id: &str, c: &str| ToolItem {
+            id: id.into(),
             call: ToolCall::Exec { command: c.into() },
             is_error: false,
             resolved: true,
         };
-        let edit = |p: &str| ToolItem {
-            id: "f".into(),
+        let read = |id: &str, p: &str| ToolItem {
+            id: id.into(),
+            call: ToolCall::ReadFile { path: p.into() },
+            is_error: false,
+            resolved: true,
+        };
+        let edit = |id: &str, p: &str| ToolItem {
+            id: id.into(),
             call: ToolCall::EditFile {
                 path: p.into(),
                 old_string: None,
@@ -2833,80 +2887,97 @@ mod tests {
             is_error: false,
             resolved: true,
         };
-        let tools = vec![
-            exec("ls"),
-            exec("pwd"),
-            exec("make"),
-            edit("a.rs"),
-            edit("b.rs"),
-        ];
-        assert_eq!(
-            tool_group_summary(&tools),
-            "Ran 3 commands · edited 2 files"
-        );
-        // Distinct-path dedupe: editing one file twice counts once.
-        let tools = vec![edit("a.rs"), edit("a.rs")];
-        assert_eq!(tool_group_summary(&tools), "Edited 1 file");
-        // Failures append.
-        let mut failing = exec("boom");
+        let details = |run: &ToolRun| {
+            run.items
+                .iter()
+                .map(|i| i.detail.clone())
+                .collect::<Vec<_>>()
+        };
+        let ids = |run: &ToolRun| {
+            run.items
+                .iter()
+                .map(|i| i.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Runs form in order; a kind change breaks the run even across execs.
+        let runs = consolidate_runs(&[
+            read("r1", "a.rs"),
+            read("r2", "b.rs"),
+            exec("e1", "ls"),
+            exec("e2", "pwd"),
+            read("r3", "c.rs"),
+            edit("f1", "a.rs"),
+        ]);
+        assert_eq!(runs.len(), 4);
+        // Labels read lowercase beside their glyph.
+        assert_eq!((runs[0].label, runs[0].is_exec), ("read", false));
+        assert_eq!(runs[0].icon, crate::icons::DOCUMENT);
+        assert_eq!(details(&runs[0]), ["a.rs", "b.rs"]);
+        assert_eq!((runs[1].label, runs[1].is_exec), ("exec", true));
+        // Commands keep their own item each — they render one line apiece.
+        assert_eq!(ids(&runs[1]), ["e1", "e2"]);
+        assert_eq!(details(&runs[1]), ["ls", "pwd"]);
+        assert_eq!(details(&runs[2]), ["c.rs"]);
+        assert_eq!(runs[3].label, "edit");
+
+        // A singleton tool still renders as its one-line run.
+        let runs = consolidate_runs(&[read("r1", "foo.rs")]);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(details(&runs[0]), ["foo.rs"]);
+
+        // Failures count per run, not per group, and stay on their member.
+        let mut failing = exec("e3", "boom");
         failing.is_error = true;
-        assert_eq!(tool_group_summary(&[failing]), "Ran 1 command · 1 failed");
-        // Reads / searches / misc.
-        let tools = vec![
-            ToolItem {
-                id: "r".into(),
-                call: ToolCall::ReadFile { path: "x".into() },
-                is_error: false,
-                resolved: true,
+        let runs = consolidate_runs(&[exec("e1", "ls"), failing, read("r1", "x")]);
+        assert_eq!(runs[0].failures(), 1);
+        assert!(!runs[0].items[0].failed && runs[0].items[1].failed);
+        assert_eq!(runs[1].failures(), 0);
+    }
+
+    #[test]
+    fn collapsed_group_shows_the_running_call_only() {
+        let call = |id: &str, cmd: &str, resolved: bool| ToolItem {
+            id: id.into(),
+            call: ToolCall::Exec {
+                command: cmd.into(),
             },
+            is_error: false,
+            resolved,
+        };
+        // Nothing in flight: the summary stands alone.
+        assert!(latest_running(&[call("e1", "ls", true)]).is_none());
+        // The LATEST unresolved call is the one worth showing — earlier ones
+        // are already history by the time a later call starts.
+        let tools = [
+            call("e1", "ls", true),
+            call("e2", "cargo build", false),
+            call("e3", "cargo test", false),
+        ];
+        assert_eq!(latest_running(&tools).map(|t| t.id.as_ref()), Some("e3"));
+    }
+
+    #[test]
+    fn group_summary_names_what_ran() {
+        let tools = [
             ToolItem {
-                id: "g".into(),
-                call: ToolCall::Glob {
-                    pattern: "*.rs".into(),
+                id: "e1".into(),
+                call: ToolCall::Exec {
+                    command: "cargo test".into(),
                 },
                 is_error: false,
                 resolved: true,
             },
             ToolItem {
-                id: "w".into(),
-                call: ToolCall::WebSearch { query: "q".into() },
+                id: "r1".into(),
+                call: ToolCall::ReadFile {
+                    path: "a.rs".into(),
+                },
                 is_error: false,
                 resolved: true,
             },
         ];
-        assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
-    }
-
-    #[test]
-    fn exec_only_gates_the_deep_link_pill() {
-        let exec = |c: &str| ToolItem {
-            id: "e".into(),
-            call: ToolCall::Exec { command: c.into() },
-            is_error: false,
-            resolved: true,
-        };
-        assert!(exec_only(&[exec("ls"), exec("pwd")]));
-        assert!(exec_only(&[exec("ls")]));
-        // A single non-command tool keeps the fold (chips carry real info).
-        let mut mixed = vec![exec("ls")];
-        mixed.push(ToolItem {
-            id: "r".into(),
-            call: ToolCall::ReadFile { path: "x".into() },
-            is_error: false,
-            resolved: true,
-        });
-        assert!(!exec_only(&mixed));
-        assert!(!exec_only(&[]));
-    }
-
-    #[test]
-    fn ran_commands_label_pluralizes_and_counts_failures() {
-        assert_eq!(ran_commands_label(1, 0), "ran 1 command");
-        assert_eq!(ran_commands_label(3, 0), "ran 3 commands");
-        // Exec failures stay visible in the transcript — the summary no
-        // longer counts them (its chips are non-exec only).
-        assert_eq!(ran_commands_label(3, 1), "ran 3 commands · 1 failed");
-        assert_eq!(ran_commands_label(1, 1), "ran 1 command · 1 failed");
+        assert_eq!(group_summary(&tools), "Ran cargo · read 1 file");
     }
 
     #[test]
@@ -2929,7 +3000,7 @@ mod tests {
             tool_chip_content(&ToolCall::Exec {
                 command: "cargo test".into()
             }),
-            ("Run", "cargo test".to_string())
+            ("Exec", "cargo test".to_string())
         );
         assert_eq!(
             tool_chip_content(&ToolCall::Search {
@@ -2973,11 +3044,9 @@ mod tests {
         let (label, detail) = tool_chip_content(&ToolCall::Exec {
             command: "set -e\nfixture_in_original=0\n\tgrep -c  \"x\"".into(),
         });
-        assert_eq!(label, "Run");
+        assert_eq!(label, "Exec");
         assert_eq!(detail, "set -e fixture_in_original=0 grep -c \"x\"");
         assert!(!detail.contains('\n'));
-        // The chip row height is a constant, independent of content shape.
-        assert_eq!(chips_height(1), CHIPS_TOP_PAD + CHIP_HEIGHT);
         // Every detail kind is sanitized (MCP inputs / queries are model text).
         let (_, q) = tool_chip_content(&ToolCall::WebSearch {
             query: "line one\nline two".into(),
@@ -3040,16 +3109,6 @@ mod tests {
         assert_eq!(single_line("plain"), "plain");
         assert_eq!(single_line(""), "");
         assert_eq!(single_line("\n\n"), "");
-    }
-
-    #[test]
-    fn chips_height_is_analytic() {
-        assert_eq!(chips_height(0), 0.0);
-        assert_eq!(chips_height(1), CHIPS_TOP_PAD + CHIP_HEIGHT);
-        assert_eq!(
-            chips_height(3),
-            CHIPS_TOP_PAD + 3.0 * CHIP_HEIGHT + 2.0 * CHIP_GAP
-        );
     }
 
     #[test]

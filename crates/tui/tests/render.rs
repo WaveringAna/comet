@@ -201,10 +201,10 @@ fn a_populated_frame_shows_the_chrome_sidebar_and_transcript() {
     );
     // Tool calls collapse into a group summary; the newest group shows chips.
     assert!(
-        screen.contains("Ran 1 command"),
+        screen.contains("Ran cargo"),
         "tool group summary missing:\n{screen}"
     );
-    assert!(screen.contains("Run"), "tool chip label missing:\n{screen}");
+    assert!(screen.contains("Exec"), "tool chip label missing:\n{screen}");
     assert!(
         screen.contains("cargo test -p comet-rpc"),
         "tool detail missing:\n{screen}"
@@ -625,7 +625,7 @@ fn tool_runs_collapse_into_a_group() {
     let screen = joined(&snapshot(&mut app, 100, 26));
     // One summary line for the whole run, using the shared wording.
     assert!(
-        screen.contains("Ran 1 command · edited 1 file · read 1 file"),
+        screen.contains("Ran cargo · edited 1 file · read 1 file"),
         "group summary missing:\n{screen}"
     );
     // Not one row per tool: the individual paths stay folded away, because this
@@ -1912,7 +1912,7 @@ fn a_tool_group_is_plain_rows_with_air_around_it() {
             .position(|row| row.contains(needle))
             .unwrap_or_else(|| panic!("{needle:?} missing:\n{screen}"))
     };
-    let (first, group, second) = (at("first"), at("Ran 1 command"), at("second"));
+    let (first, group, second) = (at("first"), at("Ran cargo"), at("second"));
     assert!(
         group > first + 1,
         "the tool group needs air above:\n{screen}"
@@ -1924,7 +1924,7 @@ fn a_tool_group_is_plain_rows_with_air_around_it() {
         .draw(|frame| render::draw(frame, &mut app))
         .unwrap();
     let buffer = terminal.backend().buffer();
-    let x = column_of(&rows[group], rows[group].find("Ran 1").unwrap());
+    let x = column_of(&rows[group], rows[group].find("Ran cargo").unwrap());
     assert_eq!(
         buffer[(x, group as u16)].bg,
         app.theme.base,
