@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use comet_doc::SessionMessageEntry;
 use comet_proto::view::ConnectionStatus;
-use comet_proto::{AuthState, Chat, Device, Session, Project};
+use comet_proto::{AuthState, Chat, Device, Project, Session};
 use comet_rpc::{RpcClient, methods};
 use tokio::sync::mpsc;
 

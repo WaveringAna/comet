@@ -85,7 +85,11 @@ async fn spawns_one_pi_process_in_the_session_folder_and_maps_rpc_events() {
             _ => None,
         })
         .collect();
-    assert_eq!(text_events.len(), 1, "pi's completion frame must not duplicate deltas");
+    assert_eq!(
+        text_events.len(),
+        1,
+        "pi's completion frame must not duplicate deltas"
+    );
     assert!(text_events[0].contains(folder.path().to_str().unwrap()));
     assert!(events.iter().any(|event| matches!(event, AgentEvent::AssistantMessageCompleted { assistant_message_id } if assistant_message_id == "m1")));
     assert!(matches!(
@@ -126,9 +130,11 @@ async fn assistant_message_errors_are_not_reported_as_empty_successes() {
         event,
         AgentEvent::Error { message } if message == "the selected pi model is unavailable"
     )));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, AgentEvent::AssistantMessageCompleted { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AssistantMessageCompleted { .. }))
+    );
     assert!(matches!(
         events.last(),
         Some(AgentEvent::Done {

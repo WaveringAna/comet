@@ -416,7 +416,10 @@ async fn projects_sync_stamps_git_presence_and_reacts_to_git_init() {
     let project = loop {
         {
             let projects = projects_rx.borrow().clone();
-            if let Some(project) = projects.iter().find(|s| s.id == "project-1" && s.git_detected) {
+            if let Some(project) = projects
+                .iter()
+                .find(|s| s.id == "project-1" && s.git_detected)
+            {
                 break project.clone();
             }
         }
@@ -425,7 +428,10 @@ async fn projects_sync_stamps_git_presence_and_reacts_to_git_init() {
             .expect("git init detected before timeout")
             .expect("watch alive");
     };
-    assert!(project.checkout_id.is_some(), "git project gains a checkout id");
+    assert!(
+        project.checkout_id.is_some(),
+        "git project gains a checkout id"
+    );
     core.shutdown().await;
 }
 

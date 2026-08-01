@@ -22,7 +22,7 @@ use comet_proto::view::{
     format_time_ago,
 };
 use comet_proto::{
-    AuthState, Chat, ChatIndicator, Device, RunRequest, SandboxLevel, Session, Project,
+    AuthState, Chat, ChatIndicator, Device, Project, RunRequest, SandboxLevel, Session,
 };
 use comet_rpc::methods;
 
@@ -811,7 +811,9 @@ impl App {
             .get(&project_id)
             .filter(|id| {
                 self.chats.iter().any(|chat| {
-                    &&chat.id == id && !chat.archived && chat.project_id.as_deref() == Some(&project_id)
+                    &&chat.id == id
+                        && !chat.archived
+                        && chat.project_id.as_deref() == Some(&project_id)
                 })
             })
             .cloned();
@@ -819,7 +821,9 @@ impl App {
             // `chats` is recency-sorted, so the first match is the newest.
             self.chats
                 .iter()
-                .find(|chat| !chat.archived && chat.project_id.as_deref() == Some(project_id.as_str()))
+                .find(|chat| {
+                    !chat.archived && chat.project_id.as_deref() == Some(project_id.as_str())
+                })
                 .map(|chat| chat.id.clone())
         });
 
@@ -977,7 +981,10 @@ impl App {
         // or abandoned.
         let mut effects = self.select_chat(None);
         self.rebuild_rows();
-        if let Some(project) = self.projects.iter().find(|project| project.id == project_id)
+        if let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
             && project.git_detected
         {
             effects.push(Command::ListRefs {
@@ -1000,7 +1007,9 @@ impl App {
     /// The draft's project, if it still exists.
     fn draft_project(&self) -> Option<&Project> {
         let draft = self.draft.as_ref()?;
-        self.projects.iter().find(|project| project.id == draft.project_id)
+        self.projects
+            .iter()
+            .find(|project| project.id == draft.project_id)
     }
 
     /// The project a new session belongs to: the one under the cursor, else the
@@ -1009,7 +1018,8 @@ impl App {
         match self.rows.get(self.cursor) {
             Some(Row::Project { id, .. }) => return Some(id.clone()),
             Some(Row::Chat {
-                project_id: Some(id), ..
+                project_id: Some(id),
+                ..
             }) => return Some(id.clone()),
             _ => {}
         }

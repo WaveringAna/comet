@@ -185,7 +185,10 @@ impl Harness for PiHarness {
                 "pi --list-models returned no models".into(),
             ));
         }
-        Ok(order_pi_models(models, query_pi_default_model(&executable).await))
+        Ok(order_pi_models(
+            models,
+            query_pi_default_model(&executable).await,
+        ))
     }
 
     async fn run(
@@ -514,9 +517,12 @@ async fn query_pi_default_model(executable: &PathBuf) -> Option<String> {
         .ok()?;
     let mut stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
-    write_command(&mut stdin, json!({ "id": "nova-model-state", "type": "get_state" }))
-        .await
-        .ok()?;
+    write_command(
+        &mut stdin,
+        json!({ "id": "nova-model-state", "type": "get_state" }),
+    )
+    .await
+    .ok()?;
     let mut lines = BufReader::new(stdout).lines();
     let model = tokio::time::timeout(Duration::from_secs(2), async {
         while let Ok(Some(line)) = lines.next_line().await {
@@ -643,7 +649,8 @@ fn tool_result_output(result: &Value) -> (Option<String>, bool) {
             }),
         _ => None,
     };
-    text.map(tail_cap).map_or((None, false), |(t, capped)| (Some(t), capped))
+    text.map(tail_cap)
+        .map_or((None, false), |(t, capped)| (Some(t), capped))
 }
 
 /// Keep the last [`TOOL_OUTPUT_MAX_BYTES`] of `text`, starting on a char

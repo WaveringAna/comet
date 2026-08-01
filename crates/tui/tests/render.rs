@@ -10,7 +10,7 @@
 use chrono::Utc;
 use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use comet_proto::view::ConnectionStatus;
-use comet_proto::{AuthState, Chat, Session, SessionStatus, Project, ToolCall, UserProfile};
+use comet_proto::{AuthState, Chat, Project, Session, SessionStatus, ToolCall, UserProfile};
 use comet_tui::app::App;
 use comet_tui::keys::{Action, Focus};
 use comet_tui::link::Update;
@@ -204,7 +204,10 @@ fn a_populated_frame_shows_the_chrome_sidebar_and_transcript() {
         screen.contains("Ran cargo"),
         "tool group summary missing:\n{screen}"
     );
-    assert!(screen.contains("Exec"), "tool chip label missing:\n{screen}");
+    assert!(
+        screen.contains("Exec"),
+        "tool chip label missing:\n{screen}"
+    );
     assert!(
         screen.contains("cargo test -p comet-rpc"),
         "tool detail missing:\n{screen}"

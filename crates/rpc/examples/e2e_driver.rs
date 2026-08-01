@@ -150,7 +150,9 @@ async fn main() {
         |item| {
             item.as_array()?
                 .iter()
-                .find(|project| project.get("id").and_then(|v| v.as_str()) == Some(project_id.as_str()))
+                .find(|project| {
+                    project.get("id").and_then(|v| v.as_str()) == Some(project_id.as_str())
+                })
                 .and_then(|project| project.get("deviceId")?.as_str().map(str::to_string))
         },
     )

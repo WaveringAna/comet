@@ -204,7 +204,8 @@ impl Shell {
                         });
                     }
                     Err(err) => {
-                        shell.sidebar_notice = Some(format!("Couldn't create the session: {err}").into());
+                        shell.sidebar_notice =
+                            Some(format!("Couldn't create the session: {err}").into());
                     }
                 }
                 cx.notify();
@@ -216,7 +217,11 @@ impl Shell {
     // ---- sidebar sections ----
 
     /// The "Projects" section: tracked header + add button, then a row per project.
-    pub(super) fn render_projects_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_projects_section(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // A drag that ended off-list (no drop event) must not strand the
         // sibling slide offsets.
         if self.project_drag.is_some() && !cx.has_active_drag() {
@@ -257,11 +262,7 @@ impl Shell {
                     })
                     .or_insert(status);
             }
-            (
-                projects,
-                state.selected_project.clone(),
-                attention,
-            )
+            (projects, state.selected_project.clone(), attention)
         };
         // Manual (drag) order overrides the synced creation order — device-
         // local, resolved exactly like the session-tab order.
@@ -359,14 +360,8 @@ impl Shell {
                     let id = project.id.clone();
                     let is_selected = selected.as_deref() == Some(project.id.as_str());
                     let attention = attention.get(&project.id).copied();
-                    let row = self.render_project_row(
-                        ix,
-                        project,
-                        is_selected,
-                        attention,
-                        theme,
-                        cx,
-                    );
+                    let row =
+                        self.render_project_row(ix, project, is_selected, attention, theme, cx);
                     // Sliding transform while a sibling is dragged over —
                     // the session-tab idiom, vertical.
                     match drag {
@@ -400,8 +395,8 @@ impl Shell {
                     .on_drag_move::<ProjectDragPayload>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<ProjectDragPayload>, _, cx| {
                             let from = event.drag(cx).from;
-                            let rel_y = f32::from(event.event.position.y)
-                                - f32::from(event.bounds.top());
+                            let rel_y =
+                                f32::from(event.event.position.y) - f32::from(event.bounds.top());
                             let over = drop_index(rel_y, PROJECT_ROW_SLOT, count);
                             this.update_project_drag_over(from, over, cx);
                         },
@@ -505,7 +500,9 @@ impl Shell {
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, theme.text))
             .bg(motion::hover_blend(&fade_key, rest_bg, theme.element_hover))
-            .when(selected, |el| el.shadow(crate::theme::glass_selected_shadows()))
+            .when(selected, |el| {
+                el.shadow(crate::theme::glass_selected_shadows())
+            })
             .on_hover(motion::hover_listener(fade_key))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -533,13 +530,9 @@ impl Shell {
             // stable — appearing/disappearing at the right edge made the row
             // jitter (user request). Faint at rest, colored under attention.
             .child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .flex_none()
-                    .bg(attention
-                        .map(|status| status_dot_color(status, theme))
-                        .unwrap_or_else(|| crate::theme::white_alpha(0.14))),
+                div().size(px(6.0)).rounded_full().flex_none().bg(attention
+                    .map(|status| status_dot_color(status, theme))
+                    .unwrap_or_else(|| crate::theme::white_alpha(0.14))),
             )
             .child(
                 icon(icons::FOLDER)
@@ -659,7 +652,8 @@ impl Shell {
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
         // bubble to the palette frame (`add_project_key`) instead of moving the
         // text caret — Enter and ⌘Enter are both handled there.
-        let search = cx.new(|cx| ComposerInput::with_context("Search folders…", "PaletteSearch", cx));
+        let search =
+            cx.new(|cx| ComposerInput::with_context("Search folders…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 if let Some(flow) = this.add_project.as_mut() {
@@ -934,8 +928,7 @@ impl Shell {
                 let count = self.add_project_filtered(cx).len();
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(flow) = self.add_project.as_mut() {
-                    flow.active =
-                        popover::menu_step(Some(flow.active), count, delta).unwrap_or(0);
+                    flow.active = popover::menu_step(Some(flow.active), count, delta).unwrap_or(0);
                     // Keep the highlighted row in view as the cursor walks
                     // past the viewport (user-reported: the list didn't
                     // follow the keyboard).
@@ -980,7 +973,18 @@ impl Shell {
                 window.focus(&handle, cx);
             }
         }
-        let (search, error, submit_busy, active, loading, load_error, listing, focus, list_scroll, home) = {
+        let (
+            search,
+            error,
+            submit_busy,
+            active,
+            loading,
+            load_error,
+            listing,
+            focus,
+            list_scroll,
+            home,
+        ) = {
             let flow = self.add_project.as_ref()?;
             (
                 flow.search.clone(),
@@ -1062,7 +1066,11 @@ impl Shell {
             .border_color(hairline)
             .child(
                 key_chip(&theme)
-                    .child(icon(icons::COMMAND).size(px(11.0)).text_color(theme.text_muted.opacity(0.7)))
+                    .child(
+                        icon(icons::COMMAND)
+                            .size(px(11.0))
+                            .text_color(theme.text_muted.opacity(0.7)),
+                    )
                     .child(SharedString::from("K")),
             )
             .child(
@@ -1098,9 +1106,7 @@ impl Shell {
                 let at_home = home.as_deref() == Some(listing.path.as_str());
                 let folded = 1 + home
                     .as_deref()
-                    .filter(|h| {
-                        listing.path == *h || listing.path.starts_with(&format!("{h}/"))
-                    })
+                    .filter(|h| listing.path == *h || listing.path.starts_with(&format!("{h}/")))
                     .map(|h| h.split('/').filter(|s| !s.is_empty()).count())
                     .unwrap_or(0);
                 div()
@@ -1122,7 +1128,9 @@ impl Shell {
                         if at_home {
                             // Standing at home — the Home crumb IS the
                             // current folder.
-                            crumb.text_color(theme.text.opacity(0.85)).into_any_element()
+                            crumb
+                                .text_color(theme.text.opacity(0.85))
+                                .into_any_element()
                         } else {
                             crumb
                                 .text_color(theme.text_muted.opacity(0.55))
@@ -1137,57 +1145,46 @@ impl Shell {
                                 .into_any_element()
                         }
                     })
-                    .children(
-                        segments
-                            .into_iter()
-                            .enumerate()
-                            .skip(folded)
-                            .map(|(ix, (label, full))| {
-                                let is_last = ix == last;
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_color(theme.text_faint.opacity(0.7))
-                                            .child(SharedString::from("/")),
-                                    )
-                                    .child({
-                                        let crumb = div()
-                                            .id(("add-project-crumb", ix))
-                                            .px(px(3.0))
-                                            .rounded(px(4.0))
-                                            .text_color(if is_last {
-                                                theme.text.opacity(0.85)
-                                            } else {
-                                                theme.text_muted.opacity(0.55)
-                                            })
-                                            .child(SharedString::from(label));
-                                        if is_last {
-                                            crumb.into_any_element()
+                    .children(segments.into_iter().enumerate().skip(folded).map(
+                        |(ix, (label, full))| {
+                            let is_last = ix == last;
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_color(theme.text_faint.opacity(0.7))
+                                        .child(SharedString::from("/")),
+                                )
+                                .child({
+                                    let crumb = div()
+                                        .id(("add-project-crumb", ix))
+                                        .px(px(3.0))
+                                        .rounded(px(4.0))
+                                        .text_color(if is_last {
+                                            theme.text.opacity(0.85)
                                         } else {
-                                            crumb
-                                                .cursor_pointer()
-                                                .hover(|s| s.text_color(Theme::dark().text))
-                                                .on_click(cx.listener(
-                                                    move |this, _, _, cx| {
-                                                        if let Some(flow) =
-                                                            this.add_project.as_mut()
-                                                        {
-                                                            flow.browser_repo = false;
-                                                        }
-                                                        this.load_project_folders(
-                                                            Some(full.clone()),
-                                                            cx,
-                                                        );
-                                                    },
-                                                ))
-                                                .into_any_element()
-                                        }
-                                    })
-                            }),
-                    )
+                                            theme.text_muted.opacity(0.55)
+                                        })
+                                        .child(SharedString::from(label));
+                                    if is_last {
+                                        crumb.into_any_element()
+                                    } else {
+                                        crumb
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(Theme::dark().text))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if let Some(flow) = this.add_project.as_mut() {
+                                                    flow.browser_repo = false;
+                                                }
+                                                this.load_project_folders(Some(full.clone()), cx);
+                                            }))
+                                            .into_any_element()
+                                    }
+                                })
+                        },
+                    ))
                     .into_any_element()
             }
             None => div().pt(px(6.0)).into_any_element(),
@@ -1217,7 +1214,10 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.element_hover))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let path = this.add_project.as_ref().and_then(|f| f.browser_path.clone());
+                            let path = this
+                                .add_project
+                                .as_ref()
+                                .and_then(|f| f.browser_path.clone());
                             this.load_project_folders(path, cx);
                         }))
                         .child(SharedString::from("Retry")),
@@ -1255,37 +1255,42 @@ impl Shell {
                         .flex_col()
                         // The app-wide list rhythm (sidebar rows, menu rows): 2px.
                         .gap(px(2.0))
-                .children(rows.into_iter().enumerate().map(|(ix, entry)| {
-                    let name: SharedString = entry.name.clone().into();
-                    let full = crate::pickers::child_path(&base_path, &entry.name);
-                    let is_repo = entry.is_repo;
-                    popover::menu_row_nav(&theme, false, ix == active, format!("add-project-folder-{ix}"))
-                        // The active-tab/session selection language: the wash
-                        // plus the ring-only inset outline.
-                        .when(ix == active, |el| {
-                            el.shadow(crate::theme::glass_selected_shadows())
-                        })
-                        .id(("add-project-folder", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_project_descend(full.clone(), is_repo, cx);
-                        }))
-                        .child(
-                            icon(icons::FOLDER)
-                                .size(px(15.0))
-                                .flex_none()
-                                .text_color(theme.text_muted.opacity(0.8)),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(name))
-                        // Repos get a quiet trailing branch glyph — the row
-                        // you're usually hunting for announces itself.
-                        .when(is_repo, |el| {
-                            el.child(
-                                icon(icons::GIT_BRANCH)
-                                    .size(px(13.0))
-                                    .flex_none()
-                                    .text_color(theme.text_muted.opacity(0.5)),
+                        .children(rows.into_iter().enumerate().map(|(ix, entry)| {
+                            let name: SharedString = entry.name.clone().into();
+                            let full = crate::pickers::child_path(&base_path, &entry.name);
+                            let is_repo = entry.is_repo;
+                            popover::menu_row_nav(
+                                &theme,
+                                false,
+                                ix == active,
+                                format!("add-project-folder-{ix}"),
                             )
-                        })
+                            // The active-tab/session selection language: the wash
+                            // plus the ring-only inset outline.
+                            .when(ix == active, |el| {
+                                el.shadow(crate::theme::glass_selected_shadows())
+                            })
+                            .id(("add-project-folder", ix))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.add_project_descend(full.clone(), is_repo, cx);
+                            }))
+                            .child(
+                                icon(icons::FOLDER)
+                                    .size(px(15.0))
+                                    .flex_none()
+                                    .text_color(theme.text_muted.opacity(0.8)),
+                            )
+                            .child(div().flex_1().min_w_0().truncate().child(name))
+                            // Repos get a quiet trailing branch glyph — the row
+                            // you're usually hunting for announces itself.
+                            .when(is_repo, |el| {
+                                el.child(
+                                    icon(icons::GIT_BRANCH)
+                                        .size(px(13.0))
+                                        .flex_none()
+                                        .text_color(theme.text_muted.opacity(0.5)),
+                                )
+                            })
                         })),
                 )
                 .into_any_element()
@@ -1294,20 +1299,15 @@ impl Shell {
         // ── body: local folder column (crumbs + list).
         //    FIXED height — sparse folders and loading skeletons must not
         //    resize the card (the list fills and scrolls).
-        let body = div()
-            .h(px(330.0))
-            .flex()
-            .flex_row()
-            .items_stretch()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(crumbs)
-                    .child(list),
-            );
+        let body = div().h(px(330.0)).flex().flex_row().items_stretch().child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(crumbs)
+                .child(list),
+        );
 
         // ── footer: the shared key-cap legend voice (popover::key_hint).
         let footer = div()

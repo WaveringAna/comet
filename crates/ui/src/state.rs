@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 
 use comet_doc::SessionMessageEntry;
 use comet_engine::{Engine, EngineConfig, EngineRuntime, rpc::AuthRpc};
-use comet_proto::{AuthState, Chat, ChatIndicator, Device, HarnessId, Session, Project};
+use comet_proto::{AuthState, Chat, ChatIndicator, Device, HarnessId, Project, Session};
 use comet_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
 // ---------------------------------------------------------------------------
@@ -1350,7 +1350,13 @@ mod tests {
         archived.project_id = Some("s1".into());
         archived.archived = true;
         let dangling = chat("dangling", 3, None); // no project id
-        state.apply_chats(vec![in_project_new, in_project_old, other, archived, dangling]);
+        state.apply_chats(vec![
+            in_project_new,
+            in_project_old,
+            other,
+            archived,
+            dangling,
+        ]);
         let ids: Vec<&str> = state
             .chats_in_project("s1")
             .iter()

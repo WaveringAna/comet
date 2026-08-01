@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use comet_proto::{Chat, ChatConfig, Device, Session, SessionStatus, Project};
+use comet_proto::{Chat, ChatConfig, Device, Project, Session, SessionStatus};
 
 use crate::schema::DocError;
 
@@ -164,7 +164,10 @@ impl WorkspaceDoc {
     }
 
     pub fn project(&self, project_id: &str) -> Result<Option<Project>, DocError> {
-        Ok(self.read_projects()?.into_iter().find(|s| s.id == project_id))
+        Ok(self
+            .read_projects()?
+            .into_iter()
+            .find(|s| s.id == project_id))
     }
 
     pub fn read_projects(&self) -> Result<Vec<Project>, DocError> {
@@ -787,7 +790,10 @@ mod tests {
         let ws = WorkspaceDoc::new();
         ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
         let mut options = serde_json::Map::new();
-        options.insert("contextWindow".into(), serde_json::Value::String("1m".into()));
+        options.insert(
+            "contextWindow".into(),
+            serde_json::Value::String("1m".into()),
+        );
         let config = ChatConfig {
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
@@ -941,7 +947,10 @@ mod tests {
             "My Project"
         );
         assert!(ws.rename_project("sp-1", None).unwrap());
-        assert_eq!(ws.project("sp-1").unwrap().unwrap().display_name(), "project");
+        assert_eq!(
+            ws.project("sp-1").unwrap().unwrap().display_name(),
+            "project"
+        );
 
         assert!(
             ws.set_project_git("sp-1", true, Some("checkout-abc"), ts(4_000))
@@ -960,8 +969,10 @@ mod tests {
     #[test]
     fn delete_project_cascades_and_converges_across_peers() {
         let a = WorkspaceDoc::new();
-        a.upsert_project(&project("sp-1", "dev-a", "/tmp/one")).unwrap();
-        a.upsert_project(&project("sp-2", "dev-a", "/tmp/two")).unwrap();
+        a.upsert_project(&project("sp-1", "dev-a", "/tmp/one"))
+            .unwrap();
+        a.upsert_project(&project("sp-2", "dev-a", "/tmp/two"))
+            .unwrap();
         let mut in_project = chat("chat-1", "dev-a");
         in_project.project_id = Some("sp-1".into());
         let mut other = chat("chat-2", "dev-a");
@@ -985,11 +996,19 @@ mod tests {
         for ws in [&a, &b] {
             let state = ws.read_all().unwrap();
             assert_eq!(
-                state.projects.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                state
+                    .projects
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .collect::<Vec<_>>(),
                 vec!["sp-2"]
             );
             assert_eq!(
-                state.chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+                state
+                    .chats
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .collect::<Vec<_>>(),
                 vec!["chat-2"]
             );
             assert!(state.sessions.is_empty());
@@ -1037,9 +1056,15 @@ mod tests {
     #[test]
     fn schema_version_stamp_is_idempotent() {
         let ws = WorkspaceDoc::new();
-        assert_eq!(ws.ensure_schema_version().unwrap(), WORKSPACE_SCHEMA_VERSION);
+        assert_eq!(
+            ws.ensure_schema_version().unwrap(),
+            WORKSPACE_SCHEMA_VERSION
+        );
         let before = ws.doc().oplog_vv();
-        assert_eq!(ws.ensure_schema_version().unwrap(), WORKSPACE_SCHEMA_VERSION);
+        assert_eq!(
+            ws.ensure_schema_version().unwrap(),
+            WORKSPACE_SCHEMA_VERSION
+        );
         assert_eq!(ws.doc().oplog_vv(), before);
     }
 

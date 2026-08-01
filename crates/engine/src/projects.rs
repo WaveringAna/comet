@@ -122,8 +122,10 @@ fn reconcile(inner: &Arc<ProjectsSyncInner>, projects: &[Project]) {
             match result {
                 Ok(mut watcher) => {
                     use notify::Watcher as _;
-                    match watcher.watch(Path::new(&project.path), notify::RecursiveMode::NonRecursive)
-                    {
+                    match watcher.watch(
+                        Path::new(&project.path),
+                        notify::RecursiveMode::NonRecursive,
+                    ) {
                         Ok(()) => Some(watcher),
                         Err(err) => {
                             tracing::debug!(path = %project.path, error = %err, "projects: watch failed");
@@ -240,7 +242,10 @@ fn sweep_orphans(inner: &Arc<ProjectsSyncInner>) {
 
 /// Projects-watch follower + repair tick. Weak handles so dropping the service
 /// tears the loop down.
-async fn projects_task(inner: Weak<ProjectsSyncInner>, mut projects_rx: watch::Receiver<Vec<Project>>) {
+async fn projects_task(
+    inner: Weak<ProjectsSyncInner>,
+    mut projects_rx: watch::Receiver<Vec<Project>>,
+) {
     let mut repair = tokio::time::interval(REPAIR_INTERVAL);
     repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     repair.tick().await; // consume the immediate first tick

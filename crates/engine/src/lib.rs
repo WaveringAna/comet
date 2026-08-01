@@ -17,12 +17,12 @@ pub mod auth;
 pub mod diff_sync;
 pub mod doc_host;
 pub mod instance_lock;
+pub mod projects;
 pub mod registry;
 pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
-pub mod projects;
 pub mod terminals;
 pub mod titles;
 pub mod uploads;
@@ -33,12 +33,12 @@ pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use diff_sync::{CheckoutDiffSync, DiffSidecar, DiffSnapshot, capture_diff};
 pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
 pub use instance_lock::InstanceLock;
+pub use projects::ProjectsSync;
 pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
 pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
-pub use projects::ProjectsSync;
 pub use terminals::Terminals;
 pub use titles::TitleGenerator;
 pub use uploads::{AttachmentChunk, Uploads};
@@ -498,7 +498,8 @@ impl Engine {
 async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
             result = tokio::signal::ctrl_c() => result,
             _ = sigterm.recv() => Ok(()),
