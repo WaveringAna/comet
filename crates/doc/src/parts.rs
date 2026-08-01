@@ -118,7 +118,9 @@ pub fn fold_event_into_parts(parts: &[MessagePart], event: &AgentEvent) -> Vec<M
                 });
             }
         }
-        AgentEvent::ToolResult { id, is_error } => {
+        // `output` is deliberately NOT folded: outputs stay in the host's run
+        // journal (host-local), never in the synced doc.
+        AgentEvent::ToolResult { id, is_error, .. } => {
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
                     id: pid,
@@ -354,6 +356,8 @@ mod tests {
             &AgentEvent::ToolResult {
                 id: "t".into(),
                 is_error: true,
+                output: None,
+                output_truncated: false,
             },
         );
         match &parts[0] {

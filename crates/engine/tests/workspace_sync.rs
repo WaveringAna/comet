@@ -72,6 +72,18 @@ impl Harness for ScriptedHarness {
                     session_id: "hs-1".into(),
                     assistant_message_id: "a-1".into(),
                 },
+                AgentEvent::ToolCall {
+                    id: "t-1".into(),
+                    call: comet_proto::ToolCall::Exec {
+                        command: "cargo test\n--workspace".into(),
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: "t-1".into(),
+                    is_error: false,
+                    output: None,
+                    output_truncated: false,
+                },
                 AgentEvent::TextDelta { text: text.into() },
                 AgentEvent::Done {
                     status: DoneStatus::Completed,
@@ -268,7 +280,8 @@ async fn two_engines_share_a_workspace() {
     wait_for(b_status(SessionStatus::Idle), "Idle on B").await;
 
     // Sidebar freshness crossed too: the chat row's preview settles on the
-    // assistant's final text (first-120-chars policy).
+    // assistant's final text (first-120-chars policy), and the exec call
+    // stamped the command line (single-lined at stamp time).
     wait_for(
         || {
             b.workspace
@@ -281,6 +294,20 @@ async fn two_engines_share_a_workspace() {
                 == Some("Hello")
         },
         "assistant preview on B",
+    )
+    .await;
+    wait_for(
+        || {
+            b.workspace
+                .doc()
+                .chat("chat-1")
+                .ok()
+                .flatten()
+                .and_then(|c| c.last_command)
+                .as_deref()
+                == Some("cargo test --workspace")
+        },
+        "last command on B",
     )
     .await;
 

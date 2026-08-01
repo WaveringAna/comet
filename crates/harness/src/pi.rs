@@ -20,8 +20,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
 use comet_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode, ToolCall,
-    UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
+    TOOL_OUTPUT_MAX_BYTES, ToolCall, UserInputQuestion,
 };
 
 use crate::{Harness, HarnessError, RunControls};
@@ -438,7 +438,8 @@ async fn run_session(session: PiSession) {
                         "tool_execution_end" => {
                             let id = value.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_owned();
                             let is_error = value.get("isError").and_then(Value::as_bool).unwrap_or(false);
-                            if !send_event(&event_tx, AgentEvent::ToolResult { id, is_error }).await { break 'main; }
+                            let (output, output_truncated) = tool_result_output(value.get("result").unwrap_or(&Value::Null));
+                            if !send_event(&event_tx, AgentEvent::ToolResult { id, is_error, output, output_truncated }).await { break 'main; }
                         }
                         "error" => {
                             let message = value.get("message").and_then(Value::as_str).unwrap_or("pi error").to_owned();
@@ -619,6 +620,45 @@ fn parse_pi_models(output: &str) -> Vec<Model> {
     models
 }
 
+/// Displayable output text from pi's `tool_execution_end` `result`, per
+/// pi-mono's schema: `AgentToolResult { content: [{type:"text", text} |
+/// {type:"image", …}], details }` (normalized since pi-ai's "Normalized
+/// tool_execution_end result" change; older frames carried a bare string).
+/// Text blocks join with newlines; images don't render in a command feed.
+/// Tail-capped at [`TOOL_OUTPUT_MAX_BYTES`] — the run journal is append-only,
+/// so unbounded build logs would grow it without limit.
+fn tool_result_output(result: &Value) -> (Option<String>, bool) {
+    let text = match result {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(_) => result
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }),
+        _ => None,
+    };
+    text.map(tail_cap).map_or((None, false), |(t, capped)| (Some(t), capped))
+}
+
+/// Keep the last [`TOOL_OUTPUT_MAX_BYTES`] of `text`, starting on a char
+/// boundary; reports whether anything was cut.
+fn tail_cap(mut text: String) -> (String, bool) {
+    if text.len() <= TOOL_OUTPUT_MAX_BYTES {
+        return (text, false);
+    }
+    let mut start = text.len() - TOOL_OUTPUT_MAX_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    (text.split_off(start), true)
+}
+
 fn pi_tool_call(name: &str, args: &Value) -> ToolCall {
     let string = |key: &str| {
         args.get(key)
@@ -774,6 +814,44 @@ async fn handle_extension_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_result_output_extracts_text_blocks() {
+        // pi-mono's documented frame: AgentToolResult with text content.
+        let (output, capped) = tool_result_output(&json!({
+            "content": [{"type": "text", "text": "total 48\n…"}],
+            "details": {"truncation": null}
+        }));
+        assert_eq!(output.as_deref(), Some("total 48\n…"));
+        assert!(!capped);
+        // Multiple text blocks join; images drop.
+        let (output, _) = tool_result_output(&json!({
+            "content": [
+                {"type": "text", "text": "a"},
+                {"type": "image", "data": "…"},
+                {"type": "text", "text": "b"}
+            ]
+        }));
+        assert_eq!(output.as_deref(), Some("a\nb"));
+        // Legacy bare-string results still parse.
+        let (output, _) = tool_result_output(&json!("plain output"));
+        assert_eq!(output.as_deref(), Some("plain output"));
+        // Anything else (null, absent content) is no capture.
+        assert_eq!(tool_result_output(&Value::Null), (None, false));
+        assert_eq!(tool_result_output(&json!({"details": {}})), (None, false));
+    }
+
+    #[test]
+    fn tail_cap_keeps_suffix_on_char_boundary() {
+        let (text, capped) = tail_cap("short".to_owned());
+        assert_eq!((text.as_str(), capped), ("short", false));
+        // Multibyte chars at the cut point: no panics, valid UTF-8, capped.
+        let big = "é".repeat(TOOL_OUTPUT_MAX_BYTES);
+        let (text, capped) = tail_cap(big);
+        assert!(capped);
+        assert!(text.len() <= TOOL_OUTPUT_MAX_BYTES);
+        assert!(text.chars().all(|c| c == 'é'));
+    }
 
     #[test]
     fn pi_tool_names_map_to_existing_transcript_calls() {

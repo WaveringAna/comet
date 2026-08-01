@@ -43,7 +43,7 @@ use crate::state::{
 };
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
-use crate::transcript::{self, Transcript};
+use crate::transcript::{self, Transcript, TranscriptEvent};
 
 mod projects;
 mod tabs;
@@ -203,6 +203,13 @@ impl SessionPanels {
         entry.terminal_open
     }
 
+    /// Set the terminal flag for `key` explicitly (the agent-terminal deep
+    /// link opens without toggling — a second click must not close it).
+    pub fn set_terminal_open(&mut self, key: &str, open: bool) {
+        let entry = self.map.entry(key.to_string()).or_default();
+        entry.terminal_open = open;
+    }
+
     /// Flip the right panel for `key`; returns the new value.
     pub fn toggle_right_panel(&mut self, key: &str) -> bool {
         let entry = self.map.entry(key.to_string()).or_default();
@@ -338,6 +345,9 @@ pub fn resort_offsets(
 /// Session row height (FLIP estimate): project line + title + meta line
 /// (harness mark, plus branch for worktrees).
 const CHAT_ROW_HEIGHT: f32 = 61.0;
+/// Extra height when the row shows the latest-command line (line height +
+/// the column's gap).
+const CHAT_ROW_COMMAND_LINE: f32 = 16.0;
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
 
@@ -547,6 +557,7 @@ pub struct Shell {
     _ticker: Task<()>,
     _state_observation: Subscription,
     _composer_events: Subscription,
+    _transcript_events: Subscription,
 }
 
 impl Shell {
@@ -563,6 +574,14 @@ impl Shell {
             move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Sent { .. } => {
                     transcript.update(cx, |t, cx| t.on_own_send(cx));
+                }
+            }
+        });
+        // "ran N commands" pills deep-link into the agent-terminal dock.
+        let transcript_events = cx.subscribe(&transcript, {
+            move |this: &mut Shell, _, event: &TranscriptEvent, cx| match event {
+                TranscriptEvent::OpenAgentTerminal { tool_ids } => {
+                    this.open_agent_terminal(tool_ids.clone(), cx);
                 }
             }
         });
@@ -690,6 +709,7 @@ impl Shell {
             _ticker: ticker,
             _state_observation: observation,
             _composer_events: composer_events,
+            _transcript_events: transcript_events,
         }
     }
 
@@ -996,6 +1016,33 @@ impl Shell {
             })
             .ok();
         }));
+        cx.notify();
+    }
+
+    /// Exec-group deep link (the transcript's "ran N commands" pill): open the
+    /// bottom dock and reveal the group's commands in the agent terminal.
+    /// Opening mirrors the ⌘J path (200ms height tween, lazy panel mount)
+    /// minus the focus steal — the feed is read-only, the keyboard stays put.
+    fn open_agent_terminal(&mut self, tool_ids: Vec<String>, cx: &mut Context<Self>) {
+        let key = self.panel_key(cx);
+        if !self.panels.get(&key).terminal_open {
+            let from = self.terminal_target(cx);
+            self.panels.set_terminal_open(&key, true);
+            self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
+            self.terminal_tween_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(RESIZE.total().mul_f32(motion::speed_scale()) + Duration::from_millis(30))
+                    .await;
+                this.update(cx, |shell, cx| {
+                    shell.terminal_tween = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+        self.sync_terminal_panels(cx);
+        let panel = self.bottom_terminal_panel(cx);
+        panel.update(cx, |panel, cx| panel.reveal_agent_commands(tool_ids, cx));
         cx.notify();
     }
 
@@ -1733,6 +1780,7 @@ impl Shell {
         time_ago: SharedString,
         project_name: SharedString,
         branch: Option<SharedString>,
+        last_command: Option<SharedString>,
         harness: Option<comet_proto::HarnessId>,
         status: comet_proto::ChatIndicator,
         selected: bool,
@@ -1878,6 +1926,22 @@ impl Shell {
                         )
                     }),
             )
+            // Line 4 (commands only): the latest command in the feed's voice
+            // — `$ cmd`, mono, dim. "Being ran" vs "ran" reads off line 1's
+            // Working rail, not a glyph here.
+            .when_some(last_command, |el, command| {
+                el.child(
+                    div()
+                        .w_full()
+                        .pl(px(14.0))
+                        .truncate()
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(11.0))
+                        .line_height(px(14.0))
+                        .text_color(subline)
+                        .child(SharedString::from(format!("$ {command}"))),
+                )
+            })
             .into_any_element()
     }
 
@@ -4091,6 +4155,20 @@ mod tests {
         assert_eq!(panels.get("a").right_panel_tab, None);
         // The new-chat canvas ("" key) is its own session, also closed.
         assert!(!panels.get("").terminal_open);
+    }
+
+    #[test]
+    fn session_panels_set_terminal_open_never_toggles_off() {
+        let mut panels = SessionPanels::default();
+        panels.set_terminal_open("a", true);
+        assert!(panels.get("a").terminal_open);
+        // A second deep-link click keeps the dock open (idempotent, not a toggle).
+        panels.set_terminal_open("a", true);
+        assert!(panels.get("a").terminal_open);
+        // Chat-scoped, like every other flag.
+        assert!(!panels.get("b").terminal_open);
+        panels.set_terminal_open("a", false);
+        assert!(!panels.get("a").terminal_open);
     }
 
     #[test]

@@ -1438,6 +1438,7 @@ rename to new_name.rs
             checkout_id: checkout.map(Into::into),
             config: None,
             last_message_preview: None,
+            last_command: None,
             last_message_at: None,
             created_at: Utc::now(),
             harness_session_id: None,

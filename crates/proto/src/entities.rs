@@ -97,6 +97,10 @@ pub struct Chat {
     pub checkout_id: Option<String>,
     pub config: Option<ChatConfig>,
     pub last_message_preview: Option<String>,
+    /// Host-stamped sidebar line: the latest exec command the agent ran (or
+    /// is running) — single-lined, capped at 120 chars, display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_command: Option<String>,
     pub last_message_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     /// Harness-native session id of the chat's latest run — engine-owned resume
@@ -391,6 +395,25 @@ pub struct TerminalSession {
     pub cwd: String,
     /// Shell basename (`zsh`, `bash`, …) for the tab label.
     pub shell: String,
+}
+
+/// `ToolOutput` reply: one tool result's captured output, read from the chat
+/// host's run journal. Host-local by design — outputs never sync through the
+/// session doc, so a remote viewport fetches them on demand from the host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutputReply {
+    /// False when the journal has no ToolResult for the id (still running, or
+    /// the run predates output capture).
+    pub found: bool,
+    /// The captured text; `Some("")` is a real empty output, `None` means the
+    /// harness reported none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// True when the capture was tail-capped at
+    /// [`crate::TOOL_OUTPUT_MAX_BYTES`].
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// One `SubscribeTerminal` stream item. `seq` is a per-terminal monotonic counter

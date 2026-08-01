@@ -34,19 +34,18 @@ probe() { cargo run -q -p comet-rpc --example rpc_probe -- "ws://127.0.0.1:$IPC"
 if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   echo "▸ seeding demo chats"
   DEV=$(probe LocalDevice '{}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["deviceId"])')
-  # One space per demo folder, created up-front (chats join by space id).
-  declare -A SPACES=()
+  # One project per demo folder, created up-front (chats join by project id).
+  declare -A PROJECTS=()
   for project in comet-native soccertcg comet aether; do
-    sid=$(uuidgen | tr 'A-Z' 'a-z')
-    probe Mutate "{\"op\":\"createSpace\",\"spaceId\":\"$sid\",\"deviceId\":\"$DEV\",\"path\":\"$HOME/github/$project\"}" >/dev/null
-    SPACES[$project]="$sid"
+    pid=$(uuidgen | tr 'A-Z' 'a-z')
+    probe Mutate "{\"op\":\"createProject\",\"projectId\":\"$pid\",\"deviceId\":\"$DEV\",\"path\":\"$HOME/github/$project\",\"name\":\"$project\",\"gitDetected\":true}" >/dev/null
+    PROJECTS[$project]="$pid"
   done
   seed() { # title project branch age_hours run
     local id; id=$(uuidgen | tr 'A-Z' 'a-z')
-    local sid="${SPACES[$2]}"
-    probe Mutate "{\"op\":\"createChat\",\"chatId\":\"$id\",\"spaceId\":\"$sid\",\"config\":{\"harness\":\"mock\",\"model\":\"fable-5\",\"reasoning\":null,\"sandbox\":\"workspace-write\"}}" >/dev/null
+    local pid="${PROJECTS[$2]}"
+    probe Mutate "{\"op\":\"createChat\",\"chatId\":\"$id\",\"projectId\":\"$pid\",\"config\":{\"harness\":\"mock\",\"model\":\"fable-5\",\"reasoning\":null,\"sandbox\":\"workspace-write\"},\"branch\":\"$3\"}" >/dev/null
     probe Mutate "{\"op\":\"renameChat\",\"chatId\":\"$id\",\"title\":\"$1\"}" >/dev/null
-    probe Mutate "{\"op\":\"setChatBranch\",\"chatId\":\"$id\",\"branch\":\"$3\"}" >/dev/null
     if [[ "$5" == run ]]; then
       probe QueueCommand "{\"chatId\":\"$id\",\"command\":{\"kind\":\"run\",\"messageId\":\"$(uuidgen)\",\"request\":{\"prompt\":\"Walk me through the streaming pipeline\",\"model\":null,\"reasoning\":null,\"modelOptions\":{},\"cwd\":\"/tmp\",\"sandbox\":\"workspace-write\",\"autoApprove\":true,\"resume\":null}}}" >/dev/null
       sleep 1

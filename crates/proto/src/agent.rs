@@ -195,8 +195,13 @@ pub enum DoneStatus {
     Errored,
 }
 
+/// Max bytes of combined stdout/stderr kept per tool result, tail-capped at
+/// capture (a char-boundary-safe suffix). Outputs live in the host's run
+/// journal, unbounded otherwise — a chat that runs `cargo build` all day
+/// would otherwise grow a journal without limit.
+pub const TOOL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+
 /// The normalized streaming event every harness emits.
-///
 /// Mirrors comet's `AgentEvent` tagged enum.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -231,6 +236,15 @@ pub enum AgentEvent {
     ToolResult {
         id: String,
         is_error: bool,
+        /// Tail-capped stdout/stderr text, when the harness reports it (pi's
+        /// `tool_execution_end` result content). Journaled host-local ONLY —
+        /// the doc fold ignores it, so command outputs never ride CRDT sync.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        /// True when the captured output exceeded [`TOOL_OUTPUT_MAX_BYTES`]
+        /// and was tail-capped.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        output_truncated: bool,
     },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
@@ -297,6 +311,39 @@ mod tests {
         let round: RunRequest =
             serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
         assert_eq!(round.attachments, vec!["/tmp/a.png".to_string()]);
+    }
+
+    #[test]
+    fn tool_result_output_is_additive() {
+        // Pre-output journal lines (no output fields) still parse — journals
+        // are append-only files, old lines are forever.
+        let old = r#"{"type":"toolResult","id":"t1","isError":false}"#;
+        let ev: AgentEvent = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            ev,
+            AgentEvent::ToolResult {
+                id: "t1".into(),
+                is_error: false,
+                output: None,
+                output_truncated: false,
+            }
+        );
+        // Absent output serializes away (old readers never see the fields).
+        let json = serde_json::to_value(&ev).unwrap();
+        assert!(json.get("output").is_none());
+        assert!(json.get("outputTruncated").is_none());
+        // Captured output round-trips.
+        let with_output = AgentEvent::ToolResult {
+            id: "t2".into(),
+            is_error: true,
+            output: Some("boom".into()),
+            output_truncated: true,
+        };
+        let json = serde_json::to_string(&with_output).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(&json).unwrap(),
+            with_output
+        );
     }
 
     #[test]

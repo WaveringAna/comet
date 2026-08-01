@@ -903,6 +903,8 @@ mod tests {
             &AgentEvent::ToolResult {
                 id: "tool-1".into(),
                 is_error: false,
+                output: None,
+                output_truncated: false,
             },
         );
         writer.sync(&folded).unwrap();

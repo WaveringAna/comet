@@ -30,8 +30,8 @@ use comet_doc::{
 };
 use comet_harness::{CancellationToken, Harness, RunControls, SteerMessage};
 use comet_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
-    UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, ToolCall,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -203,6 +203,39 @@ impl SessionsEngine {
             .map(|(seq, event)| JournaledEvent { seq, event })
             .collect();
         Ok((replay, rx))
+    }
+
+    /// Host-local tool-output lookup for the `ToolOutput` RPC: scan the
+    /// chat's journal for the LAST `ToolResult` with `tool_id` (a harness may
+    /// retry-refresh a result). Outputs are journaled, never synced — this
+    /// read is the only way they leave the host.
+    pub fn journal_tool_output(
+        &self,
+        chat_id: &str,
+        tool_id: &str,
+    ) -> Result<comet_proto::ToolOutputReply, EngineError> {
+        let replay = self.inner.journal.replay(chat_id, 0)?;
+        for (_, event) in replay.iter().rev() {
+            if let AgentEvent::ToolResult {
+                id,
+                output,
+                output_truncated,
+                ..
+            } = event
+                && id == tool_id
+            {
+                return Ok(comet_proto::ToolOutputReply {
+                    found: true,
+                    output: output.clone(),
+                    truncated: *output_truncated,
+                });
+            }
+        }
+        Ok(comet_proto::ToolOutputReply {
+            found: false,
+            output: None,
+            truncated: false,
+        })
     }
 
     /// Start (or route) a run for `chat_id`.
@@ -694,6 +727,14 @@ impl Inner {
         }
     }
 
+    /// Sidebar freshness: push the latest exec command into the chat's
+    /// workspace row.
+    fn note_command(&self, chat_id: &str, command: &str) {
+        if let Some(ws) = self.workspace() {
+            ws.note_command(chat_id, command);
+        }
+    }
+
     /// Record the chat's harness-native session id (and its cwd): live-process
     /// cache plus the durable workspace chat row — the row is what survives an
     /// engine restart (comet sessions.ts:1039).
@@ -1169,6 +1210,14 @@ async fn drive_run(
             }
             AgentEvent::InputResolved { .. } => {
                 inner.set_status(&chat_id, SessionStatus::Working, false);
+            }
+            // Sidebar freshness: the chat row tracks the latest command the
+            // agent ran (or is running — the row's Working rail says which).
+            AgentEvent::ToolCall {
+                call: ToolCall::Exec { command },
+                ..
+            } => {
+                inner.note_command(&chat_id, command);
             }
             _ => {}
         }

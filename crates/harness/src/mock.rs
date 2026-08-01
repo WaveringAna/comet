@@ -261,6 +261,8 @@ impl Harness for MockHarness {
                     AgentEvent::ToolResult {
                         id: "mock-code-tool".into(),
                         is_error: false,
+                        output: Some("3".into()),
+                        output_truncated: false,
                     },
                 ]
             })

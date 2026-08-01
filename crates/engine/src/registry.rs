@@ -140,6 +140,11 @@ pub fn default_registry() -> HarnessRegistry {
             AgentEvent::ToolResult {
                 id: "mock-tool-1".into(),
                 is_error: false,
+                output: Some(
+                    "running 319 tests\n…\ntest result: ok. 319 passed; 0 failed; 0 ignored; finished in 5.02s"
+                        .into(),
+                ),
+                output_truncated: false,
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-2".into(),
@@ -151,6 +156,11 @@ pub fn default_registry() -> HarnessRegistry {
             AgentEvent::ToolResult {
                 id: "mock-tool-2".into(),
                 is_error: false,
+                output: Some(
+                    "a1b2c3d (HEAD -> main) agent terminal: ran-N pill + command feed\ne4f5g6h transcript: block-granularity rows\n7i8j9k0 (origin/main) ui: boot splash\nc0ffee1\n"
+                        .into(),
+                ),
+                output_truncated: false,
             },
             AgentEvent::TextDelta {
                 text: "The `SegmentWriter` appends into `LoroText` so the oplog stays RLE-merged:\n\n```rust\nfolded = fold_event_into_parts(&folded, &event);\nwriter.sync(&folded)?; // 120ms coalesced commits\n```\n\nSynced to every device through the session room. *Mock harness reporting in.*".into(),

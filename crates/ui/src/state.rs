@@ -1133,6 +1133,7 @@ mod tests {
             checkout_id: None,
             config: None,
             last_message_preview: None,
+            last_command: None,
             last_message_at: last_msg_min.map(|m| base + TimeDelta::minutes(m)),
             created_at: base + TimeDelta::minutes(created_min),
             harness_session_id: None,

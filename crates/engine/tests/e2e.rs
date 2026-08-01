@@ -70,6 +70,8 @@ fn mock_script() -> Vec<AgentEvent> {
         AgentEvent::ToolResult {
             id: "tool-1".into(),
             is_error: false,
+            output: None,
+            output_truncated: false,
         },
         done(DoneStatus::Completed),
     ]

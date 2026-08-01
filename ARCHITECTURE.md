@@ -84,8 +84,10 @@ thin hand-rolled client over `loro` 1.13.x — verify interop early, M1 exit cri
    working): `meta` map, `messages` list (parts as list-of-maps with **LoroText bodies** — the
    measured 1.03× oplog shape; never LWW value rewrites), `commands` list with ledger rules 1–3
    (append-only per-device entries; host-only outcomes; dedupe/TTL/supersede evaluation).
-   Continuation splitting at 256KB, render-only tool parts (full inputs stay in the host's local
-   run journal), tail/diff sidecars. Constants carried over (`STREAM_COMMIT_MS=120`,
+   Continuation splitting at 256KB, render-only tool parts (full inputs AND command outputs
+   stay in the host's local run journal — `AgentEvent::ToolResult.output` is journaled,
+   tail-capped at 64KB, never folded into the doc; a viewport fetches one on demand via the
+   `ToolOutput` RPC, relay-routed to the chat's host), tail/diff sidecars. Constants carried over (`STREAM_COMMIT_MS=120`,
    `DO_FLUSH_MS=5s`, compaction at 8MB, retain 30d, tail 64).
 
 2. **Workspace doc** (per org — NEW; replaces comet's residual entity sync) — **spaces**
@@ -200,6 +202,19 @@ feature spec `docs/research/feature-inventory.md` §1.
 - **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
   engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height
   drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
+  Each chat also gets an **agent terminal**: a read-only command feed (the turn's `exec` tool
+  calls in arrival order — `$ command` per row, spinner while running, ✕ on failure) pinned as
+  the leftmost tab, titled "<model>'s terminal". Consecutive exec calls collapse in the
+  transcript to a single "ran N command(s)" row; clicking it opens the dock, focuses the agent
+  tab, scrolls to the first command of that turn, and flashes it (non-exec tool calls break the
+  group and keep their regular chips). The feed follows its tail: any change to the
+  `(feed_len, tail_expansion_lines)` fingerprint scrolls the latest command into view. The
+  latest row auto-expands (older ones auto-collapse as the tail moves); a manual click pins a
+  row open or dismisses even the latest row, and pins survive the tail moving past. Output
+  under an expanded row is fetched live from the host's run journal via `ToolOutput`,
+  tail-24-lines shown. The sidebar session row shows the latest command as a `$ cmd` line
+  (host-stamped `lastCommand` on the workspace chat row, single-lined 120-char cap; the
+  row's Working rail is what marks it as still running).
 - **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse
   (180ms height tween), time-sliced highlight, 200ms width transition on the pane itself.
 - **Animation kit** (`comet-ui::motion`): small helpers over gpui `Animation` reproducing the

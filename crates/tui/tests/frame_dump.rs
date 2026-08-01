@@ -40,6 +40,7 @@ fn chat(id: &str, title: &str, project_id: &str, hours: i64) -> Chat {
         checkout_id: None,
         config: None,
         last_message_preview: None,
+        last_command: None,
         last_message_at: Some(Utc::now() - chrono::Duration::hours(hours)),
         created_at: Utc::now(),
         harness_session_id: None,

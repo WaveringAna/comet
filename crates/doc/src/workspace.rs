@@ -253,6 +253,7 @@ impl WorkspaceDoc {
             "lastMessagePreview",
             chat.last_message_preview.as_deref(),
         )?;
+        set_opt_str(&row, "lastCommand", chat.last_command.as_deref())?;
         set_opt_ms(&row, "lastMessageAt", chat.last_message_at)?;
         row.insert("createdAt", chat.created_at.timestamp_millis())?;
         // Preserved on full-row upserts (set_chat_activity/set_chat_host read →
@@ -400,6 +401,18 @@ impl WorkspaceDoc {
         };
         row.insert("lastMessagePreview", preview)?;
         row.insert("lastMessageAt", at.timestamp_millis())?;
+        self.doc.commit();
+        Ok(true)
+    }
+
+    /// Host-side sidebar freshness: the latest exec command (single-lined,
+    /// capped). Stamped at call time — the row's Working rail is what marks
+    /// it as still running. `false` when no such row.
+    pub fn set_chat_last_command(&self, chat_id: &str, command: &str) -> Result<bool, DocError> {
+        let Some(row) = self.existing_row("chats", chat_id) else {
+            return Ok(false);
+        };
+        row.insert("lastCommand", command)?;
         self.doc.commit();
         Ok(true)
     }
@@ -624,6 +637,8 @@ struct RawChat {
     #[serde(default)]
     last_message_preview: Option<String>,
     #[serde(default)]
+    last_command: Option<String>,
+    #[serde(default)]
     last_message_at: Option<i64>,
     #[serde(default)]
     created_at: i64,
@@ -649,6 +664,7 @@ impl From<RawChat> for Chat {
             checkout_id: raw.checkout_id,
             config: raw.config,
             last_message_preview: raw.last_message_preview,
+            last_command: raw.last_command,
             last_message_at: raw.last_message_at.map(dt),
             created_at: dt(raw.created_at),
             harness_session_id: raw.harness_session_id,
@@ -720,6 +736,7 @@ mod tests {
                 sandbox: SandboxLevel::WorkspaceWrite,
             }),
             last_message_preview: None,
+            last_command: None,
             last_message_at: None,
             created_at: ts(2_000),
             harness_session_id: None,
@@ -812,6 +829,16 @@ mod tests {
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0].title, None);
         assert_eq!(chats[0].last_message_preview.as_deref(), Some("hello"));
+
+        // A read → modify → upsert cycle must not amnesia the stamped
+        // sidebar fields (the full-row upsert rewrites every key it knows).
+        ws.set_chat_last_command("chat-1", "cargo test").unwrap();
+        let mut cycled = ws.chat("chat-1").unwrap().unwrap();
+        cycled.branch = Some("wip".into());
+        ws.upsert_chat(&cycled).unwrap();
+        let reread = ws.chat("chat-1").unwrap().unwrap();
+        assert_eq!(reread.last_command.as_deref(), Some("cargo test"));
+        assert_eq!(reread.last_message_preview.as_deref(), Some("hello"));
     }
 
     #[test]
@@ -839,17 +866,20 @@ mod tests {
             ws.set_chat_last_message("chat-1", "preview text", ts(5_000))
                 .unwrap()
         );
+        assert!(ws.set_chat_last_command("chat-1", "cargo test").unwrap());
         assert!(ws.rename_device("dev-a", "workstation").unwrap());
         assert!(ws.set_device_last_seen("dev-a", ts(6_000)).unwrap());
         // Unknown rows report false, never invent rows.
         assert!(!ws.rename_chat("nope", "x").unwrap());
         assert!(!ws.set_chat_archived("nope", true).unwrap());
+        assert!(!ws.set_chat_last_command("nope", "x").unwrap());
         assert!(!ws.rename_device("nope", "x").unwrap());
 
         let chat = ws.chat("chat-1").unwrap().unwrap();
         assert_eq!(chat.title.as_deref(), Some("Renamed"));
         assert!(chat.archived);
         assert_eq!(chat.last_message_preview.as_deref(), Some("preview text"));
+        assert_eq!(chat.last_command.as_deref(), Some("cargo test"));
         assert_eq!(chat.last_message_at, Some(ts(5_000)));
         let dev = &ws.read_devices().unwrap()[0];
         assert_eq!(dev.name, "workstation");

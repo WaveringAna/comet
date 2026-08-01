@@ -618,7 +618,13 @@ impl Shell {
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
-                let height = super::CHAT_ROW_HEIGHT;
+                // Rows with a command line are one 16px line taller.
+                let height = super::CHAT_ROW_HEIGHT
+                    + if chat.last_command.is_some() {
+                        super::CHAT_ROW_COMMAND_LINE
+                    } else {
+                        0.0
+                    };
                 let harness = chat.config.as_ref().map(|c| c.harness);
                 let element = self.render_chat_row(
                     chat.id.clone(),
@@ -629,6 +635,7 @@ impl Shell {
                     time_ago,
                     folder.into(),
                     branch.map(SharedString::from),
+                    chat.last_command.clone().map(SharedString::from),
                     harness,
                     status,
                     is_selected,

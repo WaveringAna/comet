@@ -30,9 +30,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, ListAlignment, ListScrollEvent, ListState,
-    ObjectFit, SharedString, StyledImage as _, Subscription, Task, Window, div, img, list,
-    prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, EventEmitter, ListAlignment, ListScrollEvent,
+    ListState, ObjectFit, SharedString, StyledImage as _, Subscription, Task, Window, div, img,
+    list, prelude::*, px,
 };
 
 use comet_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
@@ -190,6 +190,9 @@ impl StickSpring {
 /// One tool invocation inside a group row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolItem {
+    /// The `MessagePart::Tool` id — the deep-link anchor into the agent
+    /// terminal feed (stable while the group streams; never an index).
+    pub id: SharedString,
     pub call: ToolCall,
     pub is_error: bool,
     pub resolved: bool,
@@ -283,6 +286,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     let mut acc = Vec::with_capacity(tools.len() * 8 + 1);
     for t in tools {
+        acc.extend_from_slice(t.id.as_bytes());
         let (label, detail) = tool_chip_content(&t.call);
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
@@ -365,12 +369,13 @@ pub fn rows_for_entry(
     for (part_ix, part) in entry.parts.iter().enumerate() {
         match part {
             MessagePart::Tool {
+                id,
                 call,
                 is_error,
                 resolved,
-                ..
             } => {
                 pending_group.push(ToolItem {
+                    id: id.as_str().into(),
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
@@ -663,6 +668,31 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     comet_proto::view::tool_group_summary(&pairs)
 }
 
+/// True when every item in the group is a shell command.
+pub fn exec_only(tools: &[ToolItem]) -> bool {
+    !tools.is_empty()
+        && tools
+            .iter()
+            .all(|t| matches!(t.call, ToolCall::Exec { .. }))
+}
+
+/// "ran 1 command" / "ran 3 commands · 1 failed" — the deep-link pill label.
+/// The failure count carries real weight here: it's the only transcript
+/// signal left for a failed command (the group summary counts only non-exec
+/// failures now that commands never render as chips).
+pub fn ran_commands_label(count: usize, failed: usize) -> String {
+    let base = if count == 1 {
+        "ran 1 command".to_string()
+    } else {
+        format!("ran {count} commands")
+    };
+    if failed > 0 {
+        format!("{base} · {failed} failed")
+    } else {
+        base
+    }
+}
+
 // `single_line` and the per-kind chip label/detail are shared with the terminal
 // viewport (`comet_proto::view`): a tool must be named identically on every
 // surface, and the one-line collapse is needed for the same reason in both (a
@@ -847,6 +877,14 @@ struct FoldState {
     toggled_at: Option<Instant>,
 }
 
+/// Events the shell listens for.
+#[derive(Debug, Clone)]
+pub enum TranscriptEvent {
+    /// A "ran N commands" deep-link pill was clicked: open the agent-terminal
+    /// dock and reveal these `MessagePart::Tool` ids in the command feed.
+    OpenAgentTerminal { tool_ids: Vec<String> },
+}
+
 pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
@@ -918,6 +956,8 @@ pub struct Transcript {
     attachment_retries: HashMap<(String, String), Task<()>>,
     _observe: Subscription,
 }
+
+impl EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -1830,13 +1870,29 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Commands never render as chips — the agent terminal's feed owns
+        // them. The group's Exec items become a "ran N commands" deep-link
+        // pill in the header; the fold (when non-command tools remain) works
+        // as before over the non-exec remainder.
+        let exec_ids: Vec<String> = tools
+            .iter()
+            .filter(|t| matches!(t.call, ToolCall::Exec { .. }))
+            .map(|t| t.id.to_string())
+            .collect();
+        let chips_tools: Vec<ToolItem> = tools
+            .iter()
+            .filter(|t| !matches!(t.call, ToolCall::Exec { .. }))
+            .cloned()
+            .collect();
+
         let fold = self.folds.get(row_id).copied().unwrap_or_default();
         let open = fold.open.unwrap_or(auto_open);
-        let target = if open { chips_height(tools.len()) } else { 0.0 };
-        let summary = tool_group_summary(tools);
+        let target = if open {
+            chips_height(chips_tools.len())
+        } else {
+            0.0
+        };
 
-        let toggle_id = row_id.clone();
-        let tool_count = tools.len();
         // Header (comet tool-group.tsx): a small chevron tile centered over the
         // chips' guide rail, then the quiet 12px summary.
         let header = div()
@@ -1847,45 +1903,117 @@ impl Transcript {
             .gap(px(8.0))
             .px(px(4.0))
             .h(px(26.0))
-            .cursor_pointer()
             .text_size(px(12.0))
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
             // chips (destructive tint, comet tool-chip.tsx) and in the
             // summary's "· N failed" count.
-            .text_color(theme.text_muted)
-            .hover(|s| s.text_color(Theme::dark().text))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_fold(toggle_id.clone(), tool_count, auto_open);
-                cx.notify();
-            }))
-            .child(
+            .text_color(theme.text_muted);
+
+        // Fold affordance — only when non-command chips exist to unfold.
+        let header = if chips_tools.is_empty() {
+            header
+        } else {
+            let summary = tool_group_summary(&chips_tools);
+            let toggle_id = row_id.clone();
+            let chip_count = chips_tools.len();
+            header
+                .cursor_pointer()
+                .hover(|s| s.text_color(Theme::dark().text))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_fold(toggle_id.clone(), chip_count, auto_open);
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .size(px(18.0))
+                        .flex_none()
+                        .rounded(px(5.0))
+                        .bg(crate::theme::white_alpha(0.06))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(10.0))
+                        .text_color(theme.text_muted.opacity(0.7))
+                        .child(SharedString::from(if open { "▾" } else { "▸" })),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(summary)),
+                )
+        };
+
+        // The commands deep-link: a quiet pill with a terminal glyph, opening
+        // the agent-terminal dock anchored at THIS group's commands. Never a
+        // fold toggle — stop_propagation keeps a mixed group's header click
+        // from also firing when the pill is the target.
+        let header = if exec_ids.is_empty() {
+            header
+        } else {
+            let pill_ids = exec_ids.clone();
+            let exec_failed = tools
+                .iter()
+                .filter(|t| matches!(t.call, ToolCall::Exec { .. }) && t.is_error)
+                .count();
+            let label = ran_commands_label(exec_ids.len(), exec_failed);
+            header.child(
                 div()
-                    .size(px(18.0))
-                    .flex_none()
-                    .rounded(px(5.0))
-                    .bg(crate::theme::white_alpha(0.06))
+                    .id(SharedString::from(format!("{row_id}-exec")))
                     .flex()
+                    .flex_row()
                     .items_center()
-                    .justify_center()
-                    .text_size(px(10.0))
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(SharedString::from(if open { "▾" } else { "▸" })),
+                    .gap(px(8.0))
+                    .flex_none()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(Theme::dark().text))
+                    .on_click(cx.listener(move |_this, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(TranscriptEvent::OpenAgentTerminal {
+                            tool_ids: pill_ids.clone(),
+                        });
+                    }))
+                    .child(
+                        div()
+                            .size(px(18.0))
+                            .flex_none()
+                            .rounded(px(5.0))
+                            // A failed command tints the tile red — visible
+                            // without opening the dock.
+                            .bg(if exec_failed > 0 {
+                                theme.danger.opacity(0.12)
+                            } else {
+                                crate::theme::white_alpha(0.06)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                crate::icons::icon(crate::icons::TERMINAL)
+                                    .size(px(10.0))
+                                    .text_color(if exec_failed > 0 {
+                                        theme.danger
+                                    } else {
+                                        theme.text_muted.opacity(0.7)
+                                    }),
+                            ),
+                    )
+                    .child(div().flex_none().child(SharedString::from(label))),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .child(SharedString::from(summary)),
-            );
+        };
+
+        if chips_tools.is_empty() {
+            return div().flex().flex_col().child(header).into_any_element();
+        }
 
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
             .flex_col()
             .gap(px(CHIP_GAP))
-            .children(tools.iter().map(|tool| tool_chip(tool, theme)));
+            .children(chips_tools.iter().map(|tool| tool_chip(tool, theme)));
 
         // Fold body: 200ms committed-height tween on a USER toggle only — and
         // only within a short window of the click. Auto-open (streaming) and
@@ -2690,11 +2818,13 @@ mod tests {
     #[test]
     fn tool_group_summaries() {
         let exec = |c: &str| ToolItem {
+            id: "e".into(),
             call: ToolCall::Exec { command: c.into() },
             is_error: false,
             resolved: true,
         };
         let edit = |p: &str| ToolItem {
+            id: "f".into(),
             call: ToolCall::EditFile {
                 path: p.into(),
                 old_string: None,
@@ -2724,11 +2854,13 @@ mod tests {
         // Reads / searches / misc.
         let tools = vec![
             ToolItem {
+                id: "r".into(),
                 call: ToolCall::ReadFile { path: "x".into() },
                 is_error: false,
                 resolved: true,
             },
             ToolItem {
+                id: "g".into(),
                 call: ToolCall::Glob {
                     pattern: "*.rs".into(),
                 },
@@ -2736,12 +2868,59 @@ mod tests {
                 resolved: true,
             },
             ToolItem {
+                id: "w".into(),
                 call: ToolCall::WebSearch { query: "q".into() },
                 is_error: false,
                 resolved: true,
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
+    }
+
+    #[test]
+    fn exec_only_gates_the_deep_link_pill() {
+        let exec = |c: &str| ToolItem {
+            id: "e".into(),
+            call: ToolCall::Exec { command: c.into() },
+            is_error: false,
+            resolved: true,
+        };
+        assert!(exec_only(&[exec("ls"), exec("pwd")]));
+        assert!(exec_only(&[exec("ls")]));
+        // A single non-command tool keeps the fold (chips carry real info).
+        let mut mixed = vec![exec("ls")];
+        mixed.push(ToolItem {
+            id: "r".into(),
+            call: ToolCall::ReadFile { path: "x".into() },
+            is_error: false,
+            resolved: true,
+        });
+        assert!(!exec_only(&mixed));
+        assert!(!exec_only(&[]));
+    }
+
+    #[test]
+    fn ran_commands_label_pluralizes_and_counts_failures() {
+        assert_eq!(ran_commands_label(1, 0), "ran 1 command");
+        assert_eq!(ran_commands_label(3, 0), "ran 3 commands");
+        // Exec failures stay visible in the transcript — the summary no
+        // longer counts them (its chips are non-exec only).
+        assert_eq!(ran_commands_label(3, 1), "ran 3 commands · 1 failed");
+        assert_eq!(ran_commands_label(1, 1), "ran 1 command · 1 failed");
+    }
+
+    #[test]
+    fn rows_thread_tool_ids_for_deep_links() {
+        let entry = assistant(
+            "m9",
+            MessageStatus::Complete,
+            vec![tool_part("call-42", "ls -la")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("group expected")
+        };
+        assert_eq!(tools[0].id.as_ref(), "call-42");
     }
 
     #[test]

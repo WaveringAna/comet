@@ -13,16 +13,19 @@
 //! before `WriteTerminal`; viewport-driven resizes debounce 80 ms before
 //! `ResizeTerminal` (the emulator resizes immediately).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use base64::Engine as _;
 use gpui::{
-    App, Context, Entity, FocusHandle, IntoElement, KeyBinding, KeyDownEvent, MouseButton, Render,
-    ScrollDelta, SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
+    AnyElement, App, Context, Entity, FocusHandle, IntoElement, KeyBinding, KeyDownEvent,
+    MouseButton, Render, ScrollDelta, SharedString, Subscription, Task, Window, actions, div,
+    prelude::*, px,
 };
 
-use comet_proto::{TerminalEvent, TerminalSession};
+use comet_doc::MessagePart;
+use comet_proto::view::single_line;
+use comet_proto::{Chat, HarnessId, TerminalEvent, TerminalSession, ToolCall, ToolOutputReply};
 use comet_rpc::methods;
 
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
@@ -39,6 +42,145 @@ use super::view::{
 /// Fixed tab width — drag-reorder math stays analytic.
 pub const TAB_WIDTH: f32 = 118.0;
 pub const TAB_BAR_HEIGHT: f32 = 40.0;
+
+/// Agent-feed row geometry (uniform, so `scroll_to_item` anchoring is exact).
+pub const FEED_ROW_HEIGHT: f32 = 20.0;
+/// How long a deep-linked group's rows keep their flash wash.
+pub const FEED_FLASH_MS: u64 = 1600;
+/// How many output lines an expanded row shows (the tail — the last lines
+/// are what you came for).
+pub const FEED_OUTPUT_MAX_LINES: usize = 24;
+
+// ---------------------------------------------------------------------------
+// Agent command feed (the "<agent>'s terminal" tab — pure)
+// ---------------------------------------------------------------------------
+
+/// One command in the agent feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedEntry {
+    /// The `MessagePart::Tool` id — the transcript deep-link anchors on it.
+    pub id: String,
+    pub command: String,
+    pub status: FeedStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedStatus {
+    /// No ToolResult yet AND the session is live — "the latest it's running".
+    Running,
+    Ok,
+    Failed,
+    /// No ToolResult and the session is gone (crashed harness / killed run).
+    /// Paints like a finished row: never an eternal spinner (the same rule
+    /// as the Working indicator's staleness gate).
+    Unfinished,
+}
+
+/// Every shell command the agent ran, in transcript order — the agent
+/// terminal's scrollback. Commands are single-lined like the chips were (a
+/// literal newline would be a cursor move in this voice too). The full
+/// history stays reachable: the feed scrolls, and transcript deep-links
+/// anchor into it by tool id.
+///
+/// `live` is the session's staleness-gated indicator (`effective_indicator`
+/// != None): an unresolved command only reads as running while the session
+/// that launched it is actually alive.
+pub fn exec_feed(entries: &[comet_doc::SessionMessageEntry], live: bool) -> Vec<FeedEntry> {
+    entries
+        .iter()
+        .flat_map(|entry| entry.parts.iter())
+        .filter_map(|part| match part {
+            MessagePart::Tool {
+                id,
+                call: ToolCall::Exec { command },
+                is_error,
+                resolved,
+            } => Some(FeedEntry {
+                id: id.clone(),
+                command: single_line(command),
+                status: if *is_error {
+                    FeedStatus::Failed
+                } else if *resolved {
+                    FeedStatus::Ok
+                } else if live {
+                    FeedStatus::Running
+                } else {
+                    FeedStatus::Unfinished
+                },
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The scroll target for this frame: a deep-link anchor wins; otherwise any
+/// change to the tail fingerprint — `(feed_len, tail_expansion_lines)` —
+/// scrolls the tail into view: a new command arrived, or the tail row's
+/// expansion grew/shrank (output loaded, auto-collapse as the tail moved,
+/// user toggled the last row). Follow-bottom without needing the scroll
+/// offset; yanking on real tail movement is correct for a command feed.
+pub fn follow_target(
+    prev: (usize, usize),
+    cur: (usize, usize),
+    anchor: Option<usize>,
+) -> Option<usize> {
+    if let Some(ix) = anchor {
+        return Some(ix);
+    }
+    (prev != cur && cur.0 > 0).then(|| cur.0 - 1)
+}
+
+/// Effective expansion for a feed row: the LATEST command auto-expands
+/// (older ones collapse as the tail moves) — a manual pin keeps a row open
+/// regardless, a manual dismissal keeps even the latest row shut.
+pub fn is_feed_row_expanded(
+    pinned: Option<&HashSet<String>>,
+    dismissed: Option<&HashSet<String>>,
+    id: &str,
+    is_last: bool,
+) -> bool {
+    pinned.is_some_and(|s| s.contains(id))
+        || (is_last && !dismissed.is_some_and(|s| s.contains(id)))
+}
+
+/// Harness label for the tab title (brand voice: lowercase for pi).
+pub fn harness_label(harness: HarnessId) -> &'static str {
+    match harness {
+        HarnessId::Pi => "pi",
+        HarnessId::ClaudeCode => "claude code",
+        HarnessId::Codex => "codex",
+        HarnessId::Cursor => "cursor",
+        HarnessId::Mock => "mock",
+    }
+}
+
+/// Provider prefix noise ("anthropic/claude-opus-4.5" → "claude-opus-4.5").
+pub fn short_model_name(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
+/// The name the pinned tab is titled after: the chat's model (provider
+/// prefix stripped), falling back to the harness name, then "agent" before
+/// config lands.
+pub fn agent_tab_name(config: Option<&comet_proto::ChatConfig>) -> &str {
+    config
+        .map(|config| {
+            config
+                .model
+                .as_deref()
+                .map(short_model_name)
+                .unwrap_or_else(|| harness_label(config.harness))
+        })
+        .unwrap_or("agent")
+}
+
+/// The pinned tab's title: "<model or harness>'s terminal".
+pub fn agent_tab_title(chat: Option<&Chat>) -> SharedString {
+    SharedString::from(format!(
+        "{}'s terminal",
+        agent_tab_name(chat.and_then(|c| c.config.as_ref()))
+    ))
+}
 
 actions!(terminal, [ToggleTerminal]);
 
@@ -140,6 +282,12 @@ pub fn exit_message(code: i32) -> Vec<u8> {
     format!("\r\n\x1b[90m[process exited {code}]\x1b[0m\r\n").into_bytes()
 }
 
+/// "Terminal N" numbering counts PTY tabs only — the pinned agent tab at
+/// slot 0 isn't "Terminal 1".
+fn next_pty_number(kinds: impl Iterator<Item = TabKind>) -> usize {
+    kinds.filter(|kind| *kind == TabKind::Pty).count() + 1
+}
+
 /// Tab title from the session's shell path ("/bin/zsh" → "zsh").
 pub fn shell_title(shell: &str) -> String {
     let name = shell.rsplit(['/', '\\']).next().unwrap_or(shell).trim();
@@ -174,8 +322,18 @@ pub struct GridSnapshot {
     pub cursor: Option<CursorSnapshot>,
 }
 
+/// What a tab shows: a real engine PTY, or the agent's command feed (the
+/// pinned first tab — "<agent>'s terminal": the commands the model runs live
+/// here, not in transcript chips).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabKind {
+    Pty,
+    Agent,
+}
+
 struct TerminalTab {
     key: u64,
+    kind: TabKind,
     title: SharedString,
     terminal_id: Option<String>,
     emulator: Emulator,
@@ -188,10 +346,59 @@ struct TerminalTab {
     _run: Option<Task<()>>,
 }
 
+/// A fetched `ToolOutput` answer, cached per chat. `Unavailable` is cached
+/// too — for a resolved command "no record" is a stable answer, and re-
+/// fetching on every expand would just hammer the journal.
+enum FeedOutput {
+    Loaded { output: String, truncated: bool },
+    Unavailable,
+}
+
+/// What an expanded feed row shows under the command line.
+enum FeedExpansion<'a> {
+    Collapsed,
+    /// Expanded while the command is still unresolved — no fetch yet (the
+    /// journal has nothing until the ToolResult lands).
+    StillRunning,
+    Loading,
+    Lines(&'a [String]),
+    Unavailable,
+    /// Resolved with an explicitly empty capture.
+    NoOutput,
+}
+
+/// Expanded-row display lines: the LAST [`FEED_OUTPUT_MAX_LINES`] of the
+/// capture, with marker lines for what got cut (at capture time and/or by
+/// the view cap).
+pub fn output_display_lines(output: &str, truncated: bool) -> Vec<String> {
+    let all: Vec<&str> = output.lines().collect();
+    let hidden = all.len().saturating_sub(FEED_OUTPUT_MAX_LINES);
+    let mut out = Vec::with_capacity(all.len() - hidden + 2);
+    if truncated {
+        out.push(format!(
+            "… truncated to the last {} KB",
+            comet_proto::TOOL_OUTPUT_MAX_BYTES / 1024
+        ));
+    }
+    if hidden > 0 {
+        out.push(format!("… {hidden} earlier lines"));
+    }
+    out.extend(all.iter().skip(hidden).map(|line| line.to_string()));
+    out
+}
+
 #[derive(Default)]
-struct ChatTabs {
+pub struct ChatTabs {
     tabs: Vec<TerminalTab>,
     active: usize,
+    /// Manually expanded feed rows (pins — survive the auto tail moving past).
+    feed_pinned: HashSet<String>,
+    /// Manually collapsed rows — a dismissal keeps even the latest row shut.
+    feed_dismissed: HashSet<String>,
+    /// `ToolOutput` answers by tool id.
+    feed_outputs: HashMap<String, FeedOutput>,
+    /// In-flight `ToolOutput` calls (kills render-loop refetch).
+    feed_pending: HashSet<String>,
 }
 
 /// Drag-reorder state; `epoch` keys the 150 ms slide animation restarts.
@@ -242,6 +449,16 @@ pub struct TerminalPanel {
     tab_seq: u64,
     drag: Option<DragState>,
     last_selected: Option<String>,
+    /// Agent-feed scroll; one handle reused across chats (offset heals via
+    /// the follow-bottom rule on the first frame after a switch).
+    feed_scroll: gpui::ScrollHandle,
+    /// Deep-link anchor: the tool id to scroll into view (consumed on render).
+    pending_anchor: Option<String>,
+    /// Rows flashing from the last deep link (cleared on a timer).
+    flash_ids: Vec<String>,
+    /// Follow-bottom baseline: the `(feed_len, tail_expansion_lines)`
+    /// fingerprint at the last render — any change scrolls the tail into view.
+    last_tail_fp: (usize, usize),
     _observe: Subscription,
 }
 
@@ -256,6 +473,10 @@ impl TerminalPanel {
             tab_seq: 0,
             drag: None,
             last_selected: None,
+            feed_scroll: gpui::ScrollHandle::new(),
+            pending_anchor: None,
+            flash_ids: Vec::new(),
+            last_tail_fp: (0, 0),
             _observe: observe,
         }
     }
@@ -280,6 +501,12 @@ impl TerminalPanel {
         if switched {
             self.last_selected = selected;
             self.drag = None;
+            // The feed belongs to the old chat: re-baseline so the first
+            // frame of the new chat follows to its tail, and drop any
+            // deep-link state aimed at rows that are no longer shown.
+            self.pending_anchor = None;
+            self.flash_ids.clear();
+            self.last_tail_fp = (0, 0);
         }
         if self.open {
             // Returning to a chat with tabs restores them; a fresh chat (or an
@@ -287,7 +514,9 @@ impl TerminalPanel {
             // ensure_tab is idempotent, so calling on every state change is safe.
             self.ensure_tab(cx);
         }
-        if switched {
+        // A visible agent feed re-renders on every state change (transcript
+        // frames stream in at 120ms commits); PTY tabs only need chat swaps.
+        if switched || (self.open && self.active_is_agent(cx)) {
             cx.notify();
         }
     }
@@ -321,9 +550,63 @@ impl TerminalPanel {
         let Some(chat) = self.selected_chat(cx) else {
             return;
         };
-        if self.chats.get(&chat).is_none_or(|c| c.tabs.is_empty()) {
+        self.ensure_agent_tab(&chat, cx);
+        if self
+            .chats
+            .get(&chat)
+            .is_none_or(|c| !c.tabs.iter().any(|t| t.kind == TabKind::Pty))
+        {
             self.open_tab(chat, cx);
         }
+    }
+
+    /// The pinned agent-feed tab at slot 0 (created once per chat; never
+    /// closable, never draggable). Inserting it shifts any restored active
+    /// index one slot right.
+    fn ensure_agent_tab(&mut self, chat: &str, cx: &mut Context<Self>) {
+        if self
+            .chats
+            .get(chat)
+            .is_some_and(|c| c.tabs.first().is_some_and(|t| t.kind == TabKind::Agent))
+        {
+            return;
+        }
+        self.tab_seq += 1;
+        let key = self.tab_seq;
+        let entry = self.chats.entry(chat.to_string()).or_default();
+        entry.tabs.insert(
+            0,
+            TerminalTab {
+                key,
+                kind: TabKind::Agent,
+                title: SharedString::default(),
+                terminal_id: None,
+                emulator: Emulator::new(80, 24),
+                exited: None,
+                last_seq: 0,
+                coalescer: InputCoalescer::default(),
+                flush_task: None,
+                resize_task: None,
+                _run: None,
+            },
+        );
+        if entry.tabs.len() > 1 {
+            entry.active += 1;
+        }
+        cx.notify();
+    }
+
+    fn active_is_agent(&self, cx: &App) -> bool {
+        let Some(chat) = self.state.read(cx).selected_chat.clone() else {
+            return false;
+        };
+        self.chats
+            .get(&chat)
+            .is_some_and(|tabs| {
+                tabs.tabs
+                    .get(tabs.active)
+                    .is_some_and(|t| t.kind == TabKind::Agent)
+            })
     }
 
     fn tab_mut(&mut self, chat: &str, key: u64) -> Option<&mut TerminalTab> {
@@ -349,9 +632,12 @@ impl TerminalPanel {
         self.tab_seq += 1;
         let key = self.tab_seq;
         let entry = self.chats.entry(chat.clone()).or_default();
-        let tab_no = entry.tabs.len() + 1;
+        // Numbering counts PTY tabs only — the pinned agent tab at slot 0
+        // isn't "Terminal 1".
+        let tab_no = next_pty_number(entry.tabs.iter().map(|t| t.kind));
         entry.tabs.push(TerminalTab {
             key,
+            kind: TabKind::Pty,
             title: format!("Terminal {tab_no}").into(),
             terminal_id: None,
             emulator: Emulator::new(80, 24),
@@ -755,6 +1041,124 @@ impl TerminalPanel {
         }
     }
 
+    /// Deep-link from the transcript's "ran N commands" pill: pin the agent
+    /// tab active, anchor the feed at the group's first command, and flash
+    /// the group's rows so the commands you came from are findable.
+    pub fn reveal_agent_commands(&mut self, tool_ids: Vec<String>, cx: &mut Context<Self>) {
+        let Some(chat) = self.selected_chat(cx) else {
+            return;
+        };
+        self.ensure_agent_tab(&chat, cx);
+        if let Some(tabs) = self.chats.get_mut(&chat)
+            && !tabs.tabs.is_empty()
+        {
+            tabs.active = 0;
+        }
+        self.pending_anchor = tool_ids.first().cloned();
+        self.flash_ids = tool_ids;
+        let flash_clear = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(FEED_FLASH_MS))
+                .await;
+            this.update(cx, |panel, cx| {
+                panel.flash_ids.clear();
+                cx.notify();
+            })
+            .ok();
+        });
+        flash_clear.detach();
+        cx.notify();
+    }
+
+    /// Row click: flip a feed row's expansion. Effective expansion is
+    /// `is_feed_row_expanded` — the LATEST row auto-expands and older ones
+    /// auto-collapse, with manual pins/dismissals overriding. The fetch
+    /// itself is render-driven (`ensure_feed_fetch`) so a row expanded
+    /// while Running picks up its output the frame the command resolves.
+    fn toggle_feed_row(&mut self, chat: &str, tool_id: &str, cx: &mut Context<Self>) {
+        let is_last = {
+            let state = self.state.read(cx);
+            exec_feed(&state.transcript, true)
+                .last()
+                .is_some_and(|entry| entry.id == tool_id)
+        };
+        let entry = self.chats.entry(chat.to_owned()).or_default();
+        if is_feed_row_expanded(
+            Some(&entry.feed_pinned),
+            Some(&entry.feed_dismissed),
+            tool_id,
+            is_last,
+        ) {
+            entry.feed_pinned.remove(tool_id);
+            entry.feed_dismissed.insert(tool_id.to_owned());
+        } else {
+            entry.feed_dismissed.remove(tool_id);
+            entry.feed_pinned.insert(tool_id.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// Kick a `ToolOutput` call for an expanded, resolved, uncached row.
+    /// Host-local lookup: the answer comes from the chat host's run journal
+    /// (`target` routes there), never from the synced doc.
+    fn ensure_feed_fetch(&mut self, chat: &str, tool_id: &str, status: FeedStatus, cx: &mut Context<Self>) {
+        if status == FeedStatus::Running {
+            return;
+        }
+        let needs_fetch = {
+            let entry = self.chats.entry(chat.to_owned()).or_default();
+            !entry.feed_outputs.contains_key(tool_id) && entry.feed_pending.insert(tool_id.to_owned())
+        };
+        if !needs_fetch {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            if let Some(entry) = self.chats.get_mut(chat) {
+                entry.feed_pending.remove(tool_id);
+                entry.feed_outputs.insert(tool_id.to_owned(), FeedOutput::Unavailable);
+            }
+            return;
+        };
+        let target = self.chat_target(chat, cx);
+        let chat_owned = chat.to_owned();
+        let tool_owned = tool_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let reply = engine
+                .client()
+                .call_as::<ToolOutputReply>(
+                    methods::TOOL_OUTPUT,
+                    with_target(
+                        serde_json::json!({ "chatId": chat_owned, "toolId": tool_owned }),
+                        &target,
+                    ),
+                )
+                .await;
+            this.update(cx, |panel, cx| {
+                if let Some(entry) = panel.chats.get_mut(&chat_owned) {
+                    entry.feed_pending.remove(&tool_owned);
+                    if let Ok(reply) = reply {
+                        // found:false / output:None are stable answers for a
+                        // resolved command — cache them.
+                        let output = match (reply.found, reply.output) {
+                            (true, Some(output)) => FeedOutput::Loaded {
+                                output,
+                                truncated: reply.truncated,
+                            },
+                            _ => FeedOutput::Unavailable,
+                        };
+                        entry.feed_outputs.insert(tool_owned, output);
+                        cx.notify();
+                    }
+                    // Transient RPC/relay failure (Err): left UNCACHED and no
+                    // notify, or render would refire in a hot loop — the next
+                    // natural render retries.
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn close_tab(&mut self, chat: &str, key: u64, window: &mut Window, cx: &mut Context<Self>) {
         let engine = self.engine(cx);
         let target = self.chat_target(chat, cx);
@@ -764,9 +1168,17 @@ impl TerminalPanel {
         let Some(ix) = tabs.tabs.iter().position(|t| t.key == key) else {
             return;
         };
+        // The pinned agent tab is not closable (no close button either, but
+        // middle-click still reaches here).
+        if tabs.tabs[ix].kind == TabKind::Agent {
+            return;
+        }
         let tab = tabs.tabs.remove(ix);
         tabs.active = active_after_close(tabs.active, ix, tabs.tabs.len());
-        let now_empty = tabs.tabs.is_empty();
+        // Closing the LAST PTY closes the drawer too — a dock showing only
+        // the feed wasn't asked for by a terminal close (comet parity: the
+        // empty-dock rule, with the agent tab not counting as a terminal).
+        let now_empty = !tabs.tabs.iter().any(|t| t.kind == TabKind::Pty);
         self.drag = None;
         // Closing the LAST terminal closes the drawer too — an empty dock is
         // dead space (user request). Same path as the collapse chevron.
@@ -821,6 +1233,156 @@ impl TerminalPanel {
 
     // ---- render ----
 
+    /// The agent tab's body: every command the agent ran, terminal-styled
+    /// (mono, `$` prompts, the running one spinning), scrollable through the
+    /// full history. Deep-link anchors scroll to the group's first command;
+    /// its rows flash briefly.
+    fn render_agent_feed(&mut self, chat: &str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let feed = {
+            let state = self.state.read(cx);
+            let live = comet_proto::view::effective_indicator(
+                state.session_for(chat),
+                chrono::Utc::now(),
+            ) != comet_proto::view::Indicator::None;
+            exec_feed(&state.transcript, live)
+        };
+
+        // Scroll target for this frame: a pending deep-link anchor wins, else
+        // any tail-fingerprint change (new command, or the tail row's
+        // expansion growing/shrinking) follows to the tail. Pure rule:
+        // `follow_target`. Rows are uniform-height direct children (expansion
+        // blocks are measured), so `scroll_to_item` lands.
+        let anchor_ix = self
+            .pending_anchor
+            .take()
+            .and_then(|anchor| feed.iter().position(|e| e.id == anchor));
+        // Tail fingerprint without allocating the display lines: mirror
+        // `output_display_lines`' counting.
+        let cur_fp = {
+            let tabs = self.chats.get(chat);
+            let tail_lines = match feed.last() {
+                Some(tail)
+                    if is_feed_row_expanded(
+                        tabs.map(|t| &t.feed_pinned),
+                        tabs.map(|t| &t.feed_dismissed),
+                        &tail.id,
+                        true,
+                    ) =>
+                {
+                    if tail.status == FeedStatus::Running {
+                        1
+                    } else {
+                        match tabs.and_then(|t| t.feed_outputs.get(&tail.id)) {
+                            Some(FeedOutput::Loaded { output, truncated })
+                                if !output.is_empty() =>
+                            {
+                                let total = output.lines().count();
+                                let hidden = total.saturating_sub(FEED_OUTPUT_MAX_LINES);
+                                total.min(FEED_OUTPUT_MAX_LINES)
+                                    + usize::from(hidden > 0)
+                                    + usize::from(*truncated)
+                            }
+                            // Loaded-empty / unavailable / in-flight all show
+                            // a single note line.
+                            _ => 1,
+                        }
+                    }
+                }
+                _ => 0,
+            };
+            (feed.len(), tail_lines)
+        };
+        if let Some(ix) = follow_target(self.last_tail_fp, cur_fp, anchor_ix) {
+            self.feed_scroll.scroll_to_item(ix);
+        }
+        self.last_tail_fp = cur_fp;
+
+        if feed.is_empty() {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from("no commands yet"))
+                .into_any_element();
+        }
+
+        // Owned snapshot: a `&str` set would borrow self across the mutable
+        // fetch kicks below.
+        let flash: std::collections::HashSet<String> =
+            self.flash_ids.iter().cloned().collect();
+        // Fetch kick for expanded, resolved, uncached rows — render-driven so
+        // a row expanded mid-run fetches on the frame its command resolves
+        // (the doc flip re-renders us; `feed_pending` kills the refire).
+        let feed_len = feed.len();
+        for (ix, entry) in feed.iter().enumerate() {
+            let tabs = self.chats.get(chat);
+            let expanded = is_feed_row_expanded(
+                tabs.map(|t| &t.feed_pinned),
+                tabs.map(|t| &t.feed_dismissed),
+                &entry.id,
+                ix == feed_len - 1,
+            );
+            if expanded {
+                self.ensure_feed_fetch(chat, &entry.id, entry.status, cx);
+            }
+        }
+        let chat_owned = chat.to_owned();
+        div()
+            .id("agent-feed-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.feed_scroll)
+            .p(px(super::view::TERM_PADDING))
+            .flex()
+            .flex_col()
+            .children(feed.iter().enumerate().map(|(ix, entry)| {
+                let tabs = self.chats.get(chat);
+                let expanded = is_feed_row_expanded(
+                    tabs.map(|t| &t.feed_pinned),
+                    tabs.map(|t| &t.feed_dismissed),
+                    &entry.id,
+                    ix == feed_len - 1,
+                );
+                let cached = tabs.and_then(|tabs| tabs.feed_outputs.get(&entry.id));
+                let lines = match cached {
+                    Some(FeedOutput::Loaded { output, truncated }) if !output.is_empty() => {
+                        Some(output_display_lines(output, *truncated))
+                    }
+                    _ => None,
+                };
+                let expansion = if !expanded {
+                    FeedExpansion::Collapsed
+                } else if entry.status == FeedStatus::Running {
+                    FeedExpansion::StillRunning
+                } else {
+                    match (cached, &lines) {
+                        (Some(FeedOutput::Loaded { .. }), Some(lines)) => {
+                            FeedExpansion::Lines(lines.as_slice())
+                        }
+                        (Some(FeedOutput::Loaded { .. }), None) => FeedExpansion::NoOutput,
+                        (Some(FeedOutput::Unavailable), _) => FeedExpansion::Unavailable,
+                        (None, _) => FeedExpansion::Loading,
+                    }
+                };
+                let row = feed_row(entry, flash.contains(entry.id.as_str()), &expansion, theme);
+                let tool_id = entry.id.clone();
+                let chat_for_click = chat_owned.clone();
+                row.id(SharedString::from(format!("feed-row-{}", entry.id)))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(crate::theme::white_alpha(0.03)))
+                    .on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _window, cx| {
+                            this.toggle_feed_row(&chat_for_click, &tool_id, cx);
+                        },
+                    ))
+            }))
+            .into_any_element()
+    }
+
     fn render_tab_bar(&mut self, chat: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
         let tabs = self.chats.get(chat);
@@ -830,6 +1392,23 @@ impl TerminalPanel {
             .as_ref()
             .map(|d| (d.from, d.over, d.epoch, d.prev_over));
         let chat_owned = chat.to_string();
+        // Live title + running indicator for the pinned agent tab. Running
+        // rides the same staleness gate as the Working indicator — a dead
+        // session never spins forever.
+        let state = self.state.read(cx);
+        let chat_row = state.chats.iter().find(|c| c.id == chat);
+        let agent_title = agent_tab_title(chat_row);
+        let agent_harness = chat_row
+            .and_then(|c| c.config.as_ref())
+            .map(|config| config.harness)
+            .unwrap_or(HarnessId::Pi);
+        let session_live = comet_proto::view::effective_indicator(
+            state.session_for(chat),
+            chrono::Utc::now(),
+        ) != comet_proto::view::Indicator::None;
+        let agent_running = exec_feed(&state.transcript, session_live)
+            .iter()
+            .any(|e| e.status == FeedStatus::Running);
 
         let tab_elements: Vec<_> = tabs
             .map(|tabs| {
@@ -839,11 +1418,16 @@ impl TerminalPanel {
                     .map(|(ix, tab)| {
                         let selected = ix == active;
                         let key = tab.key;
-                        // Fixed sequential label (comet: "Terminal N") — the
-                        // OSC title never replaces it.
-                        let title = tab.title.clone();
+                        // PTY tabs: fixed sequential label (comet: "Terminal
+                        // N") — the OSC title never replaces it. The agent
+                        // tab's title is computed live from the chat config.
+                        let title = if tab.kind == TabKind::Agent {
+                            agent_title.clone()
+                        } else {
+                            tab.title.clone()
+                        };
                         let exited = tab.exited.is_some();
-                        (ix, key, title, selected, exited)
+                        (ix, key, tab.kind, title, selected, exited)
                     })
                     .collect()
             })
@@ -874,7 +1458,8 @@ impl TerminalPanel {
                     }
                     let from = payload.from;
                     let rel_x = f32::from(event.event.position.x) - f32::from(event.bounds.left());
-                    let over = drop_index(rel_x, TAB_WIDTH, count);
+                    // Slot 0 is the pinned agent tab — PTYs drop at 1+.
+                    let over = drop_index(rel_x, TAB_WIDTH, count).max(1);
                     this.update_drag_over(from, over, cx);
                 },
             ))
@@ -884,14 +1469,19 @@ impl TerminalPanel {
                     cx.notify();
                     return;
                 }
-                let to = this.drag.as_ref().map(|d| d.over).unwrap_or(payload.from);
+                let to = this
+                    .drag
+                    .as_ref()
+                    .map(|d| d.over)
+                    .unwrap_or(payload.from)
+                    .max(1);
                 let chat = drop_chat.clone();
                 this.commit_reorder(&chat, payload.from, to, cx);
             }))
             .children(
                 tab_elements
                     .into_iter()
-                    .map(|(ix, key, title, selected, exited)| {
+                    .map(|(ix, key, kind, title, selected, exited)| {
                         let chat_select = chat_owned.clone();
                         let chat_close = chat_owned.clone();
                         let chat_close2 = chat_owned.clone();
@@ -924,6 +1514,35 @@ impl TerminalPanel {
                                     .size(px(12.0))
                                     .text_color(theme.text_muted.opacity(0.8)),
                             );
+                        // Glyph: PTYs get the terminal mark; the agent tab
+                        // shows a live spinner while a command runs, else the
+                        // harness brand mark.
+                        let glyph: AnyElement = if kind == TabKind::Agent {
+                            if agent_running {
+                                div()
+                                    .size(px(16.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(crate::loaders::mini_gradient_spinner(
+                                        format!("agent-tab-spin-{key}"),
+                                        2.0,
+                                    ))
+                                    .into_any_element()
+                            } else {
+                                let (path, tint) = crate::pickers::harness_brand_icon(agent_harness);
+                                crate::icons::icon(path)
+                                    .size(px(16.0))
+                                    .text_color(tint.unwrap_or(text_color.opacity(glyph_alpha)))
+                                    .into_any_element()
+                            }
+                        } else {
+                            crate::icons::icon(crate::icons::TERMINAL)
+                                .size(px(16.0))
+                                .text_color(text_color.opacity(glyph_alpha))
+                                .into_any_element()
+                        };
                         let tab_el = div()
                             .id(("terminal-tab", key))
                             .w(px(TAB_WIDTH))
@@ -949,33 +1568,32 @@ impl TerminalPanel {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_tab(&chat_select, ix, cx);
                             }))
-                            // Middle-click closes (§1.10).
-                            .on_mouse_down(
-                                MouseButton::Middle,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.close_tab(&chat_close, key, window, cx);
-                                }),
-                            )
-                            .on_drag(
-                                TabDragPayload {
-                                    chat: chat_drag,
-                                    from: ix,
-                                    title: ghost_title,
-                                },
-                                |payload, _point, _, cx| {
-                                    let title = payload.title.clone();
-                                    cx.stop_propagation();
-                                    cx.new(|_| TabGhost { title })
-                                },
-                            )
+                            // PTY tabs: middle-click closes (§1.10), drag reorders.
+                            // The pinned agent tab does neither.
+                            .when(kind == TabKind::Pty, |el| {
+                                el.on_mouse_down(
+                                    MouseButton::Middle,
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.close_tab(&chat_close, key, window, cx);
+                                    }),
+                                )
+                                .on_drag(
+                                    TabDragPayload {
+                                        chat: chat_drag,
+                                        from: ix,
+                                        title: ghost_title,
+                                    },
+                                    |payload, _point, _, cx| {
+                                        let title = payload.title.clone();
+                                        cx.stop_propagation();
+                                        cx.new(|_| TabGhost { title })
+                                    },
+                                )
+                            })
                             .when(exited, |el| el.opacity(0.55))
-                            .child(
-                                crate::icons::icon(crate::icons::TERMINAL)
-                                    .size(px(16.0))
-                                    .text_color(text_color.opacity(glyph_alpha)),
-                            )
+                            .child(glyph)
                             .child(div().flex_1().min_w_0().truncate().child(title))
-                            .child(close_btn);
+                            .when(kind == TabKind::Pty, |el| el.child(close_btn));
 
                         // Sliding transform while a sibling is dragged over: animate
                         // 150 ms between committed offsets.
@@ -1067,6 +1685,120 @@ enum StreamDisposition {
     Stop,
 }
 
+/// One feed row: a command line in the agent's terminal voice — a status
+/// glyph (spinner while running, `✗` on failure, `$` otherwise) and the
+/// single-lined command, with a chevron marking it expandable. Deep-linked
+/// rows flash a wash. Expanded rows gain an output block under the command
+/// (variable height — the deep-link anchor still lands, gpui measures).
+fn feed_row(entry: &FeedEntry, flashing: bool, expansion: &FeedExpansion, theme: &Theme) -> gpui::Div {
+    let glyph: AnyElement = match entry.status {
+        FeedStatus::Running => div()
+            .size(px(16.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(crate::loaders::mini_gradient_spinner(
+                format!("feed-spin-{}", entry.id),
+                2.0,
+            ))
+            .into_any_element(),
+        FeedStatus::Failed => div()
+            .size(px(16.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(11.0))
+            .text_color(theme.danger)
+            .child(SharedString::from("✗"))
+            .into_any_element(),
+        // Finished rows — resolved or dead — read as settled history. A
+        // command whose session died mid-run never spins forever.
+        FeedStatus::Ok | FeedStatus::Unfinished => div()
+            .size(px(16.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(12.0))
+            .text_color(theme.text_faint)
+            .child(SharedString::from("$"))
+            .into_any_element(),
+    };
+    let text_color = match entry.status {
+        FeedStatus::Running | FeedStatus::Failed => theme.text,
+        FeedStatus::Ok | FeedStatus::Unfinished => theme.text_muted,
+    };
+    let expanded = !matches!(expansion, FeedExpansion::Collapsed);
+    let command_line = div()
+        .h(px(FEED_ROW_HEIGHT))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(4.0))
+        .when(flashing, |el| el.bg(crate::theme::white_alpha(0.06)))
+        .child(glyph)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_family(theme.font_mono.clone())
+                .text_size(px(12.0))
+                .text_color(text_color)
+                .child(SharedString::from(entry.command.clone())),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(10.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(if expanded { "▾" } else { "▸" })),
+        );
+    let mut row = div().flex_none().flex().flex_col().child(command_line);
+    // Output block, aligned under the command text (past glyph + gap).
+    let note = |text: &str| {
+        div()
+            .flex_none()
+            .pl(px(24.0))
+            .pb(px(4.0))
+            .font_family(theme.font_mono.clone())
+            .text_size(px(11.0))
+            .text_color(theme.text_faint)
+            .child(SharedString::from(text.to_owned()))
+    };
+    match expansion {
+        FeedExpansion::Collapsed => {}
+        FeedExpansion::StillRunning => row = row.child(note("still running…")),
+        FeedExpansion::Loading => row = row.child(note("fetching output…")),
+        FeedExpansion::Unavailable => row = row.child(note("output unavailable")),
+        FeedExpansion::NoOutput => row = row.child(note("(no output)")),
+        FeedExpansion::Lines(lines) => {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .pl(px(24.0))
+                    .pb(px(4.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .children(lines.iter().map(|line| {
+                        div()
+                            .flex_none()
+                            .truncate()
+                            .child(SharedString::from(line.clone()))
+                    })),
+            );
+        }
+    }
+    row
+}
+
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1087,6 +1819,51 @@ impl Render for TerminalPanel {
                 .into_any_element();
         };
         let focused = self.focus_handle.is_focused(window);
+        let agent_active = self.active_is_agent(cx);
+
+        // The agent feed is read-only: no PTY key encoding, no emulator
+        // scroll — its own overflow scroll handles the wheel.
+        let body: AnyElement = if agent_active {
+            div()
+                .id("terminal-body")
+                .flex_1()
+                .min_h_0()
+                .track_focus(&self.focus_handle)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window: &mut Window, cx| {
+                        window.focus(&this.focus_handle, cx);
+                    }),
+                )
+                .child(self.render_agent_feed(&chat, &theme, cx))
+                .into_any_element()
+        } else {
+            div()
+                .id("terminal-body")
+                .flex_1()
+                .min_h_0()
+                .key_context("Terminal")
+                .track_focus(&self.focus_handle)
+                .on_key_down(cx.listener(Self::on_key_down))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window: &mut Window, cx| {
+                        window.focus(&this.focus_handle, cx);
+                    }),
+                )
+                .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    let lines = match event.delta {
+                        ScrollDelta::Lines(delta) => delta.y,
+                        ScrollDelta::Pixels(delta) => {
+                            f32::from(delta.y) / super::view::TERM_LINE_HEIGHT
+                        }
+                    };
+                    let step = lines.round() as i32;
+                    this.scroll_active(step, cx);
+                }))
+                .child(TerminalElement::new(cx.entity(), focused))
+                .into_any_element()
+        };
 
         div()
             .size_full()
@@ -1094,32 +1871,7 @@ impl Render for TerminalPanel {
             .flex_col()
             .bg(terminal_bg())
             .child(self.render_tab_bar(&chat, cx))
-            .child(
-                div()
-                    .id("terminal-body")
-                    .flex_1()
-                    .min_h_0()
-                    .key_context("Terminal")
-                    .track_focus(&self.focus_handle)
-                    .on_key_down(cx.listener(Self::on_key_down))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window: &mut Window, cx| {
-                            window.focus(&this.focus_handle, cx);
-                        }),
-                    )
-                    .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
-                        let lines = match event.delta {
-                            ScrollDelta::Lines(delta) => delta.y,
-                            ScrollDelta::Pixels(delta) => {
-                                f32::from(delta.y) / super::view::TERM_LINE_HEIGHT
-                            }
-                        };
-                        let step = lines.round() as i32;
-                        this.scroll_active(step, cx);
-                    }))
-                    .child(TerminalElement::new(cx.entity(), focused)),
-            )
+            .child(body)
             .into_any_element()
     }
 }
@@ -1129,6 +1881,157 @@ mod tests {
     use super::*;
 
     #[test]
+    fn output_display_lines_tail_caps_with_markers() {
+        // Short output passes through untouched.
+        assert_eq!(output_display_lines("a\nb", false), vec!["a", "b"]);
+        // View cap: last FEED_OUTPUT_MAX_LINES kept, hidden count marked.
+        let big: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        let lines = output_display_lines(&big, false);
+        assert_eq!(lines.len(), FEED_OUTPUT_MAX_LINES + 1);
+        assert_eq!(lines[0], "… 6 earlier lines");
+        assert_eq!(lines[1], "line 7");
+        assert_eq!(lines.last().unwrap(), "line 30");
+        // Capture truncation gets its own marker, both markers stack.
+        let lines = output_display_lines(&big, true);
+        assert_eq!(lines[0], "… truncated to the last 64 KB");
+        assert_eq!(lines[1], "… 6 earlier lines");
+    }
+
+    fn exec_entry(
+        id: &str,
+        command: &str,
+        is_error: bool,
+        resolved: bool,
+    ) -> comet_doc::SessionMessageEntry {
+        comet_doc::SessionMessageEntry {
+            id: id.into(),
+            role: comet_doc::MessageRole::Assistant,
+            parts: vec![MessagePart::Tool {
+                id: format!("tool-{id}"),
+                call: ToolCall::Exec {
+                    command: command.into(),
+                },
+                is_error,
+                resolved,
+            }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+        }
+    }
+
+    #[test]
+    fn exec_feed_extracts_commands_in_transcript_order() {
+        let mut text_entry = exec_entry("m0", "ignored", false, true);
+        text_entry.parts = vec![MessagePart::Text {
+            id: "t".into(),
+            text: "prose".into(),
+        }];
+        let entries = vec![
+            text_entry,
+            exec_entry("m1", "ls -la", false, true),
+            exec_entry("m2", "cargo test\n--quiet", false, false),
+            exec_entry("m3", "false", true, true),
+        ];
+        let feed = exec_feed(&entries, true);
+        assert_eq!(feed.len(), 3, "non-exec parts never enter the feed");
+        assert_eq!(feed[0].command, "ls -la");
+        assert_eq!(feed[0].status, FeedStatus::Ok);
+        // Multi-line commands collapse to one terminal line.
+        assert_eq!(feed[1].command, "cargo test --quiet");
+        assert_eq!(feed[1].status, FeedStatus::Running);
+        assert_eq!(feed[2].status, FeedStatus::Failed);
+        // Deep-link ids are the tool part ids.
+        assert_eq!(feed[1].id, "tool-m2");
+    }
+
+    #[test]
+    fn exec_feed_unresolved_in_a_dead_session_is_not_running() {
+        let entries = vec![exec_entry("m1", "sleep 99", false, false)];
+        assert_eq!(exec_feed(&entries, true)[0].status, FeedStatus::Running);
+        // A crashed session must never leave an eternal spinner.
+        assert_eq!(
+            exec_feed(&entries, false)[0].status,
+            FeedStatus::Unfinished
+        );
+    }
+
+    #[test]
+    fn follow_target_anchor_wins_then_fingerprint_changes_follow_tail() {
+        // Deep-link anchor wins outright.
+        assert_eq!(follow_target((5, 0), (5, 0), Some(2)), Some(2));
+        assert_eq!(follow_target((5, 0), (6, 1), Some(0)), Some(0));
+        // A grown feed pins to its new tail.
+        assert_eq!(follow_target((5, 3), (6, 1), None), Some(5));
+        assert_eq!(follow_target((0, 0), (4, 2), None), Some(3));
+        // Same length but the tail row's expansion changed (output loaded,
+        // auto-collapse as the tail moved): still follows.
+        assert_eq!(follow_target((5, 1), (5, 24), None), Some(4));
+        assert_eq!(follow_target((5, 24), (5, 0), None), Some(4));
+        // A fully unchanged fingerprint never scrolls.
+        assert_eq!(follow_target((5, 3), (5, 3), None), None);
+        assert_eq!(follow_target((0, 0), (0, 0), None), None);
+    }
+
+    #[test]
+    fn feed_row_expansion_auto_tail_with_manual_overrides() {
+        let pinned =
+            |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<HashSet<String>>();
+        // The latest row auto-expands; older rows auto-collapse.
+        assert!(is_feed_row_expanded(None, None, "c", true));
+        assert!(!is_feed_row_expanded(None, None, "a", false));
+        // A pinned older row stays expanded.
+        assert!(is_feed_row_expanded(Some(&pinned(&["a"])), None, "a", false));
+        // A dismissed latest row stays collapsed.
+        assert!(!is_feed_row_expanded(None, Some(&pinned(&["c"])), "c", true));
+        // A dismissal on an older row is a no-op; a pin on the latest is a no-op.
+        assert!(!is_feed_row_expanded(None, Some(&pinned(&["a"])), "a", false));
+        assert!(is_feed_row_expanded(Some(&pinned(&["c"])), None, "c", true));
+    }
+
+    #[test]
+    fn agent_tab_name_rules() {
+        use comet_proto::{ChatConfig, ReasoningLevel, SandboxLevel};
+        let config = |harness, model: Option<&str>| ChatConfig {
+            harness,
+            model: model.map(str::to_string),
+            reasoning: None::<ReasoningLevel>,
+            model_options: serde_json::Map::new(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+        };
+        // Model wins, provider prefix stripped.
+        assert_eq!(
+            agent_tab_name(Some(&config(HarnessId::Pi, Some("anthropic/claude-opus-4.5")))),
+            "claude-opus-4.5"
+        );
+        assert_eq!(
+            agent_tab_name(Some(&config(HarnessId::Pi, Some("gpt-5.1")))),
+            "gpt-5.1"
+        );
+        // No model → harness brand name.
+        assert_eq!(agent_tab_name(Some(&config(HarnessId::Pi, None))), "pi");
+        // No config at all → generic.
+        assert_eq!(agent_tab_name(None), "agent");
+        // The title wraps the name with the possessive.
+        assert_eq!(agent_tab_title(None).as_ref(), "agent's terminal");
+    }
+
+    #[test]
+    fn short_model_name_strips_provider_prefix() {
+        assert_eq!(short_model_name("anthropic/claude-opus-4.5"), "claude-opus-4.5");
+        assert_eq!(short_model_name("gpt-5.1"), "gpt-5.1");
+        assert_eq!(short_model_name(""), "");
+    }
+
+    #[test]
+    fn pty_numbering_skips_the_pinned_agent_tab() {
+        assert_eq!(next_pty_number([TabKind::Agent].into_iter()), 1);
+        assert_eq!(next_pty_number([TabKind::Agent, TabKind::Pty].into_iter()), 2);
+        assert_eq!(next_pty_number([].into_iter()), 1);
+    }
+
+    #[test]
     fn height_clamps_between_160_and_55vh() {
         assert_eq!(clamp_terminal_height(300.0, 900.0), 300.0);
         assert_eq!(clamp_terminal_height(10.0, 900.0), 160.0);
@@ -1136,6 +2039,16 @@ mod tests {
         // Tiny windows: min wins over the 55vh cap.
         assert_eq!(clamp_terminal_height(200.0, 100.0), 160.0);
         assert_eq!(clamp_terminal_height(f32::NAN, 900.0), 160.0);
+    }
+
+    #[test]
+    fn drop_index_clamped_keeps_agent_tab_pinned() {
+        // Slot 0 belongs to the agent tab: every drop position clamps to 1+.
+        // (drop_index is floor-based: hovering slot k lands at index k.)
+        assert_eq!(drop_index(0.0, TAB_WIDTH, 4).max(1), 1);
+        assert_eq!(drop_index(TAB_WIDTH * 0.5, TAB_WIDTH, 4).max(1), 1);
+        assert_eq!(drop_index(TAB_WIDTH * 1.5, TAB_WIDTH, 4).max(1), 1);
+        assert_eq!(drop_index(TAB_WIDTH * 2.5, TAB_WIDTH, 4).max(1), 2);
     }
 
     #[test]

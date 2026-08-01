@@ -385,6 +385,7 @@ impl WorkspaceHost {
             checkout_id: None,
             config: None,
             last_message_preview: None,
+            last_command: None,
             last_message_at: None,
             created_at: Utc::now(),
             harness_session_id: None,
@@ -447,6 +448,26 @@ impl WorkspaceHost {
         });
         if let Err(err) = result {
             tracing::warn!(chat = %chat_id, error = %err, "workspace last-message write failed");
+        }
+    }
+
+    /// Sidebar freshness on tool-call persist: the latest exec command,
+    /// single-lined and capped like the message preview. Whether it's still
+    /// running reads off the row's Working rail — no flag needed here.
+    pub fn note_command(&self, chat_id: &str, command: &str) {
+        let single = command.lines().collect::<Vec<_>>().join(" ");
+        let capped: String = single.trim().chars().take(120).collect();
+        if capped.is_empty() {
+            return;
+        }
+        let result = self.claim_chat(chat_id, None).and_then(|_| {
+            self.inner
+                .doc
+                .set_chat_last_command(chat_id, &capped)
+                .map_err(EngineError::from)
+        });
+        if let Err(err) = result {
+            tracing::warn!(chat = %chat_id, error = %err, "workspace last-command write failed");
         }
     }
 
@@ -521,6 +542,7 @@ impl WorkspaceHost {
             checkout_id: None,
             config,
             last_message_preview: None,
+            last_command: None,
             last_message_at: None,
             created_at: Utc::now(),
             harness_session_id: None,

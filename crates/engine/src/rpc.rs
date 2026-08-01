@@ -128,6 +128,13 @@ struct ListFoldersParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ToolOutputParams {
+    chat_id: String,
+    tool_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct OpenTerminalParams {
     chat_id: String,
     cols: u16,
@@ -569,6 +576,9 @@ fn forwardable(method: &str) -> bool {
             | methods::WRITE_TERMINAL
             | methods::RESIZE_TERMINAL
             | methods::CLOSE_TERMINAL
+            // Tool outputs live in the chat host's run journal (host-local,
+            // never synced — that's the point of the lookup).
+            | methods::TOOL_OUTPUT
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -916,6 +926,14 @@ impl RpcService for EngineRpc {
                     .open(&cwd, p.cols, p.rows)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&session)
+            }
+            methods::TOOL_OUTPUT => {
+                let p: ToolOutputParams = parse_params(params)?;
+                let reply = self
+                    .sessions
+                    .journal_tool_output(&p.chat_id, &p.tool_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&reply)
             }
             methods::SUBSCRIBE_TERMINAL => {
                 let p: SubscribeTerminalParams = parse_params(params)?;

@@ -75,6 +75,9 @@ pub mod methods {
     pub const WRITE_TERMINAL: &str = "WriteTerminal";
     pub const RESIZE_TERMINAL: &str = "ResizeTerminal";
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
+    /// A tool result's captured output from the chat host's run journal
+    /// (ControlRpc, relay-forwardable — journals are host-local by design).
+    pub const TOOL_OUTPUT: &str = "ToolOutput";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
