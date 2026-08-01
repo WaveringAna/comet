@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space};
+use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Project};
 
 // ---------------------------------------------------------------------------
 // Connection + status
@@ -95,7 +95,7 @@ pub fn attention_rank(status: ChatIndicator) -> u8 {
 /// dropped its row under the pointer (user report: "their position in the
 /// scrollbar changes"). Matches the old sidebar, which rendered chats in
 /// recency order and let the dots carry urgency; [`attention_rank`] still
-/// aggregates the space rows' urgency dot.
+/// aggregates the project rows' urgency dot.
 pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
     rows.sort_by(|(_, a), (_, b)| {
         let ka = a.last_message_at.unwrap_or(a.created_at);
@@ -104,7 +104,7 @@ pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
     });
 }
 
-/// Session-tab order for a space: creation order (activity never reorders
+/// Session-tab order for a project: creation order (activity never reorders
 /// tabs), id tiebreak. Pure.
 pub fn sort_tabs(chats: &mut [&Chat]) {
     chats.sort_by(|a, b| {
@@ -114,10 +114,10 @@ pub fn sort_tabs(chats: &mut [&Chat]) {
     });
 }
 
-/// Spaces list order: creation order, id tiebreak — total and stable across
+/// Projects list order: creation order, id tiebreak — total and stable across
 /// devices. Pure.
-pub fn sort_spaces(spaces: &mut [Space]) {
-    spaces.sort_by(|a, b| {
+pub fn sort_projects(projects: &mut [Project]) {
+    projects.sort_by(|a, b| {
         a.created_at
             .cmp(&b.created_at)
             .then_with(|| a.id.cmp(&b.id))
@@ -300,7 +300,7 @@ pub fn chat_location(chat: &Chat) -> Option<String> {
 
 /// Collapse model-generated text onto ONE line for single-line surfaces (tool
 /// chips, titles, previews): newlines, tabs and runs of whitespace become
-/// single spaces, trimmed.
+/// single projects, trimmed.
 ///
 /// Both viewports need this for the same reason from opposite directions — gpui
 /// breaks on a literal `\n` before its ellipsis logic, and a terminal cell grid
@@ -461,7 +461,7 @@ pub mod dot {
 /// would let the UI hold a combination the engine cannot honour.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CheckoutKind {
-    /// The space's own folder — or the picked ref's existing worktree.
+    /// The project's own folder — or the picked ref's existing worktree.
     #[default]
     Local,
     /// A fresh isolated worktree created off the picked base ref on send.
@@ -471,12 +471,12 @@ pub enum CheckoutKind {
 /// The resolved on-send checkout action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckoutPlan {
-    /// Run in the space folder as-is.
+    /// Run in the project folder as-is.
     CurrentCheckout,
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
     /// `CreateWorktree` off `base` on send (the engine mints a `comet/<name>`
-    /// branch). `base: None` = refs never loaded — send falls back to the space
+    /// branch). `base: None` = refs never loaded — send falls back to the project
     /// folder rather than failing.
     NewWorktree { base: Option<String> },
 }
@@ -546,7 +546,7 @@ mod checkout_tests {
                 branch: "feat".into()
             }
         );
-        // No ref picked at all is still the space folder.
+        // No ref picked at all is still the project folder.
         assert_eq!(
             checkout_plan(CheckoutKind::Local, None),
             CheckoutPlan::CurrentCheckout
@@ -561,7 +561,7 @@ mod checkout_tests {
                 base: Some("main".into())
             }
         );
-        // Refs never loaded: send falls back to the space folder rather than
+        // Refs never loaded: send falls back to the project folder rather than
         // failing, so the base is allowed to be absent.
         assert_eq!(
             checkout_plan(CheckoutKind::NewWorktree, None),

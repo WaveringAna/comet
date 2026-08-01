@@ -249,7 +249,7 @@ async fn target_device_id_routes_over_the_relay() {
     };
     assert!(remote.is_array());
 
-    // The add-space picker's exact call: browse a folder ON B from A's IPC
+    // The add-project picker's exact call: browse a folder ON B from A's IPC
     // surface (ListFolders + targetDeviceId, relay-forwarded).
     let browse_dir = dirs.path().join("b-folders");
     std::fs::create_dir_all(browse_dir.join("project-x")).expect("browse fixture");
@@ -348,22 +348,22 @@ async fn terminal_stream_proxies_over_the_relay() {
     let cwd = dirs.path().join("work");
     std::fs::create_dir_all(&cwd).expect("cwd");
 
-    // Engine B hosts its device room; its chat row (via its space) pins the
+    // Engine B hosts its device room; its chat row (via its project) pins the
     // terminal cwd.
     let core_b = assemble(&dirs.path().join("b"), "device-b");
     core_b
         .workspace
-        .create_space(
-            "space-term",
+        .create_project(
+            "project-term",
             "device-b",
             &cwd.to_string_lossy(),
             None,
             false,
         )
-        .expect("space row on B");
+        .expect("project row on B");
     core_b
         .workspace
-        .create_chat("chat-term", "space-term", None, None)
+        .create_chat("chat-term", "project-term", None, None)
         .expect("chat row on B");
     let _host = core_b.start_host_relay(&relay_url);
 

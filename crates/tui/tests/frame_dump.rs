@@ -8,7 +8,7 @@
 use chrono::Utc;
 use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use comet_proto::view::ConnectionStatus;
-use comet_proto::{AuthState, Chat, Space, UserProfile};
+use comet_proto::{AuthState, Chat, Project, UserProfile};
 use comet_tui::app::App;
 use comet_tui::link::Update;
 use comet_tui::render;
@@ -16,8 +16,8 @@ use comet_tui::theme::Theme;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-fn space(id: &str, path: &str) -> Space {
-    Space {
+fn project(id: &str, path: &str) -> Project {
+    Project {
         id: id.into(),
         device_id: "dev".into(),
         path: path.into(),
@@ -29,13 +29,13 @@ fn space(id: &str, path: &str) -> Space {
     }
 }
 
-fn chat(id: &str, title: &str, space_id: &str, hours: i64) -> Chat {
+fn chat(id: &str, title: &str, project_id: &str, hours: i64) -> Chat {
     Chat {
         id: id.into(),
         device_id: "dev".into(),
         title: Some(title.into()),
         archived: false,
-        cwd: Some(format!("/home/w/{space_id}")),
+        cwd: Some(format!("/home/w/{project_id}")),
         branch: Some("main".into()),
         checkout_id: None,
         config: None,
@@ -44,7 +44,7 @@ fn chat(id: &str, title: &str, space_id: &str, hours: i64) -> Chat {
         created_at: Utc::now(),
         harness_session_id: None,
         harness_session_cwd: None,
-        space_id: Some(space_id.into()),
+        project_id: Some(project_id.into()),
         last_seen_at: Some(Utc::now()),
     }
 }
@@ -79,9 +79,9 @@ fn scene() -> App {
         },
         org_id: Some("org".into()),
     })));
-    app.apply(Update::Spaces(vec![
-        space("s1", "/home/w/comet-native"),
-        space("s2", "/home/w/website"),
+    app.apply(Update::Projects(vec![
+        project("s1", "/home/w/comet-native"),
+        project("s2", "/home/w/website"),
     ]));
     app.apply(Update::Chats(vec![
         chat("c1", "Legacy App Decompilation", "s1", 24),
@@ -90,7 +90,7 @@ fn scene() -> App {
         chat("c4", "Session Loading Virtualisation", "s1", 4),
         chat("c5", "Invert PNG Image Colors", "s2", 0),
     ]));
-    app.activate_space("s1".into());
+    app.activate_project("s1".into());
     app.select_chat(Some("c1".into()));
     app.apply(Update::Transcript {
         chat_id: "c1".into(),

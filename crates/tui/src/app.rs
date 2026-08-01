@@ -22,7 +22,7 @@ use comet_proto::view::{
     format_time_ago,
 };
 use comet_proto::{
-    AuthState, Chat, ChatIndicator, Device, RunRequest, SandboxLevel, Session, Space,
+    AuthState, Chat, ChatIndicator, Device, RunRequest, SandboxLevel, Session, Project,
 };
 use comet_rpc::methods;
 
@@ -93,14 +93,14 @@ const PENDING_CHAT_GRACE: std::time::Duration = std::time::Duration::from_secs(1
 /// app's: **two sections**, not one grouped list. The desktop shell
 /// (`comet-ui/src/shell.rs::render_chat_sidebar`) reads
 ///
-/// - **Spaces** — the (device, folder) pairs, each one line of "name · device",
+/// - **Projects** — the (device, folder) pairs, each one line of "name · device",
 ///   carrying an aggregate attention dot so a live session is visible even when
 ///   the Sessions list is scrolled away;
 /// - **Sessions** — a *flat, global, attention-sorted* list of every visible
-///   session across every space. Deliberately not grouped: the point of the
+///   session across every project. Deliberately not grouped: the point of the
 ///   list is "what needs me right now", which grouping would bury.
 ///
-/// The selected space's sessions appear separately, as the tab strip above the
+/// The selected project's sessions appear separately, as the tab strip above the
 /// transcript ([`App::tabs`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
@@ -109,20 +109,20 @@ pub enum Row {
         label: String,
         action: Option<String>,
     },
-    /// A space: folder name plus the device hosting it.
-    Space {
+    /// A project: folder name plus the device hosting it.
+    Project {
         id: String,
         label: String,
         device: String,
-        /// Most urgent status among this space's sessions, if any is live.
+        /// Most urgent status among this project's sessions, if any is live.
         attention: Option<ChatIndicator>,
         /// The host's presence heartbeat has lapsed.
         offline: bool,
     },
-    /// A session: dot + title + time, then an indented "space@device".
+    /// A session: dot + title + time, then an indented "project@device".
     Chat {
         id: String,
-        space_id: Option<String>,
+        project_id: Option<String>,
         title: String,
         location: Option<String>,
         indicator: ChatIndicator,
@@ -141,7 +141,7 @@ impl Row {
     /// Row id, for the identity-preserving cursor. Decoration has none.
     pub fn id(&self) -> Option<&str> {
         match self {
-            Row::Space { id, .. } | Row::Chat { id, .. } => Some(id),
+            Row::Project { id, .. } | Row::Chat { id, .. } => Some(id),
             _ => None,
         }
     }
@@ -169,7 +169,7 @@ impl Row {
 
     /// Can the cursor land here? Decoration cannot.
     pub fn selectable(&self) -> bool {
-        matches!(self, Row::Space { .. } | Row::Chat { .. })
+        matches!(self, Row::Project { .. } | Row::Chat { .. })
     }
 }
 
@@ -187,8 +187,8 @@ pub enum Hit {
     Tab(usize),
     /// The `+` at the end of the tab strip.
     NewSession,
-    /// The `+` on the Spaces header.
-    AddSpace,
+    /// The `+` on the Projects header.
+    AddProject,
     /// One of the composer's chips.
     Chip(ChipKind),
     /// A pane, which takes focus.
@@ -206,12 +206,12 @@ pub enum Hit {
 /// choice is made *before* anything exists to be wrong about.
 #[derive(Debug, Clone)]
 pub struct Draft {
-    pub space_id: String,
+    pub project_id: String,
     pub checkout: CheckoutKind,
     /// Index into `refs` of the picked base ref.
     pub picked_ref: Option<usize>,
-    /// Branches for the space, once `ListRefs` answers. `None` while loading;
-    /// empty for a space that is not a git checkout.
+    /// Branches for the project, once `ListRefs` answers. `None` while loading;
+    /// empty for a project that is not a git checkout.
     pub refs: Option<Vec<comet_proto::RepoRef>>,
     /// Model and effort chosen before the session exists. Carried onto
     /// `createChat` so the first run starts on the right settings.
@@ -245,7 +245,7 @@ impl Draft {
     }
 }
 
-/// One tab in the strip above the transcript: a session of the selected space.
+/// One tab in the strip above the transcript: a session of the selected project.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
     pub id: String,
@@ -330,8 +330,8 @@ pub enum MenuAction {
     RenameChat(String),
     SetArchived(String, bool),
     DeleteChat(String),
-    RenameSpace(String),
-    DeleteSpace(String),
+    RenameProject(String),
+    DeleteProject(String),
     PickModel,
 }
 
@@ -339,7 +339,7 @@ pub enum MenuAction {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PromptAction {
     RenameChat(String),
-    RenameSpace(String),
+    RenameProject(String),
 }
 
 pub struct Notice {
@@ -357,18 +357,18 @@ pub struct App {
     pub auth: Option<AuthState>,
 
     pub devices: Vec<Device>,
-    pub spaces: Vec<Space>,
+    pub projects: Vec<Project>,
     /// Sorted by `comet_proto::view::sort_chats`; includes archived rows.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
     pub local_device_id: Option<String>,
 
-    pub selected_space: Option<String>,
+    pub selected_project: Option<String>,
     pub selected_chat: Option<String>,
     /// A session being composed. Mutually exclusive with `selected_chat`.
     pub draft: Option<Draft>,
-    /// Last session opened in each space. Switching spaces returns you where
-    /// you were, as the desktop app does — a space is a place you come back to,
+    /// Last session opened in each project. Switching projects returns you where
+    /// you were, as the desktop app does — a project is a place you come back to,
     /// not a filter you re-navigate every time.
     last_visited: HashMap<String, String>,
 
@@ -432,11 +432,11 @@ impl App {
             attachment: None,
             auth: None,
             devices: Vec::new(),
-            spaces: Vec::new(),
+            projects: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
             local_device_id: None,
-            selected_space: None,
+            selected_project: None,
             selected_chat: None,
             draft: None,
             last_visited: HashMap::new(),
@@ -494,10 +494,10 @@ impl App {
                 self.rebuild_rows();
                 Vec::new()
             }
-            Update::Spaces(mut spaces) => {
-                view::sort_spaces(&mut spaces);
-                self.spaces = spaces;
-                self.heal_space_selection();
+            Update::Projects(mut projects) => {
+                view::sort_projects(&mut projects);
+                self.projects = projects;
+                self.heal_project_selection();
                 self.rebuild_rows();
                 Vec::new()
             }
@@ -780,7 +780,7 @@ impl App {
 
     fn open_row(&mut self) -> Effects {
         match self.rows.get(self.cursor).cloned() {
-            Some(Row::Space { id, .. }) => self.activate_space(id),
+            Some(Row::Project { id, .. }) => self.activate_project(id),
             // Decoration isn't selectable, so nothing else can be under the
             // cursor; a defensive arm keeps this total.
             Some(Row::Blank)
@@ -788,9 +788,9 @@ impl App {
             | Some(Row::Empty { .. })
             | Some(Row::User { .. })
             | None => Vec::new(),
-            Some(Row::Chat { id, space_id, .. }) => {
-                if space_id.is_some() {
-                    self.selected_space = space_id.clone();
+            Some(Row::Chat { id, project_id, .. }) => {
+                if project_id.is_some() {
+                    self.selected_project = project_id.clone();
                 }
                 let effects = self.select_chat(Some(id));
                 self.focus = Focus::Composer;
@@ -799,19 +799,19 @@ impl App {
         }
     }
 
-    /// Switch to a space and go where you left off in it: the last session you
+    /// Switch to a project and go where you left off in it: the last session you
     /// had open there, else its most recent one, else a fresh draft — matching
-    /// the desktop app, where a space is a place rather than a filter.
-    pub fn activate_space(&mut self, space_id: String) -> Effects {
-        self.selected_space = Some(space_id.clone());
+    /// the desktop app, where a project is a place rather than a filter.
+    pub fn activate_project(&mut self, project_id: String) -> Effects {
+        self.selected_project = Some(project_id.clone());
         self.draft = None;
 
         let remembered = self
             .last_visited
-            .get(&space_id)
+            .get(&project_id)
             .filter(|id| {
                 self.chats.iter().any(|chat| {
-                    &&chat.id == id && !chat.archived && chat.space_id.as_deref() == Some(&space_id)
+                    &&chat.id == id && !chat.archived && chat.project_id.as_deref() == Some(&project_id)
                 })
             })
             .cloned();
@@ -819,7 +819,7 @@ impl App {
             // `chats` is recency-sorted, so the first match is the newest.
             self.chats
                 .iter()
-                .find(|chat| !chat.archived && chat.space_id.as_deref() == Some(space_id.as_str()))
+                .find(|chat| !chat.archived && chat.project_id.as_deref() == Some(project_id.as_str()))
                 .map(|chat| chat.id.clone())
         });
 
@@ -829,9 +829,9 @@ impl App {
                 self.rebuild_rows();
                 effects
             }
-            // An empty space opens the new-session canvas: there is nothing to
+            // An empty project opens the new-session canvas: there is nothing to
             // return to, and a blank pane would be a dead end.
-            None => self.new_session_in(space_id),
+            None => self.new_session_in(project_id),
         }
     }
 
@@ -848,15 +848,15 @@ impl App {
             self.draft = None;
         }
         self.selected_chat = chat_id.clone();
-        // Remember it against its space, for the next time you come back.
+        // Remember it against its project, for the next time you come back.
         if let Some(id) = chat_id.as_deref()
-            && let Some(space) = self
+            && let Some(project) = self
                 .chats
                 .iter()
                 .find(|chat| chat.id == id)
-                .and_then(|chat| chat.space_id.clone())
+                .and_then(|chat| chat.project_id.clone())
         {
-            self.last_visited.insert(space, id.to_string());
+            self.last_visited.insert(project, id.to_string());
         }
         self.transcript.retarget(chat_id.clone());
         self.transcript_stale = true;
@@ -878,16 +878,16 @@ impl App {
         effects
     }
 
-    /// Keep `selected_space` pointing at a row that exists, and default it to
-    /// the first space so the main pane is never blank while spaces exist.
-    fn heal_space_selection(&mut self) {
-        if let Some(selected) = &self.selected_space
-            && !self.spaces.iter().any(|space| &space.id == selected)
+    /// Keep `selected_project` pointing at a row that exists, and default it to
+    /// the first project so the main pane is never blank while projects exist.
+    fn heal_project_selection(&mut self) {
+        if let Some(selected) = &self.selected_project
+            && !self.projects.iter().any(|project| &project.id == selected)
         {
-            self.selected_space = None;
+            self.selected_project = None;
         }
-        if self.selected_space.is_none() {
-            self.selected_space = self.spaces.first().map(|space| space.id.clone());
+        if self.selected_project.is_none() {
+            self.selected_project = self.projects.first().map(|project| project.id.clone());
         }
     }
 
@@ -926,9 +926,9 @@ impl App {
             // user most likely wants open.
             if let Some(chat) = self.chats.iter().find(|chat| !chat.archived) {
                 let id = chat.id.clone();
-                let space = chat.space_id.clone();
-                if space.is_some() {
-                    self.selected_space = space;
+                let project = chat.project_id.clone();
+                if project.is_some() {
+                    self.selected_project = project;
                 }
                 let effects = self.select_chat(Some(id.clone()));
                 self.cursor = self
@@ -950,22 +950,22 @@ impl App {
     /// opens a canvas and materializes the tab on the first send, and so does
     /// this.
     fn new_session(&mut self) -> Effects {
-        let Some(space_id) = self.space_for_new_session() else {
+        let Some(project_id) = self.project_for_new_session() else {
             self.notify(
-                "No space to create a session in — add one from the desktop app first.".into(),
+                "No project to create a session in — add one from the desktop app first.".into(),
             );
             return Vec::new();
         };
-        self.new_session_in(space_id)
+        self.new_session_in(project_id)
     }
 
-    /// Begin composing in a *named* space. `activate_space` needs this: falling
+    /// Begin composing in a *named* project. `activate_project` needs this: falling
     /// back to whatever the cursor happens to be on would open the draft in the
     /// wrong place.
-    fn new_session_in(&mut self, space_id: String) -> Effects {
-        self.selected_space = Some(space_id.clone());
+    fn new_session_in(&mut self, project_id: String) -> Effects {
+        self.selected_project = Some(project_id.clone());
         self.draft = Some(Draft {
-            space_id: space_id.clone(),
+            project_id: project_id.clone(),
             checkout: CheckoutKind::default(),
             picked_ref: None,
             refs: None,
@@ -977,18 +977,18 @@ impl App {
         // or abandoned.
         let mut effects = self.select_chat(None);
         self.rebuild_rows();
-        if let Some(space) = self.spaces.iter().find(|space| space.id == space_id)
-            && space.git_detected
+        if let Some(project) = self.projects.iter().find(|project| project.id == project_id)
+            && project.git_detected
         {
             effects.push(Command::ListRefs {
-                repo_path: space.path.clone(),
-                target_device: self.remote_device(&space.device_id),
+                repo_path: project.path.clone(),
+                target_device: self.remote_device(&project.device_id),
             });
         }
         effects
     }
 
-    /// The device id to address a call to, or `None` when the space is hosted
+    /// The device id to address a call to, or `None` when the project is hosted
     /// here (the engine refuses to forward a call to itself).
     fn remote_device(&self, device_id: &str) -> Option<String> {
         match self.local_device_id.as_deref() {
@@ -997,25 +997,25 @@ impl App {
         }
     }
 
-    /// The draft's space, if it still exists.
-    fn draft_space(&self) -> Option<&Space> {
+    /// The draft's project, if it still exists.
+    fn draft_project(&self) -> Option<&Project> {
         let draft = self.draft.as_ref()?;
-        self.spaces.iter().find(|space| space.id == draft.space_id)
+        self.projects.iter().find(|project| project.id == draft.project_id)
     }
 
-    /// The space a new session belongs to: the one under the cursor, else the
+    /// The project a new session belongs to: the one under the cursor, else the
     /// selected one, else the first.
-    fn space_for_new_session(&self) -> Option<String> {
+    fn project_for_new_session(&self) -> Option<String> {
         match self.rows.get(self.cursor) {
-            Some(Row::Space { id, .. }) => return Some(id.clone()),
+            Some(Row::Project { id, .. }) => return Some(id.clone()),
             Some(Row::Chat {
-                space_id: Some(id), ..
+                project_id: Some(id), ..
             }) => return Some(id.clone()),
             _ => {}
         }
-        self.selected_space
+        self.selected_project
             .clone()
-            .or_else(|| self.spaces.first().map(|space| space.id.clone()))
+            .or_else(|| self.projects.first().map(|project| project.id.clone()))
     }
 
     fn toggle_archive(&mut self) -> Effects {
@@ -1158,8 +1158,8 @@ impl App {
         let Some(draft) = self.draft.clone() else {
             return Vec::new();
         };
-        let Some(space) = self.draft_space().cloned() else {
-            self.notify("That space is gone.".into());
+        let Some(project) = self.draft_project().cloned() else {
+            self.notify("That project is gone.".into());
             self.draft = None;
             return Vec::new();
         };
@@ -1174,7 +1174,7 @@ impl App {
         // the engine has made it, so the link overwrites this before queueing.
         let cwd = match &plan {
             CheckoutPlan::ReuseWorktree { path, .. } => path.clone(),
-            _ => space.path.clone(),
+            _ => project.path.clone(),
         };
         let payload = SessionCommandPayload::Run {
             request: RunRequest {
@@ -1230,9 +1230,9 @@ impl App {
         });
         effects.push(Command::StartSession(Box::new(crate::link::StartSession {
             chat_id,
-            space_id: space.id.clone(),
-            repo_path: space.path.clone(),
-            target_device: self.remote_device(&space.device_id),
+            project_id: project.id.clone(),
+            repo_path: project.path.clone(),
+            target_device: self.remote_device(&project.device_id),
             plan,
             config: config.and_then(|c| serde_json::to_value(&c).ok()),
             message_id,
@@ -1242,7 +1242,7 @@ impl App {
     }
 
     /// Working directory for a run: the chat's own cwd (an isolated worktree),
-    /// else its space's folder.
+    /// else its project's folder.
     fn cwd_for(&self, chat_id: &str) -> String {
         let chat = self.chats.iter().find(|chat| chat.id == chat_id);
         if let Some(cwd) = chat
@@ -1251,12 +1251,12 @@ impl App {
         {
             return cwd;
         }
-        let space_id = chat
-            .and_then(|chat| chat.space_id.clone())
-            .or_else(|| self.selected_space.clone());
-        space_id
-            .and_then(|id| self.spaces.iter().find(|space| space.id == id))
-            .map(|space| space.path.clone())
+        let project_id = chat
+            .and_then(|chat| chat.project_id.clone())
+            .or_else(|| self.selected_project.clone());
+        project_id
+            .and_then(|id| self.projects.iter().find(|project| project.id == id))
+            .map(|project| project.path.clone())
             .unwrap_or_default()
     }
 
@@ -1268,7 +1268,7 @@ impl App {
     /// rather than its index — otherwise a session appearing above the cursor
     /// would silently move the selection under the user's hands.
     ///
-    /// Two sections, matching the desktop shell: Spaces, then a flat global
+    /// Two sections, matching the desktop shell: Projects, then a flat global
     /// attention-sorted Sessions list.
     pub fn rebuild_rows(&mut self) {
         let anchor = self
@@ -1287,7 +1287,7 @@ impl App {
             )
         });
 
-        // Aggregate attention per space: the most urgent live member wins, so a
+        // Aggregate attention per project: the most urgent live member wins, so a
         // running session stays visible when the Sessions list is scrolled off.
         let mut attention: HashMap<String, ChatIndicator> = HashMap::new();
         for chat in self.chats.iter().filter(|chat| !chat.archived) {
@@ -1298,11 +1298,11 @@ impl App {
             ) {
                 continue;
             }
-            let Some(space_id) = chat.space_id.clone() else {
+            let Some(project_id) = chat.project_id.clone() else {
                 continue;
             };
             attention
-                .entry(space_id)
+                .entry(project_id)
                 .and_modify(|held| {
                     if view::attention_rank(status) < view::attention_rank(*held) {
                         *held = status;
@@ -1311,23 +1311,23 @@ impl App {
                 .or_insert(status);
         }
 
-        let mut rows = Vec::with_capacity(self.spaces.len() + self.chats.len() + 6);
+        let mut rows = Vec::with_capacity(self.projects.len() + self.chats.len() + 6);
         rows.push(Row::Section {
-            label: "Spaces".into(),
+            label: "Projects".into(),
             action: Some("+".into()),
         });
-        if self.spaces.is_empty() {
+        if self.projects.is_empty() {
             rows.push(Row::Empty {
-                label: "No spaces yet".into(),
+                label: "No projects yet".into(),
             });
         }
-        for space in &self.spaces {
-            rows.push(Row::Space {
-                id: space.id.clone(),
-                label: space.display_name().to_string(),
-                device: self.device_label(&space.device_id),
-                attention: attention.get(&space.id).copied(),
-                offline: !self.device_online(&space.device_id, now),
+        for project in &self.projects {
+            rows.push(Row::Project {
+                id: project.id.clone(),
+                label: project.display_name().to_string(),
+                device: self.device_label(&project.device_id),
+                attention: attention.get(&project.id).copied(),
+                offline: !self.device_online(&project.device_id, now),
             });
         }
 
@@ -1353,13 +1353,13 @@ impl App {
         for (indicator, chat) in active {
             rows.push(Row::Chat {
                 id: chat.id.clone(),
-                space_id: chat.space_id.clone(),
+                project_id: chat.project_id.clone(),
                 title: chat
                     .title
                     .clone()
                     .filter(|title| !title.trim().is_empty())
                     .unwrap_or_else(|| "New session".to_string()),
-                location: self.space_at_device(chat.space_id.as_deref()),
+                location: self.project_at_device(chat.project_id.as_deref()),
                 indicator,
                 archived: chat.archived,
                 activity: chat.last_message_at.or(Some(chat.created_at)),
@@ -1397,25 +1397,25 @@ impl App {
         }
     }
 
-    /// The selected space's non-archived sessions, as the tab strip above the
-    /// transcript. This is where a space's own sessions live in comet-native —
+    /// The selected project's non-archived sessions, as the tab strip above the
+    /// transcript. This is where a project's own sessions live in comet-native —
     /// the sidebar's Sessions list is global and answers a different question.
     ///
     /// Tab order is creation order (`sort_tabs`): activity must never reorder
     /// tabs under the pointer.
     pub fn tabs(&self) -> Vec<Tab> {
-        let Some(space_id) = self.selected_space.as_deref() else {
+        let Some(project_id) = self.selected_project.as_deref() else {
             return Vec::new();
         };
         let drafting = self
             .draft
             .as_ref()
-            .is_some_and(|draft| draft.space_id == space_id);
+            .is_some_and(|draft| draft.project_id == project_id);
         let now = Utc::now();
         let mut chats: Vec<&Chat> = self
             .chats
             .iter()
-            .filter(|chat| chat.space_id.as_deref() == Some(space_id))
+            .filter(|chat| chat.project_id.as_deref() == Some(project_id))
             .filter(|chat| !chat.archived)
             .collect();
         view::sort_tabs(&mut chats);
@@ -1469,18 +1469,18 @@ impl App {
         effects
     }
 
-    /// A session's sub-line: `space@device` — where the work actually happens.
+    /// A session's sub-line: `project@device` — where the work actually happens.
     /// The branch lives on the session itself and changes mid-run; the machine
     /// and folder are the stable facts worth carrying under every title.
-    fn space_at_device(&self, space_id: Option<&str>) -> Option<String> {
-        let space = self
-            .spaces
+    fn project_at_device(&self, project_id: Option<&str>) -> Option<String> {
+        let project = self
+            .projects
             .iter()
-            .find(|space| Some(space.id.as_str()) == space_id)?;
+            .find(|project| Some(project.id.as_str()) == project_id)?;
         Some(format!(
             "{}@{}",
-            space.display_name(),
-            self.device_label(&space.device_id)
+            project.display_name(),
+            self.device_label(&project.device_id)
         ))
     }
 
@@ -1497,7 +1497,7 @@ impl App {
             .unwrap_or_else(|| device_id.chars().take(8).collect())
     }
 
-    /// Host presence: a space whose device's heartbeat lapsed reads offline —
+    /// Host presence: a project whose device's heartbeat lapsed reads offline —
     /// a host outage, not slow sync.
     fn device_online(&self, device_id: &str, now: DateTime<Utc>) -> bool {
         if self.local_device_id.as_deref() == Some(device_id) {
@@ -1595,7 +1595,7 @@ impl App {
     /// Ported from the desktop's `render_footer`, including the three rules that
     /// made it stop flickering there:
     ///
-    /// 1. **Git gates the whole row.** A space that is not a checkout has no ref
+    /// 1. **Git gates the whole row.** A project that is not a checkout has no ref
     ///    and no worktree, so the row is absent rather than empty.
     /// 2. **Both modes get it.** The ref side is live for a draft *and* for an
     ///    open session — t3code keeps its branch selector interactive mid-session
@@ -1610,8 +1610,8 @@ impl App {
     /// creation (harness resume is cwd-scoped — the session never moves folders),
     /// so it is a label there and a button only on a draft.
     pub fn composer_footer(&self) -> Option<ComposerFooter> {
-        let space = self.selected_space_row()?;
-        if !space.git_detected {
+        let project = self.selected_project_row()?;
+        if !project.git_detected {
             return None;
         }
         // Rule 3: `selected_chat_row` is None for a chat that exists but has not
@@ -1626,7 +1626,7 @@ impl App {
                     .branch
                     .clone()
                     .unwrap_or_else(|| "Select ref".to_string()),
-                checkout: if chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path) {
+                checkout: if chat.cwd.as_deref().is_some_and(|cwd| cwd != project.path) {
                     "Worktree".to_string()
                 } else {
                     "Current checkout".to_string()
@@ -1649,10 +1649,10 @@ impl App {
         })
     }
 
-    /// The space the sidebar has selected.
-    pub fn selected_space_row(&self) -> Option<&comet_proto::Space> {
-        let id = self.selected_space.as_deref()?;
-        self.spaces.iter().find(|space| space.id == id)
+    /// The project the sidebar has selected.
+    pub fn selected_project_row(&self) -> Option<&comet_proto::Project> {
+        let id = self.selected_project.as_deref()?;
+        self.projects.iter().find(|project| project.id == id)
     }
 
     /// The effort levels the active model offers, or a sensible default set
@@ -1864,17 +1864,17 @@ impl App {
                     },
                 ],
             ),
-            Some(Row::Space { id, label, .. }) => (
+            Some(Row::Project { id, label, .. }) => (
                 label,
                 vec![
                     MenuItem {
-                        label: "Rename space".into(),
-                        action: MenuAction::RenameSpace(id.clone()),
+                        label: "Rename project".into(),
+                        action: MenuAction::RenameProject(id.clone()),
                         separated: false,
                     },
                     MenuItem {
-                        label: "Remove space…".into(),
-                        action: MenuAction::DeleteSpace(id),
+                        label: "Remove project…".into(),
+                        action: MenuAction::DeleteProject(id),
                         separated: true,
                     },
                 ],
@@ -2054,12 +2054,12 @@ impl App {
                         }),
                         context: "Couldn't rename the session",
                     }],
-                    PromptAction::RenameSpace(space_id) => vec![Command::Call {
+                    PromptAction::RenameProject(project_id) => vec![Command::Call {
                         method: methods::MUTATE,
                         params: serde_json::json!({
-                            "op": "renameSpace", "spaceId": space_id, "name": text,
+                            "op": "renameProject", "projectId": project_id, "name": text,
                         }),
-                        context: "Couldn't rename the space",
+                        context: "Couldn't rename the project",
                     }],
                 }
             }
@@ -2085,19 +2085,19 @@ impl App {
                 });
                 Vec::new()
             }
-            MenuAction::RenameSpace(space_id) => {
+            MenuAction::RenameProject(project_id) => {
                 let current = self
-                    .spaces
+                    .projects
                     .iter()
-                    .find(|space| space.id == space_id)
-                    .map(|space| space.display_name().to_string())
+                    .find(|project| project.id == project_id)
+                    .map(|project| project.display_name().to_string())
                     .unwrap_or_default();
                 let mut input = Composer::default();
                 input.set_text(current);
                 self.overlay = Some(Overlay::Prompt {
-                    title: "Rename space".into(),
+                    title: "Rename project".into(),
                     input,
-                    action: PromptAction::RenameSpace(space_id),
+                    action: PromptAction::RenameProject(project_id),
                 });
                 Vec::new()
             }
@@ -2113,10 +2113,10 @@ impl App {
                 params: serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
                 context: "Couldn't delete the session",
             }],
-            MenuAction::DeleteSpace(space_id) => vec![Command::Call {
+            MenuAction::DeleteProject(project_id) => vec![Command::Call {
                 method: methods::MUTATE,
-                params: serde_json::json!({ "op": "deleteSpace", "spaceId": space_id }),
-                context: "Couldn't remove the space",
+                params: serde_json::json!({ "op": "deleteProject", "projectId": project_id }),
+                context: "Couldn't remove the project",
             }],
             MenuAction::PickModel => self.open_model_picker(),
         }
@@ -2294,9 +2294,9 @@ impl App {
             Some(Hit::Chip(ChipKind::Checkout)) => self.open_checkout_picker(),
             Some(Hit::Chip(ChipKind::Model)) => self.open_model_picker(),
             Some(Hit::Chip(ChipKind::Reasoning)) => self.open_reasoning_picker(),
-            Some(Hit::AddSpace) => {
+            Some(Hit::AddProject) => {
                 self.notify(
-                    "Adding a space needs a folder picker — use the desktop app for now.".into(),
+                    "Adding a project needs a folder picker — use the desktop app for now.".into(),
                 );
                 Vec::new()
             }
@@ -2323,8 +2323,8 @@ mod tests {
     const LONG_LINE: &str =
         "a line of output long enough that its wrap points move when the pane narrows";
 
-    fn space(id: &str, path: &str, created_min: i64) -> Space {
-        Space {
+    fn project(id: &str, path: &str, created_min: i64) -> Project {
+        Project {
             id: id.into(),
             device_id: "dev".into(),
             path: path.into(),
@@ -2336,7 +2336,7 @@ mod tests {
         }
     }
 
-    fn chat(id: &str, space_id: &str, created_min: i64) -> Chat {
+    fn chat(id: &str, project_id: &str, created_min: i64) -> Chat {
         Chat {
             id: id.into(),
             device_id: "dev".into(),
@@ -2351,7 +2351,7 @@ mod tests {
             created_at: Utc::now() + chrono::Duration::minutes(created_min),
             harness_session_id: None,
             harness_session_cwd: None,
-            space_id: Some(space_id.into()),
+            project_id: Some(project_id.into()),
             last_seen_at: None,
         }
     }
@@ -2366,10 +2366,10 @@ mod tests {
         }
     }
 
-    /// An app with one space and two sessions, nothing selected yet.
+    /// An app with one project and two sessions, nothing selected yet.
     fn seeded() -> App {
         let mut app = App::with_theme(crate::theme::Theme::dark());
-        app.apply(Update::Spaces(vec![space("s1", "/dev/comet", 0)]));
+        app.apply(Update::Projects(vec![project("s1", "/dev/comet", 0)]));
         app.apply(Update::Chats(vec![
             chat("c1", "s1", 1),
             chat("c2", "s1", 2),
@@ -2395,8 +2395,8 @@ mod tests {
         // `chats` is recency sorted; the first non-archived row is opened so the
         // pane is never blank when there is something to show.
         assert!(app.selected_chat.is_some());
-        assert_eq!(app.selected_space.as_deref(), Some("s1"));
-        // The cursor lands on the row that was opened, not on row 0 (the space
+        assert_eq!(app.selected_project.as_deref(), Some("s1"));
+        // The cursor lands on the row that was opened, not on row 0 (the project
         // header) — otherwise `n` would target the wrong thing.
         assert_eq!(app.rows[app.cursor].id(), app.selected_chat.as_deref());
     }
@@ -2460,7 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn send_queues_a_run_with_the_spaces_cwd_and_echoes_immediately() {
+    fn send_queues_a_run_with_the_projects_cwd_and_echoes_immediately() {
         let mut app = seeded();
         app.select_chat(Some("c1".into()));
         app.composer.set_text("ship it");
@@ -2478,7 +2478,7 @@ mod tests {
         let command = &params["command"];
         assert_eq!(command["kind"], "run", "an idle session starts a run");
         assert_eq!(command["request"]["prompt"], "ship it");
-        // cwd falls back to the space's folder when the chat has none of its own.
+        // cwd falls back to the project's folder when the chat has none of its own.
         assert_eq!(command["request"]["cwd"], "/dev/comet");
         assert_eq!(command["messageId"], message_id.as_str());
 
@@ -2631,7 +2631,7 @@ mod tests {
         app.cursor = target;
 
         // A new chat sorts above it (chats are recency-ordered, and rows within
-        // a space are creation-ordered — either way the index moves).
+        // a project are creation-ordered — either way the index moves).
         app.apply(Update::Chats(vec![
             chat("c0", "s1", -5),
             chat("c1", "s1", 1),
@@ -2709,10 +2709,10 @@ mod tests {
                 _ => None,
             })
             .expect("a StartSession");
-        assert_eq!(start.space_id, "s1");
+        assert_eq!(start.project_id, "s1");
         assert_eq!(start.command["kind"], "run");
         assert_eq!(start.command["request"]["prompt"], "first prompt");
-        // Default plan with no refs loaded: the space folder as-is.
+        // Default plan with no refs loaded: the project folder as-is.
         assert_eq!(start.plan, CheckoutPlan::CurrentCheckout);
 
         // The draft is gone and its echo is already on screen.
@@ -2775,25 +2775,25 @@ mod tests {
             }
         );
         // And the footer says so, since the choice is only offered before send.
-        let footer = app.composer_footer().expect("a git space has a footer");
+        let footer = app.composer_footer().expect("a git project has a footer");
         assert_eq!(footer.reference, "feat");
         assert_eq!(footer.checkout, "Current worktree");
         assert!(footer.checkout_live, "a draft can still move");
     }
 
     #[test]
-    fn new_session_targets_the_space_under_the_cursor() {
+    fn new_session_targets_the_project_under_the_cursor() {
         let mut app = App::with_theme(crate::theme::Theme::dark());
-        app.apply(Update::Spaces(vec![
-            space("s1", "/dev/a", 0),
-            space("s2", "/dev/b", 1),
+        app.apply(Update::Projects(vec![
+            project("s1", "/dev/a", 0),
+            project("s2", "/dev/b", 1),
         ]));
         app.cursor = app.rows.iter().position(|r| r.id() == Some("s2")).unwrap();
         app.act(Action::NewSession);
         assert_eq!(
-            app.draft.as_ref().map(|draft| draft.space_id.as_str()),
+            app.draft.as_ref().map(|draft| draft.project_id.as_str()),
             Some("s2"),
-            "the draft targets the space under the cursor"
+            "the draft targets the project under the cursor"
         );
         // The prompt is focused, so you can type straight away.
         assert_eq!(app.focus, Focus::Composer);
@@ -2855,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    fn new_session_without_a_space_explains_itself() {
+    fn new_session_without_a_project_explains_itself() {
         let mut app = App::with_theme(crate::theme::Theme::dark());
         assert!(app.act(Action::NewSession).is_empty());
         assert!(app.notice.is_some());
@@ -2923,25 +2923,25 @@ mod tests {
     }
 
     #[test]
-    fn the_space_row_aggregates_its_sessions() {
+    fn the_project_row_aggregates_its_sessions() {
         let mut app = seeded();
         app.apply(Update::Sessions(vec![
             session("c1", SessionStatus::Working, 1),
             session("c2", SessionStatus::AwaitingInput, 1),
         ]));
-        // The Spaces section carries the aggregate dot; the Sessions list below
+        // The Projects section carries the aggregate dot; the Sessions list below
         // is flat and global.
-        let Some(Row::Space {
+        let Some(Row::Project {
             label, attention, ..
         }) = app.rows.iter().find(|row| row.id() == Some("s1"))
         else {
-            panic!("expected the space row");
+            panic!("expected the project row");
         };
         assert_eq!(label, "comet");
         assert_eq!(
             *attention,
             Some(ChatIndicator::AwaitingInput),
-            "the space row surfaces its most urgent session"
+            "the project row surfaces its most urgent session"
         );
         let statuses: Vec<ChatIndicator> = app
             .rows

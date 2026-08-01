@@ -1292,6 +1292,7 @@ mod keychain {
 
 fn harness_slug(harness: HarnessId) -> &'static str {
     match harness {
+        HarnessId::Pi => "pi",
         HarnessId::ClaudeCode => "claude-code",
         HarnessId::Codex => "codex",
         HarnessId::Cursor => "cursor",

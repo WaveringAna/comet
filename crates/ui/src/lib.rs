@@ -27,7 +27,6 @@ pub mod popover;
 pub mod rail;
 pub mod settings;
 pub mod shell;
-pub mod sound;
 pub mod state;
 pub mod terminal;
 pub mod theme;

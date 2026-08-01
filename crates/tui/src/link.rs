@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use comet_doc::SessionMessageEntry;
 use comet_proto::view::ConnectionStatus;
-use comet_proto::{AuthState, Chat, Device, Session, Space};
+use comet_proto::{AuthState, Chat, Device, Session, Project};
 use comet_rpc::{RpcClient, methods};
 use tokio::sync::mpsc;
 
@@ -35,7 +35,7 @@ pub enum Update {
     Attached(Attachment),
     Auth(Box<AuthState>),
     Chats(Vec<Chat>),
-    Spaces(Vec<Space>),
+    Projects(Vec<Project>),
     Devices(Vec<Device>),
     Sessions(Vec<Session>),
     /// A transcript snapshot. Carries the chat id so a frame that raced a
@@ -44,11 +44,11 @@ pub enum Update {
         chat_id: String,
         entries: Vec<SessionMessageEntry>,
     },
-    /// This engine's device id — the host for spaces we create.
+    /// This engine's device id — the host for projects we create.
     LocalDevice(String),
     /// The model catalogue for a harness, answering [`Command::ListModels`].
     Models(Vec<comet_proto::Model>),
-    /// A space's branches, answering [`Command::ListRefs`].
+    /// A project's branches, answering [`Command::ListRefs`].
     Refs(Vec<comet_proto::RepoRef>),
     /// A drafted session became real: the chat exists and its prompt is queued.
     SessionStarted {
@@ -88,7 +88,7 @@ pub enum Command {
     /// Fetch the model catalogue for a harness. Unlike [`Command::Call`] this
     /// one's *reply* is wanted, so it comes back as [`Update::Models`].
     ListModels { harness: comet_proto::HarnessId },
-    /// Fetch a space's branches, for the ref picker.
+    /// Fetch a project's branches, for the ref picker.
     ListRefs {
         repo_path: String,
         target_device: Option<String>,
@@ -113,7 +113,7 @@ pub enum Command {
 #[derive(Debug)]
 pub struct StartSession {
     pub chat_id: String,
-    pub space_id: String,
+    pub project_id: String,
     pub repo_path: String,
     pub target_device: Option<String>,
     pub plan: comet_proto::view::CheckoutPlan,
@@ -252,7 +252,7 @@ async fn session(
     let empty = || serde_json::json!({});
 
     // The engine's device id is a plain call, not a stream. Best-effort: an
-    // engine that doesn't serve it yet just leaves space creation disabled.
+    // engine that doesn't serve it yet just leaves project creation disabled.
     match client.call(methods::LOCAL_DEVICE, empty()).await {
         Ok(value) => {
             if let Some(id) = value.get("deviceId").and_then(|v| v.as_str())
@@ -264,9 +264,9 @@ async fn session(
         Err(err) => tracing::debug!(error = %err, "LocalDevice unavailable"),
     }
 
-    let (mut chats, mut spaces, mut devices, mut sessions, mut auth) = match tokio::try_join!(
+    let (mut chats, mut projects, mut devices, mut sessions, mut auth) = match tokio::try_join!(
         client.subscribe(methods::WATCH_CHATS, empty()),
-        client.subscribe(methods::WATCH_SPACES, empty()),
+        client.subscribe(methods::WATCH_PROJECTS, empty()),
         client.subscribe(methods::WATCH_DEVICES, empty()),
         client.subscribe(methods::WATCH_SESSIONS, empty()),
         client.subscribe(methods::AUTH_STATUS, empty()),
@@ -330,8 +330,8 @@ async fn session(
                 Frame::Skip => {}
                 Frame::Ended => return SessionEnd::ConnectionLost,
             },
-            frame = spaces.recv() => match decode::<Vec<Space>>(frame, "spaces") {
-                Frame::Value(rows) => if updates.send(Update::Spaces(rows)).is_err() { return SessionEnd::AppGone },
+            frame = projects.recv() => match decode::<Vec<Project>>(frame, "projects") {
+                Frame::Value(rows) => if updates.send(Update::Projects(rows)).is_err() { return SessionEnd::AppGone },
                 Frame::Skip => {}
                 Frame::Ended => return SessionEnd::ConnectionLost,
             },
@@ -485,7 +485,7 @@ fn spawn_models(
     });
 }
 
-/// Fetch a space's branches for the ref picker.
+/// Fetch a project's branches for the ref picker.
 fn spawn_refs(
     client: Arc<RpcClient>,
     updates: mpsc::UnboundedSender<Update>,
@@ -506,7 +506,7 @@ fn spawn_refs(
                     let _ = updates.send(Update::Notice(format!("Branch list malformed: {err}")));
                 }
             },
-            // A non-git space has no refs; that is not an error worth shouting.
+            // A non-git project has no refs; that is not an error worth shouting.
             Err(err) => tracing::debug!(error = %err, "ListRefs unavailable"),
         }
     });
@@ -565,7 +565,7 @@ fn spawn_start_session(
         let mut mutate = serde_json::json!({
             "op": "createChat",
             "chatId": start.chat_id,
-            "spaceId": start.space_id,
+            "projectId": start.project_id,
         });
         if let Some(object) = mutate.as_object_mut() {
             if let Some(cwd) = &cwd {

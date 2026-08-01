@@ -1,4 +1,4 @@
-//! comet-harness — one interface over Claude Code / Codex (and a mock for tests).
+//! comet-harness — one interface over pi / Claude Code / Codex (and a mock for tests).
 //!
 //! Integration decisions (docs/research/harness.md):
 //! - Claude Code: spawn the installed `claude` CLI with
@@ -67,6 +67,7 @@ pub trait Harness: Send + Sync {
 pub mod claude;
 pub mod codex;
 pub mod mock;
+pub mod pi;
 
 /// Bin directories where npm-installed CLIs land under Node version managers.
 /// GUI launches never see these on PATH — the managers shape PATH in shell
@@ -196,3 +197,4 @@ pub(crate) fn crash_message(
 
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
+pub use pi::PiHarness;

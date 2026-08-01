@@ -367,11 +367,11 @@ async fn diff_capture_truncates_at_patch_cap() {
 }
 
 // ---------------------------------------------------------------------------
-// Spaces sync (git presence stamping + orphan sweep) via EngineCore
+// Projects sync (git presence stamping + orphan sweep) via EngineCore
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spaces_sync_stamps_git_presence_and_reacts_to_git_init() {
+async fn projects_sync_stamps_git_presence_and_reacts_to_git_init() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let folder = tmp.path().join("plain-folder");
     std::fs::create_dir_all(&folder).expect("folder");
@@ -379,74 +379,74 @@ async fn spaces_sync_stamps_git_presence_and_reacts_to_git_init() {
     let core = assemble(&tmp.path().join("data"));
     // Seeded as git (a lying picker) — the owner's sync must correct it.
     core.workspace
-        .create_space(
-            "space-1",
+        .create_project(
+            "project-1",
             &core.device_id,
             &folder.to_string_lossy(),
             None,
             true,
         )
-        .expect("space row");
-    core.spaces_sync.reconcile_now().await;
+        .expect("project row");
+    core.projects_sync.reconcile_now().await;
 
-    let mut spaces_rx = core.workspace.watch_spaces();
+    let mut projects_rx = core.workspace.watch_projects();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    let space = loop {
+    let project = loop {
         {
-            let spaces = spaces_rx.borrow().clone();
-            if let Some(space) = spaces
+            let projects = projects_rx.borrow().clone();
+            if let Some(project) = projects
                 .iter()
-                .find(|s| s.id == "space-1" && s.git_checked_at.is_some())
+                .find(|s| s.id == "project-1" && s.git_checked_at.is_some())
             {
-                break space.clone();
+                break project.clone();
             }
         }
-        tokio::time::timeout_at(deadline, spaces_rx.changed())
+        tokio::time::timeout_at(deadline, projects_rx.changed())
             .await
             .expect("git check before timeout")
             .expect("watch alive");
     };
-    assert!(!space.git_detected, "plain folder must read as non-git");
-    assert!(space.checkout_id.is_none());
+    assert!(!project.git_detected, "plain folder must read as non-git");
+    assert!(project.checkout_id.is_none());
 
     // `git init` later flips the stamp (watcher and/or explicit recheck).
     git(&folder, &["init", "-b", "main"]).await;
-    core.spaces_sync.reconcile_now().await;
+    core.projects_sync.reconcile_now().await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    let space = loop {
+    let project = loop {
         {
-            let spaces = spaces_rx.borrow().clone();
-            if let Some(space) = spaces.iter().find(|s| s.id == "space-1" && s.git_detected) {
-                break space.clone();
+            let projects = projects_rx.borrow().clone();
+            if let Some(project) = projects.iter().find(|s| s.id == "project-1" && s.git_detected) {
+                break project.clone();
             }
         }
-        tokio::time::timeout_at(deadline, spaces_rx.changed())
+        tokio::time::timeout_at(deadline, projects_rx.changed())
             .await
             .expect("git init detected before timeout")
             .expect("watch alive");
     };
-    assert!(space.checkout_id.is_some(), "git space gains a checkout id");
+    assert!(project.checkout_id.is_some(), "git project gains a checkout id");
     core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delete_space_cascades_chats_and_sessions() {
+async fn delete_project_cascades_chats_and_sessions() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let folder = tmp.path().join("folder");
     std::fs::create_dir_all(&folder).expect("folder");
 
     let core = assemble(&tmp.path().join("data"));
     core.workspace
-        .create_space(
-            "space-1",
+        .create_project(
+            "project-1",
             &core.device_id,
             &folder.to_string_lossy(),
             None,
             false,
         )
-        .expect("space row");
+        .expect("project row");
     core.workspace
-        .create_chat("chat-1", "space-1", None, None)
+        .create_chat("chat-1", "project-1", None, None)
         .expect("chat row");
     let chat = core
         .workspace
@@ -454,15 +454,15 @@ async fn delete_space_cascades_chats_and_sessions() {
         .chat("chat-1")
         .expect("read")
         .expect("exists");
-    assert_eq!(chat.space_id.as_deref(), Some("space-1"));
+    assert_eq!(chat.project_id.as_deref(), Some("project-1"));
     assert_eq!(chat.device_id, core.device_id);
     assert_eq!(chat.cwd.as_deref(), Some(&*folder.to_string_lossy()));
 
-    let deleted = core.workspace.delete_space("space-1").expect("cascade");
+    let deleted = core.workspace.delete_project("project-1").expect("cascade");
     assert!(deleted.existed);
     assert_eq!(deleted.chat_ids, vec!["chat-1".to_string()]);
     assert!(core.workspace.doc().chat("chat-1").expect("read").is_none());
-    assert!(core.workspace.read_spaces().expect("spaces").is_empty());
+    assert!(core.workspace.read_projects().expect("projects").is_empty());
     core.shutdown().await;
 }
 
@@ -479,16 +479,16 @@ async fn diff_sync_publishes_and_updates_chat_branch() {
 
     let core = assemble(&tmp.path().join("data"));
     core.workspace
-        .create_space(
-            "space-diff",
+        .create_project(
+            "project-diff",
             &core.device_id,
             &repo_dir.to_string_lossy(),
             None,
             true,
         )
-        .expect("space row");
+        .expect("project row");
     core.workspace
-        .create_chat("chat-diff", "space-diff", None, None)
+        .create_chat("chat-diff", "project-diff", None, None)
         .expect("chat row");
     core.diff_sync.reconcile_now().await;
 
@@ -771,27 +771,27 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("stream alive");
     assert!(first.is_array());
 
-    // Terminals: the chat's cwd (via its space) becomes the PTY cwd.
+    // Terminals: the chat's cwd (via its project) becomes the PTY cwd.
     client
         .call(
             methods::MUTATE,
             serde_json::json!({
-                "op": "createSpace",
-                "spaceId": "space-term",
+                "op": "createProject",
+                "projectId": "project-term",
                 "deviceId": core.device_id,
                 "path": repo_path,
                 "gitDetected": true,
             }),
         )
         .await
-        .expect("createSpace");
+        .expect("createProject");
     client
         .call(
             methods::MUTATE,
             serde_json::json!({
                 "op": "createChat",
                 "chatId": "chat-term",
-                "spaceId": "space-term",
+                "projectId": "project-term",
             }),
         )
         .await

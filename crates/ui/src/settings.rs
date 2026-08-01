@@ -45,23 +45,20 @@ const FILE_NAME: &str = "ui-settings.json";
 pub struct UiSettings {
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
-    /// Legacy: the grouped-by-project toggle predates spaces (which group by
+    /// Legacy: the grouped-by-project toggle predates projects (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
-    /// The last selected space — restored on boot when the row still exists.
+    /// The last selected project — restored on boot when the row still exists.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_space_id: Option<String>,
-    /// Manual session-tab order per space (drag-reorder; device-local).
+    pub last_project_id: Option<String>,
+    /// Manual session-tab order per project (drag-reorder; device-local).
     /// Missing chats are skipped; new chats append in creation order.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub tab_order: std::collections::HashMap<String, Vec<String>>,
-    /// Manual sidebar space order (drag-reorder; device-local). Missing spaces
-    /// are skipped; new spaces append in creation order.
+    /// Manual sidebar project order (drag-reorder; device-local). Missing projects
+    /// are skipped; new projects append in creation order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub space_order: Vec<String>,
-    /// Session notification chimes (done / awaiting-input). `COMET_DISABLE_SOUND`
-    /// overrides.
-    pub sound_enabled: bool,
+    pub project_order: Vec<String>,
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
     /// (`shell::SessionPanels`, comet `sessionPanels` parity). Kept for file
@@ -80,10 +77,9 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
-            last_space_id: None,
+            last_project_id: None,
             tab_order: std::collections::HashMap::new(),
-            space_order: Vec::new(),
-            sound_enabled: true,
+            project_order: Vec::new(),
             right_pane_width: RIGHT_PANE_DEFAULT,
             right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
@@ -332,13 +328,12 @@ mod tests {
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
-            last_space_id: Some("space-1".into()),
+            last_project_id: Some("project-1".into()),
             tab_order: std::collections::HashMap::from([(
-                "space-1".to_string(),
+                "project-1".to_string(),
                 vec!["b".to_string(), "a".to_string()],
             )]),
-            space_order: vec!["space-2".to_string(), "space-1".to_string()],
-            sound_enabled: false,
+            project_order: vec!["project-2".to_string(), "project-1".to_string()],
             right_pane_width: 700.0,
             right_pane_open: true,
             terminal_height: 320.0,

@@ -1,11 +1,11 @@
 //! Drawing.
 //!
 //! The information architecture is comet-native's, read from the desktop shell
-//! (`comet-ui/src/shell.rs::render_chat_sidebar`, `shell/spaces.rs`,
+//! (`comet-ui/src/shell.rs::render_chat_sidebar`, `shell/projects.rs`,
 //! `shell/tabs.rs`) — **not** the original Electron app's single grouped list:
 //!
-//! - the sidebar has **two sections**, Spaces and a *flat global* Sessions list;
-//! - the selected space's own sessions are the **tab strip** above the
+//! - the sidebar has **two sections**, Projects and a *flat global* Sessions list;
+//! - the selected project's own sessions are the **tab strip** above the
 //!   transcript, which is also the header (it replaced one).
 //!
 //! The visual language is opencode's: **nothing in the steady-state view is
@@ -26,7 +26,7 @@
 //! column all content in the pane starts at.
 //!
 //! ```text
-//!  Spaces                +     ● Ratatui terminal…    ● Diff sidebar…    +
+//!  Projects                +     ● Ratatui terminal…    ● Diff sidebar…    +
 //!  ▪ comet-native  this dev
 //!  ▪ soccertcg     this dev                            the user's prompt
 //!                                                                  14:32
@@ -140,7 +140,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.help {
         // Everything below the tab strip, which stays readable (along with the
-        // sidebar's Spaces header opposite it) so you keep your place while
+        // sidebar's Projects header opposite it) so you keep your place while
         // reading the key map.
         let panel = Rect {
             y: body.y + TAB_ROWS,
@@ -191,7 +191,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     // colour change is that boundary stated twice.
     fill(frame, area, theme.panel());
     // The fill reaches every edge; the *content* is inset from them. Two columns
-    // each side and a row at the top, which puts "Spaces" on the same row as the
+    // each side and a row at the top, which puts "Projects" on the same row as the
     // tab titles opposite it.
     let inner = Rect {
         x: area.x + SIDEBAR_PAD,
@@ -250,12 +250,12 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         if app.rows[*index].selectable() {
             app.push_hit(*slot, Hit::Row(*index));
         }
-        // The Spaces header's affordance is its own target.
+        // The Projects header's affordance is its own target.
         if let Row::Section {
             action: Some(_),
             label,
         } = &app.rows[*index]
-            && label == "Spaces"
+            && label == "Projects"
         {
             let width = 3u16.min(slot.width);
             app.push_hit(
@@ -264,7 +264,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                     width,
                     ..*slot
                 },
-                Hit::AddSpace,
+                Hit::AddProject,
             );
         }
     }
@@ -333,7 +333,7 @@ fn draw_sidebar_row(
                 }
             }
         }
-        Row::Space {
+        Row::Project {
             label,
             device,
             attention,
@@ -349,7 +349,7 @@ fn draw_sidebar_row(
                 fill(frame, bleed, theme.selected());
             }
             // The attention dot only appears when a member session is live, so a
-            // quiet space stays quiet.
+            // quiet project stays quiet.
             let (dot, dot_style) = match attention {
                 Some(status) => status_dot(*status, app, theme, base),
                 None => (" ".to_string(), base),
@@ -589,7 +589,7 @@ const TAB_PAD: u16 = 2;
 /// terminal edge above and the transcript below, so no extra gap row is needed.
 const TAB_ROWS: u16 = 3;
 
-/// The session tab strip: every non-archived session of the selected space,
+/// The session tab strip: every non-archived session of the selected project,
 /// with `+` to start another. The active tab carries the selection wash.
 fn draw_tab_strip(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     // The whole row is the strip; the engine label moved to the status line so
@@ -600,9 +600,9 @@ fn draw_tab_strip(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     if tabs.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                match app.selected_space {
+                match app.selected_project {
                     Some(_) => "  No sessions here — n starts one",
-                    None => "  No space selected",
+                    None => "  No project selected",
                 },
                 theme.hint(),
             )),
@@ -751,7 +751,7 @@ fn draw_tab_strip(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 }
 
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    // The full pane. A capped reading measure left a band of dead space down the
+    // The full pane. A capped reading measure left a band of dead project down the
     // right of every wide terminal, and the blocks inside stopped short of the
     // pane they were supposed to be filling.
     let column = area;
@@ -977,7 +977,7 @@ fn draw_composer(frame: &mut Frame, area: Rect, text_rows: u16, app: &mut App, t
 /// the right.
 ///
 /// One row, two clusters, which is exactly how opencode builds its prompt's
-/// meta row — `justifyContent="space-between"`, agent and model on the left and
+/// meta row — `justifyContent="project-between"`, agent and model on the left and
 /// `props.right` opposite. The desktop splits these across an actions row and a
 /// footer because it has the pixels; a terminal does not, and putting all four
 /// settings on one line groups them better than stacking them anyway.
@@ -1075,7 +1075,7 @@ fn draw_composer_meta(frame: &mut Frame, area: Rect, app: &mut App, theme: &Them
 /// Paint the caret cell ourselves.
 ///
 /// The terminal's own cursor is still placed (screen readers and cursor-shape
-/// settings follow it), but relying on it alone makes a *trailing space*
+/// settings follow it), but relying on it alone makes a *trailing project*
 /// invisible: the row is drawn without it, so there is nothing to tell you
 /// whether you typed one. A block on the caret cell answers that at a glance.
 fn draw_caret(frame: &mut Frame, x: u16, y: u16, theme: &Theme) {
@@ -1344,7 +1344,7 @@ fn draw_overlay(
             let rows = vec![
                 (
                     local.to_string(),
-                    Some("run where the space already points".into()),
+                    Some("run where the project already points".into()),
                 ),
                 (
                     "New worktree".to_string(),
@@ -1507,7 +1507,7 @@ fn draw_panel_row(
     )];
     if let Some(detail) = detail {
         // Pad out to the shared column; a label that overran it still gets its
-        // two spaces so the two never collide.
+        // two projects so the two never collide.
         let gap = detail_col.saturating_sub(wrap::width_of(label)).max(2);
         let room = (inner.width as usize).saturating_sub(wrap::width_of(label) + gap);
         if room > 4 {

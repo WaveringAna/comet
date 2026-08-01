@@ -1,25 +1,23 @@
-//! Spaces sidebar: the spaces list (folder + device rows), the global
-//! Sessions list, and the add-space palette (⌘K-style: device tabs + filtered
-//! folder browser).
+//! Projects sidebar: the projects list, the global Sessions list, and the
+//! add-project palette (⌘K-style filtered folder browser).
 //!
-//! A space = a synced (device, folder) pair; the sidebar's job is switching
-//! between them and surfacing which sessions want attention. Child module of
-//! `shell` so it renders straight off `Shell`'s private state.
+//! A project is a local folder and its sessions. Child module of `shell` so it
+//! renders straight off `Shell`'s private state.
 
 use super::*;
 use crate::motion::TAB_SLIDE;
 use crate::pickers::{breadcrumbs, browser_rows, parent_path};
 use crate::terminal::panel::{drop_index, reorder_tabs, slide_offset};
-use comet_proto::{ChatIndicator, Device, FolderListing, Space};
+use comet_proto::{ChatIndicator, Device, FolderListing, Project};
 use gpui::FocusHandle;
 
-/// Space-row slot height for drag drop-index math: py(6)×2 + 17px line ≈ 29,
+/// Project-row slot height for drag drop-index math: py(6)×2 + 17px line ≈ 29,
 /// plus the 2px column gap.
-const SPACE_ROW_SLOT: f32 = 31.0;
+const PROJECT_ROW_SLOT: f32 = 31.0;
 
-/// Drag-reorder state for the spaces list; `epoch` keys the 150ms slide
+/// Drag-reorder state for the projects list; `epoch` keys the 150ms slide
 /// animation restarts (the session-tab idiom, vertical).
-pub(super) struct SpaceDragState {
+pub(super) struct ProjectDragState {
     from: usize,
     over: usize,
     epoch: usize,
@@ -27,17 +25,17 @@ pub(super) struct SpaceDragState {
 }
 
 /// The dragged-row payload (gpui drag-and-drop).
-struct SpaceDragPayload {
+struct ProjectDragPayload {
     from: usize,
     name: SharedString,
 }
 
 /// The floating row rendered at the cursor while dragging.
-struct SpaceGhost {
+struct ProjectGhost {
     name: SharedString,
 }
 
-impl Render for SpaceGhost {
+impl Render for ProjectGhost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         div()
@@ -65,31 +63,30 @@ impl Render for SpaceGhost {
     }
 }
 
-/// The add-space palette (a command-K surface, summoned by ⌘K): search bar
-/// across the top, folder browser on the left, a Devices rail on the right,
-/// kbd-hint footer. One surface — picking a device in the rail rebrowses in
-/// place, no step wizard.
-pub(super) struct AddSpaceFlow {
-    /// The device currently browsed (the highlighted rail row).
+/// The add-project palette (a command-K surface, summoned by ⌘K): search bar,
+/// local folder browser, and kbd-hint footer.
+pub(super) struct CreateProjectFlow {
+    /// The local device id is retained internally for project compatibility;
+    /// it is not a picker choice or a visible concept in this flow.
     device: Option<Device>,
     /// Filter input; Enter descends into the highlighted folder.
     search: Entity<ComposerInput>,
     browser: Loadable<FolderListing>,
-    /// Requested browser path (`None` = the device's default, i.e. home).
+    /// Requested browser path (`None` = the local device's home).
     browser_path: Option<String>,
-    /// The device's home (the path a `None` browse resolved to) — breadcrumbs
-    /// fold everything up to here into the device-name crumb.
+    /// The local home (the path a `None` browse resolved to) — breadcrumbs fold
+    /// everything up to here into the Home crumb.
     home: Option<String>,
     /// Best-effort git seed for the CURRENT browser path (known when we
     /// descended through an entry whose `is_repo` we saw; the owning device's
-    /// SpacesSync re-verifies either way).
+    /// ProjectsSync re-verifies either way).
     browser_repo: bool,
     /// Keyboard highlight within the FILTERED folder rows.
     active: usize,
     submit_busy: bool,
     error: Option<SharedString>,
     /// Tracked on the card (`track_focus`) — puts the card on the keyboard
-    /// dispatch path so ↑↓/⌫/esc reach `add_space_key` while the search input
+    /// dispatch path so ↑↓/⌫/esc reach `add_project_key` while the search input
     /// holds focus (the structure every working picker uses).
     focus: FocusHandle,
     /// Folder-list scroll — keyboard navigation keeps the highlighted row in
@@ -101,9 +98,9 @@ pub(super) struct AddSpaceFlow {
     _search_events: Subscription,
 }
 
-/// The space-row Rename dialog (same shape as [`RenameChatDialog`]).
-pub(super) struct RenameSpaceDialog {
-    pub space_id: String,
+/// The project-row Rename dialog (same shape as [`RenameChatDialog`]).
+pub(super) struct RenameProjectDialog {
+    pub project_id: String,
     pub input: Entity<ComposerInput>,
     pub focus_pending: bool,
     pub _events: Subscription,
@@ -121,89 +118,101 @@ pub(super) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
         // working" at a glance.
         ChatIndicator::AwaitingInput => theme.accent.opacity(0.9),
         ChatIndicator::Errored => theme.danger,
-        // Green: finished-but-unseen reads as "ready for you".
-        ChatIndicator::Completed => {
-            crate::theme::oklch(0.765, 0.177, 163.223).opacity(0.9) // emerald-400
-        }
+        // Finished and idle are both quiet neutral dots.
+        ChatIndicator::Completed => crate::theme::white_alpha(0.16),
         ChatIndicator::Idle => crate::theme::white_alpha(0.14),
     }
 }
 
 impl Shell {
-    // ---- space switching ----
+    // ---- project switching ----
 
-    /// Land in a space: remembered tab if alive, else the most recent chat in
-    /// the space, else the new-session canvas. Persists `last_space_id`.
-    pub(super) fn activate_space(&mut self, space_id: String, cx: &mut Context<Self>) {
+    /// Land in a project: remembered tab if alive, else the most recent chat in
+    /// the project, else the new-session canvas. Persists `last_project_id`.
+    pub(super) fn activate_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         self.route = Route::Chat;
         self.state.update(cx, |s, cx| {
-            s.select_space(Some(space_id.clone()), cx);
+            s.select_project(Some(project_id.clone()), cx);
         });
         let target = {
             let state = self.state.read(cx);
-            let in_space = |id: &str| {
+            let in_project = |id: &str| {
                 state
                     .visible_chats()
-                    .any(|c| c.id == id && c.space_id.as_deref() == Some(space_id.as_str()))
+                    .any(|c| c.id == id && c.project_id.as_deref() == Some(project_id.as_str()))
             };
-            self.space_last_chat
-                .get(&space_id)
-                .filter(|id| in_space(id))
+            self.project_last_chat
+                .get(&project_id)
+                .filter(|id| in_project(id))
                 .cloned()
                 .or_else(|| {
                     // `visible_chats` is recency-sorted — first match is the
-                    // most recent chat of the space.
+                    // most recent chat of the project.
                     state
                         .visible_chats()
-                        .find(|c| c.space_id.as_deref() == Some(space_id.as_str()))
+                        .find(|c| c.project_id.as_deref() == Some(project_id.as_str()))
                         .map(|c| c.id.clone())
                 })
         };
         self.state.update(cx, |s, cx| s.select_chat(target, cx));
-        self.settings.last_space_id = Some(space_id);
+        self.settings.last_project_id = Some(project_id);
         self.schedule_save(cx);
         cx.notify();
     }
 
+    /// Create the first session for a folder and land on it. The pi child is
+    /// spawned when the user sends the first prompt; creating the chat here
+    /// makes folder selection feel like one onboarding action instead of two.
+    fn create_session_in_project(&mut self, project_id: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.sidebar_notice = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let submit_id = chat_id.clone();
+        let params = serde_json::json!({
+            "op": "createChat",
+            "chatId": chat_id,
+            "projectId": project_id,
+        });
+        self.mutate_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |shell, cx| {
+                match result {
+                    Ok(_) => {
+                        shell.state.update(cx, |state, cx| {
+                            state.select_chat(Some(submit_id.clone()), cx);
+                        });
+                    }
+                    Err(err) => {
+                        shell.sidebar_notice = Some(format!("Couldn't create the session: {err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     // ---- sidebar sections ----
 
-    /// The "Spaces" section: tracked header + add button, then a row per space.
-    pub(super) fn render_spaces_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// The "Projects" section: tracked header + add button, then a row per project.
+    pub(super) fn render_projects_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // A drag that ended off-list (no drop event) must not strand the
         // sibling slide offsets.
-        if self.space_drag.is_some() && !cx.has_active_drag() {
-            self.space_drag = None;
+        if self.project_drag.is_some() && !cx.has_active_drag() {
+            self.project_drag = None;
         }
-        let (spaces, selected, device_names, offline_devices, attention): (
-            Vec<Space>,
+        let (projects, selected, attention): (
+            Vec<Project>,
             Option<String>,
-            std::collections::HashMap<String, String>,
-            std::collections::HashSet<String>,
             std::collections::HashMap<String, ChatIndicator>,
         ) = {
             let now = Utc::now();
             let state = self.state.read(cx);
-            let spaces = state.spaces.clone();
-            let device_names = spaces
-                .iter()
-                .map(|s| {
-                    (
-                        s.device_id.clone(),
-                        state
-                            .device_name(&s.device_id)
-                            .unwrap_or("Unknown device")
-                            .to_string(),
-                    )
-                })
-                .collect();
-            // Host-presence (the revived "Remote" signal): a remote space whose
-            // device heartbeat lapsed shows offline — a host outage, not slow sync.
-            let offline_devices = spaces
-                .iter()
-                .map(|s| s.device_id.clone())
-                .filter(|id| !state.device_online(id, now))
-                .collect();
-            // Spaces with a live/awaiting session get an aggregate dot (the
+            let projects = state.projects.clone();
+            // Projects with a live/awaiting session get an aggregate dot (the
             // most urgent member status wins) so the attention signal survives
             // even with the Sessions list scrolled off.
             let mut attention: std::collections::HashMap<String, ChatIndicator> =
@@ -216,11 +225,11 @@ impl Shell {
                 ) {
                     continue;
                 }
-                let Some(space_id) = chat.space_id.clone() else {
+                let Some(project_id) = chat.project_id.clone() else {
                     continue;
                 };
                 attention
-                    .entry(space_id)
+                    .entry(project_id)
                     .and_modify(|held| {
                         if crate::state::attention_rank(status)
                             < crate::state::attention_rank(*held)
@@ -231,20 +240,18 @@ impl Shell {
                     .or_insert(status);
             }
             (
-                spaces,
-                state.selected_space.clone(),
-                device_names,
-                offline_devices,
+                projects,
+                state.selected_project.clone(),
                 attention,
             )
         };
         // Manual (drag) order overrides the synced creation order — device-
         // local, resolved exactly like the session-tab order.
-        let spaces: Vec<Space> = {
-            let created: Vec<String> = spaces.iter().map(|s| s.id.clone()).collect();
-            let order = super::tabs::resolve_tab_order(&created, &self.settings.space_order);
-            let mut by_id: std::collections::HashMap<String, Space> =
-                spaces.into_iter().map(|s| (s.id.clone(), s)).collect();
+        let projects: Vec<Project> = {
+            let created: Vec<String> = projects.iter().map(|s| s.id.clone()).collect();
+            let order = super::tabs::resolve_tab_order(&created, &self.settings.project_order);
+            let mut by_id: std::collections::HashMap<String, Project> =
+                projects.into_iter().map(|s| (s.id.clone(), s)).collect();
             order.iter().filter_map(|id| by_id.remove(id)).collect()
         };
 
@@ -261,11 +268,11 @@ impl Shell {
                     .text_size(px(11.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted.opacity(0.6))
-                    .child(SharedString::from("Spaces")),
+                    .child(SharedString::from("Projects")),
             )
             .child(
                 div()
-                    .id("add-space")
+                    .id("add-project")
                     .size(px(20.0))
                     .flex()
                     .items_center()
@@ -273,12 +280,12 @@ impl Shell {
                     .rounded(px(5.0))
                     .cursor_pointer()
                     .bg(motion::hover_blend(
-                        "add-space",
+                        "add-project",
                         crate::theme::wash(0.0),
                         crate::theme::wash(0.14),
                     ))
-                    .on_hover(motion::hover_listener("add-space"))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
+                    .on_hover(motion::hover_listener("add-project"))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_add_project(cx)))
                     .child(
                         icon(icons::PLUS)
                             .size(px(14.0))
@@ -287,11 +294,11 @@ impl Shell {
             );
 
         let mut column = div().flex().flex_col().child(header);
-        if spaces.is_empty() {
-            // Ghost row: the empty-state affordance mirrors a space row.
+        if projects.is_empty() {
+            // Ghost row: the empty-state affordance mirrors a project row.
             column = column.child(
                 div()
-                    .id("add-space-ghost")
+                    .id("add-project-ghost")
                     .mx(px(0.0))
                     .flex()
                     .flex_row()
@@ -302,48 +309,41 @@ impl Shell {
                     .py(px(6.0))
                     .text_size(px(13.0))
                     .text_color(motion::hover_blend(
-                        "add-space-ghost",
+                        "add-project-ghost",
                         theme.text_muted,
                         Theme::dark().text,
                     ))
                     .bg(motion::hover_blend(
-                        "add-space-ghost",
+                        "add-project-ghost",
                         crate::theme::wash(0.0),
                         Theme::dark().element_hover,
                     ))
-                    .on_hover(motion::hover_listener("add-space-ghost"))
+                    .on_hover(motion::hover_listener("add-project-ghost"))
                     .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_add_project(cx)))
                     .child(
                         icon(icons::FOLDER)
                             .size(px(16.0))
                             .text_color(theme.text_muted),
                     )
-                    .child(SharedString::from("Add space")),
+                    .child(SharedString::from("Create project")),
             );
         } else {
-            let count = spaces.len();
+            let count = projects.len();
             let drag = self
-                .space_drag
+                .project_drag
                 .as_ref()
                 .map(|d| (d.from, d.over, d.epoch, d.prev_over));
-            let rows: Vec<AnyElement> = spaces
+            let rows: Vec<AnyElement> = projects
                 .into_iter()
                 .enumerate()
-                .map(|(ix, space)| {
-                    let id = space.id.clone();
-                    let device_name = device_names
-                        .get(&space.device_id)
-                        .cloned()
-                        .unwrap_or_else(|| "Unknown device".to_string());
-                    let host_offline = offline_devices.contains(&space.device_id);
-                    let is_selected = selected.as_deref() == Some(space.id.as_str());
-                    let attention = attention.get(&space.id).copied();
-                    let row = self.render_space_row(
+                .map(|(ix, project)| {
+                    let id = project.id.clone();
+                    let is_selected = selected.as_deref() == Some(project.id.as_str());
+                    let attention = attention.get(&project.id).copied();
+                    let row = self.render_project_row(
                         ix,
-                        space,
-                        device_name,
-                        host_offline,
+                        project,
                         is_selected,
                         attention,
                         theme,
@@ -353,12 +353,12 @@ impl Shell {
                     // the session-tab idiom, vertical.
                     match drag {
                         Some((from, over, epoch, prev_over)) if ix != from => {
-                            let target = slide_offset(ix, from, over) * SPACE_ROW_SLOT;
-                            let start = slide_offset(ix, from, prev_over) * SPACE_ROW_SLOT;
+                            let target = slide_offset(ix, from, over) * PROJECT_ROW_SLOT;
+                            let start = slide_offset(ix, from, prev_over) * PROJECT_ROW_SLOT;
                             div()
                                 .relative()
                                 .child(row.with_animation(
-                                    SharedString::from(format!("space-slide-{id}-{epoch}")),
+                                    SharedString::from(format!("project-slide-{id}-{epoch}")),
                                     TAB_SLIDE.animation(),
                                     move |el, t| el.top(px(motion::lerp(start, target, t))),
                                 ))
@@ -367,7 +367,7 @@ impl Shell {
                         // The dragged row renders as an invisible spacer; the
                         // cursor ghost represents it.
                         Some((from, ..)) if ix == from => div()
-                            .h(px(SPACE_ROW_SLOT - 2.0))
+                            .h(px(PROJECT_ROW_SLOT - 2.0))
                             .flex_none()
                             .into_any_element(),
                         _ => row.into_any_element(),
@@ -379,23 +379,23 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .on_drag_move::<SpaceDragPayload>(cx.listener(
-                        move |this, event: &gpui::DragMoveEvent<SpaceDragPayload>, _, cx| {
+                    .on_drag_move::<ProjectDragPayload>(cx.listener(
+                        move |this, event: &gpui::DragMoveEvent<ProjectDragPayload>, _, cx| {
                             let from = event.drag(cx).from;
                             let rel_y = f32::from(event.event.position.y)
                                 - f32::from(event.bounds.top());
-                            let over = drop_index(rel_y, SPACE_ROW_SLOT, count);
-                            this.update_space_drag_over(from, over, cx);
+                            let over = drop_index(rel_y, PROJECT_ROW_SLOT, count);
+                            this.update_project_drag_over(from, over, cx);
                         },
                     ))
-                    .on_drop::<SpaceDragPayload>(cx.listener(
-                        move |this, payload: &SpaceDragPayload, _, cx| {
+                    .on_drop::<ProjectDragPayload>(cx.listener(
+                        move |this, payload: &ProjectDragPayload, _, cx| {
                             let to = this
-                                .space_drag
+                                .project_drag
                                 .as_ref()
                                 .map(|d| d.over)
                                 .unwrap_or(payload.from);
-                            this.commit_space_reorder(payload.from, to, cx);
+                            this.commit_project_reorder(payload.from, to, cx);
                         },
                     ))
                     .children(rows),
@@ -404,10 +404,10 @@ impl Shell {
         column.into_any_element()
     }
 
-    /// Track the drop slot while a space row is dragged over the list (150ms
+    /// Track the drop slot while a project row is dragged over the list (150ms
     /// sibling slides restart per committed `over` change).
-    fn update_space_drag_over(&mut self, from: usize, over: usize, cx: &mut Context<Self>) {
-        match &mut self.space_drag {
+    fn update_project_drag_over(&mut self, from: usize, over: usize, cx: &mut Context<Self>) {
+        match &mut self.project_drag {
             Some(drag) if drag.from == from => {
                 if drag.over != over {
                     drag.prev_over = drag.over;
@@ -417,7 +417,7 @@ impl Shell {
                 }
             }
             _ => {
-                self.space_drag = Some(SpaceDragState {
+                self.project_drag = Some(ProjectDragState {
                     from,
                     over,
                     epoch: 0,
@@ -429,41 +429,38 @@ impl Shell {
     }
 
     /// Commit a drag: persist the new visual order (device-local).
-    fn commit_space_reorder(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+    fn commit_project_reorder(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let created: Vec<String> = self
             .state
             .read(cx)
-            .spaces
+            .projects
             .iter()
             .map(|s| s.id.clone())
             .collect();
-        let mut order = super::tabs::resolve_tab_order(&created, &self.settings.space_order);
+        let mut order = super::tabs::resolve_tab_order(&created, &self.settings.project_order);
         if from < order.len() {
             reorder_tabs(&mut order, from, to);
-            self.settings.space_order = order;
+            self.settings.project_order = order;
             self.schedule_save(cx);
         }
-        self.space_drag = None;
+        self.project_drag = None;
         cx.notify();
     }
 
-    /// One space row: folder icon + folder name, device name subline.
-    /// `host_offline` marks a remote host whose presence heartbeat lapsed.
+    /// One project row: folder icon + folder name.
     #[allow(clippy::too_many_arguments)]
-    fn render_space_row(
+    fn render_project_row(
         &self,
         ix: usize,
-        space: Space,
-        device_name: String,
-        host_offline: bool,
+        project: Project,
         selected: bool,
         attention: Option<ChatIndicator>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let id = space.id.clone();
-        let name: SharedString = space.display_name().to_string().into();
-        let fade_key = format!("space-row-{id}");
+        let id = project.id.clone();
+        let name: SharedString = project.display_name().to_string().into();
+        let fade_key = format!("project-row-{id}");
         let rest_bg = if selected {
             crate::theme::glass_selected_bg()
         } else {
@@ -476,11 +473,8 @@ impl Shell {
         };
         let select_id = id.clone();
         let menu_id = id.clone();
-        // One line: "name @ device" — the folder name carries the weight, the
-        // device tag rides along slightly muted. Long names truncate; the
-        // device tag stays visible.
         div()
-            .id(SharedString::from(format!("space-{id}")))
+            .id(SharedString::from(format!("project-{id}")))
             .flex()
             .flex_row()
             .items_center()
@@ -494,24 +488,24 @@ impl Shell {
             .on_hover(motion::hover_listener(fade_key))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.activate_space(select_id.clone(), cx);
+                this.activate_project(select_id.clone(), cx);
             }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.space_menu = Some((menu_id.clone(), event.position));
+                    this.project_menu = Some((menu_id.clone(), event.position));
                     cx.notify();
                 }),
             )
             .on_drag(
-                SpaceDragPayload {
+                ProjectDragPayload {
                     from: ix,
                     name: name.clone(),
                 },
                 |payload, _point, _, cx| {
                     let name = payload.name.clone();
                     cx.stop_propagation();
-                    cx.new(|_| SpaceGhost { name })
+                    cx.new(|_| ProjectGhost { name })
                 },
             )
             // Status dot LEADS the row (like session rows) so its position is
@@ -541,28 +535,9 @@ impl Shell {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .child(name),
             )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex_none()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.0))
-                    .line_height(px(17.0))
-                    .text_color(if host_offline {
-                        theme.warning.opacity(0.8)
-                    } else {
-                        theme.text_muted.opacity(0.6)
-                    })
-                    .child(SharedString::from(if host_offline {
-                        format!("@ {device_name} · offline")
-                    } else {
-                        format!("@ {device_name}")
-                    })),
-            )
     }
 
-    /// The global "Sessions" list: every session across all spaces (idle
+    /// The global "Sessions" list: every session across all projects (idle
     /// included), attention-sorted. Rows are keyed for the FLIP resort glide.
     pub(super) fn render_active_rows(
         &mut self,
@@ -576,8 +551,8 @@ impl Shell {
                 .overview_chats(now)
                 .into_iter()
                 .map(|(status, chat)| {
-                    let space = state.space_for_chat(chat);
-                    let folder = space
+                    let project = state.project_for_chat(chat);
+                    let folder = project
                         .map(|s| s.display_name().to_string())
                         .unwrap_or_else(|| "?".to_string());
                     // The branch shows whenever the engine has stamped one —
@@ -620,31 +595,29 @@ impl Shell {
             .collect()
     }
 
-    // ---- add-space flow (the ⌘K palette) ----
+    // ---- add-project flow (the ⌘K palette) ----
 
-    pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
-        let devices: Vec<Device> = self.state.read(cx).devices.clone();
-        let local = self.state.read(cx).local_device_id.clone();
-        // Land on this device's tab (else the first registered device).
-        let device = devices
-            .iter()
-            .find(|d| local.as_deref() == Some(d.id.as_str()))
-            .or_else(|| devices.first())
+    pub(super) fn open_add_project(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let device = state
+            .local_device_id
+            .as_deref()
+            .and_then(|local_id| state.devices.iter().find(|d| d.id == local_id))
             .cloned();
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
-        // bubble to the palette frame (`add_space_key`) instead of moving the
+        // bubble to the palette frame (`add_project_key`) instead of moving the
         // text caret — Enter and ⌘Enter are both handled there.
         let search = cx.new(|cx| ComposerInput::with_context("Search folders…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
-                if let Some(flow) = this.add_space.as_mut() {
+                if let Some(flow) = this.add_project.as_mut() {
                     flow.active = 0;
                 }
                 cx.notify();
             }
         });
         let has_device = device.is_some();
-        self.add_space = Some(AddSpaceFlow {
+        self.add_project = Some(CreateProjectFlow {
             device,
             search,
             browser: Loadable::Idle,
@@ -662,36 +635,15 @@ impl Shell {
             _search_events: search_events,
         });
         if has_device {
-            self.load_space_folders(None, cx);
+            self.load_project_folders(None, cx);
         }
-        cx.notify();
-    }
-
-    /// Devices-rail click: rebrowse the same palette on another device.
-    fn add_space_pick_device(&mut self, device: Device, cx: &mut Context<Self>) {
-        let Some(flow) = self.add_space.as_mut() else {
-            return;
-        };
-        if flow.device.as_ref().is_some_and(|d| d.id == device.id) {
-            return;
-        }
-        flow.device = Some(device);
-        flow.browser = Loadable::Idle;
-        flow.browser_path = None;
-        flow.home = None;
-        flow.browser_repo = false;
-        flow.active = 0;
-        flow.error = None;
-        let search = flow.search.clone();
-        search.update(cx, |input, cx| input.set_text("", cx));
-        self.load_space_folders(None, cx);
         cx.notify();
     }
 
     /// The current listing's folder rows filtered by the search query
     /// (prefix matches first — `popover::filter_indices`).
-    fn add_space_filtered(&self, cx: &App) -> Vec<comet_proto::FolderEntry> {
-        let Some(flow) = self.add_space.as_ref() else {
+    fn add_project_filtered(&self, cx: &App) -> Vec<comet_proto::FolderEntry> {
+        let Some(flow) = self.add_project.as_ref() else {
             return Vec::new();
         };
         let Some(listing) = flow.browser.ready() else {
@@ -707,9 +659,9 @@ impl Shell {
     }
 
     /// Descend into the highlighted (filtered) folder; clears the query.
-    fn add_space_open_active(&mut self, cx: &mut Context<Self>) {
-        let rows = self.add_space_filtered(cx);
-        let Some(flow) = self.add_space.as_ref() else {
+    fn add_project_open_active(&mut self, cx: &mut Context<Self>) {
+        let rows = self.add_project_filtered(cx);
+        let Some(flow) = self.add_project.as_ref() else {
             return;
         };
         let Some(listing) = flow.browser.ready() else {
@@ -721,34 +673,32 @@ impl Shell {
         let full = crate::pickers::child_path(&listing.path, &entry.name);
         let is_repo = entry.is_repo;
         let search = flow.search.clone();
-        if let Some(flow) = self.add_space.as_mut() {
+        if let Some(flow) = self.add_project.as_mut() {
             flow.browser_repo = is_repo;
         }
         search.update(cx, |input, cx| input.set_text("", cx));
-        self.load_space_folders(Some(full), cx);
+        self.load_project_folders(Some(full), cx);
     }
 
     /// Descend into a specific folder row (mouse path); clears the query.
-    fn add_space_descend(&mut self, full: String, is_repo: bool, cx: &mut Context<Self>) {
-        let Some(flow) = self.add_space.as_mut() else {
+    fn add_project_descend(&mut self, full: String, is_repo: bool, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_project.as_mut() else {
             return;
         };
         flow.browser_repo = is_repo;
         let search = flow.search.clone();
         search.update(cx, |input, cx| input.set_text("", cx));
-        self.load_space_folders(Some(full), cx);
+        self.load_project_folders(Some(full), cx);
     }
 
-    /// ListFolders on the flow's device (relay-forwarded when remote).
-    pub(super) fn load_space_folders(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+    /// ListFolders on the local engine.
+    pub(super) fn load_project_folders(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let local = self.state.read(cx).local_device_id.clone();
-        let Some(flow) = self.add_space.as_mut() else {
+        let Some(flow) = self.add_project.as_mut() else {
             return;
         };
-        let device_id = flow.device.as_ref().map(|d| d.id.clone());
         let went_home = path.is_none();
         flow.browser_path = path.clone();
         flow.browser = Loadable::Loading;
@@ -759,27 +709,18 @@ impl Shell {
             if let Some(p) = &path {
                 params.insert("path".into(), serde_json::Value::String(p.clone()));
             }
-            // Only target remote devices — local calls skip the relay.
-            if let (Some(target), local) = (&device_id, &local)
-                && local.as_deref() != Some(target.as_str())
-            {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(target.clone()),
-                );
-            }
             let result = engine
                 .client()
                 .call(methods::LIST_FOLDERS, serde_json::Value::Object(params))
                 .await;
             this.update(cx, |shell, cx| {
-                if let Some(flow) = shell.add_space.as_mut() {
+                if let Some(flow) = shell.add_project.as_mut() {
                     flow.browser = match result {
                         Ok(value) => match serde_json::from_value::<FolderListing>(value) {
                             Ok(listing) => {
                                 // A pathless browse resolved home — remember it
                                 // so the breadcrumbs can fold it into the
-                                // device crumb.
+                                // Home crumb.
                                 if went_home {
                                     flow.home = Some(listing.path.clone());
                                 }
@@ -796,12 +737,12 @@ impl Shell {
         }));
     }
 
-    /// Create the space for the browser's current folder.
-    fn submit_add_space(&mut self, cx: &mut Context<Self>) {
+    /// Create the project for the browser's current folder.
+    fn submit_add_project(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Some(flow) = self.add_space.as_ref() else {
+        let Some(flow) = self.add_project.as_ref() else {
             return;
         };
         if flow.submit_busy {
@@ -815,31 +756,32 @@ impl Shell {
         };
         let path = listing.path.clone();
         let git_detected = flow.browser_repo;
-        // Same (device, folder) already has a space → just switch to it. The
-        // engine dedupes this case too (a createSpace for a duplicate pair
+        // Same (device, folder) already has a project → just switch to it. The
+        // engine dedupes this case too (a createProject for a duplicate pair
         // no-ops), so creating would leave the minted id dangling.
         if let Some(existing) = self
             .state
             .read(cx)
-            .spaces
+            .projects
             .iter()
             .find(|s| s.device_id == device.id && s.path == path)
             .map(|s| s.id.clone())
         {
-            self.add_space = None;
-            self.activate_space(existing, cx);
+            self.add_project = None;
+            self.activate_project(existing.clone(), cx);
+            self.create_session_in_project(existing, cx);
             return;
         }
-        let Some(flow) = self.add_space.as_mut() else {
+        let Some(flow) = self.add_project.as_mut() else {
             return;
         };
         flow.submit_busy = true;
         flow.error = None;
-        let space_id = uuid::Uuid::new_v4().to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
         // Optimistic echo: the watch frame carrying the real row replaces it
-        // by id (apply_spaces re-sorts; same-id upsert is idempotent).
-        let space = Space {
-            id: space_id.clone(),
+        // by id (apply_projects re-sorts; same-id upsert is idempotent).
+        let project = Project {
+            id: project_id.clone(),
             device_id: device.id.clone(),
             path: path.clone(),
             name: None,
@@ -849,34 +791,35 @@ impl Shell {
             created_at: Utc::now(),
         };
         self.state.update(cx, |s, cx| {
-            if !s.spaces.iter().any(|existing| existing.id == space.id) {
-                s.spaces.push(space);
+            if !s.projects.iter().any(|existing| existing.id == project.id) {
+                s.projects.push(project);
             }
             cx.notify();
         });
         let params = serde_json::json!({
-            "op": "createSpace",
-            "spaceId": space_id,
+            "op": "createProject",
+            "projectId": project_id,
             "deviceId": device.id,
             "path": path,
             "gitDetected": git_detected,
         });
-        let submit_id = space_id.clone();
+        let submit_id = project_id.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::MUTATE, params).await;
             this.update(cx, |shell, cx| {
                 match result {
                     Ok(_) => {
-                        shell.add_space = None;
-                        shell.activate_space(submit_id.clone(), cx);
+                        shell.add_project = None;
+                        shell.activate_project(submit_id.clone(), cx);
+                        shell.create_session_in_project(submit_id.clone(), cx);
                     }
                     Err(err) => {
                         // Roll the optimistic row back; surface the error inline.
                         shell.state.update(cx, |s, cx| {
-                            s.spaces.retain(|space| space.id != submit_id);
+                            s.projects.retain(|project| project.id != submit_id);
                             cx.notify();
                         });
-                        if let Some(flow) = shell.add_space.as_mut() {
+                        if let Some(flow) = shell.add_project.as_mut() {
                             flow.submit_busy = false;
                             flow.error = Some(format!("{err}").into());
                         }
@@ -886,24 +829,24 @@ impl Shell {
             })
             .ok();
         });
-        if let Some(flow) = self.add_space.as_mut() {
+        if let Some(flow) = self.add_project.as_mut() {
             flow.submit_task = Some(task);
         }
         cx.notify();
     }
 
     /// Go up to the parent folder (←, and ⌫ on an empty query).
-    fn add_space_go_up(&mut self, cx: &mut Context<Self>) {
+    fn add_project_go_up(&mut self, cx: &mut Context<Self>) {
         let parent = self
-            .add_space
+            .add_project
             .as_ref()
             .and_then(|f| f.browser.ready())
             .and_then(|l| parent_path(&l.path));
         if let Some(parent) = parent {
-            if let Some(flow) = self.add_space.as_mut() {
+            if let Some(flow) = self.add_project.as_mut() {
                 flow.browser_repo = false; // unknown at the parent
             }
-            self.load_space_folders(Some(parent), cx);
+            self.load_project_folders(Some(parent), cx);
         }
     }
 
@@ -911,16 +854,16 @@ impl Shell {
     /// maps to a REAL key: ↑↓ navigate, →/⏎ open the highlighted folder,
     /// ← up a level, ⌘⏎ add the OPEN folder, ⌫ (empty query) also goes up,
     /// esc closes.
-    fn add_space_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+    fn add_project_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
         // ←/→ act on the FOLDERS, not the text cursor — the palette is a
         // navigator first; queries are short and edited with ⌫.
         match event.keystroke.key.as_str() {
             "right" => {
-                self.add_space_open_active(cx);
+                self.add_project_open_active(cx);
                 return;
             }
             "left" => {
-                self.add_space_go_up(cx);
+                self.add_project_go_up(cx);
                 return;
             }
             _ => {}
@@ -932,13 +875,13 @@ impl Shell {
         );
         match key {
             popover::MenuKey::Escape => {
-                self.add_space = None;
+                self.add_project = None;
                 cx.notify();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
-                let count = self.add_space_filtered(cx).len();
+                let count = self.add_project_filtered(cx).len();
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
-                if let Some(flow) = self.add_space.as_mut() {
+                if let Some(flow) = self.add_project.as_mut() {
                     flow.active =
                         popover::menu_step(Some(flow.active), count, delta).unwrap_or(0);
                     // Keep the highlighted row in view as the cursor walks
@@ -948,30 +891,30 @@ impl Shell {
                     cx.notify();
                 }
             }
-            // ⏎ opens the highlighted folder (an alias for →); the space is
+            // ⏎ opens the highlighted folder (an alias for →); the project is
             // added with ⌘⏎ — and the chord acts on the folder OPEN in the
             // breadcrumbs, not the highlight. The highlight auto-rests on the
             // first row, so a chord that took it would add arbitrary
             // subfolders; the usual target (a repo root full of subfolders)
             // is only ever "the folder you're standing in".
-            popover::MenuKey::Enter => self.add_space_open_active(cx),
-            popover::MenuKey::ModEnter => self.submit_add_space(cx),
+            popover::MenuKey::Enter => self.add_project_open_active(cx),
+            popover::MenuKey::ModEnter => self.submit_add_project(cx),
             popover::MenuKey::Backspace => {
                 let empty = self
-                    .add_space
+                    .add_project
                     .as_ref()
                     .is_some_and(|f| f.search.read(cx).is_empty());
                 if empty {
-                    self.add_space_go_up(cx);
+                    self.add_project_go_up(cx);
                 }
             }
             popover::MenuKey::Other => {}
         }
     }
 
-    /// The palette card: ⌘K search bar (with the ⌘⏎ add / esc chips) ·
-    /// breadcrumbs + folder list beside the devices rail · kbd-hint footer.
-    pub(super) fn render_add_space_overlay(
+    /// The palette card: ⌘K search bar (with the ⌘⏎ add / esc chips), local
+    /// breadcrumbs, folder list, and kbd-hint footer.
+    pub(super) fn render_add_project_overlay(
         &mut self,
         viewport: gpui::Size<Pixels>,
         window: &mut Window,
@@ -979,16 +922,15 @@ impl Shell {
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
         {
-            let flow = self.add_space.as_mut()?;
+            let flow = self.add_project.as_mut()?;
             if std::mem::take(&mut flow.focus_pending) {
                 let handle = flow.search.focus_handle(cx);
                 window.focus(&handle, cx);
             }
         }
-        let (device, search, error, submit_busy, active, loading, load_error, listing, focus, list_scroll, home) = {
-            let flow = self.add_space.as_ref()?;
+        let (search, error, submit_busy, active, loading, load_error, listing, focus, list_scroll, home) = {
+            let flow = self.add_project.as_ref()?;
             (
-                flow.device.clone(),
                 flow.search.clone(),
                 flow.error.clone(),
                 flow.submit_busy,
@@ -1001,22 +943,9 @@ impl Shell {
                 flow.home.clone(),
             )
         };
-        let devices = self.state.read(cx).devices.clone();
-        let rows = self.add_space_filtered(cx);
+        let rows = self.add_project_filtered(cx);
         let query_empty = search.read(cx).is_empty();
         let hairline = crate::theme::white_alpha(0.06);
-        let now = Utc::now();
-        // (browsed device name, online) per rail row — presence is the same
-        // signal the sidebar space rows use.
-        let device_presence: Vec<bool> = {
-            let state = self.state.read(cx);
-            devices.iter().map(|d| state.device_online(&d.id, now)).collect()
-        };
-        let device_name: SharedString = device
-            .as_ref()
-            .map(|d| d.name.clone())
-            .unwrap_or_else(|| "This device".to_string())
-            .into();
 
         // A quiet mono key-cap chip ("⌘K" / "esc") for the search bar ends.
         let key_chip = |theme: &Theme| {
@@ -1039,7 +968,7 @@ impl Shell {
         //    esc. The primary chip leads with the ⌘ glyph, then says "Enter"
         //    in words (user request — the bare return arrow read as noise).
         let submit_chip = popover::btn_primary(&theme, "")
-            .id("add-space-submit")
+            .id("add-project-submit")
             .h(px(22.0))
             .px(px(8.0))
             .py(px(0.0))
@@ -1053,7 +982,7 @@ impl Shell {
             .gap(px(4.0))
             .text_size(px(12.0))
             .when(submit_busy || listing.is_none(), |el| el.opacity(0.6))
-            .on_click(cx.listener(|this, _, _, cx| this.submit_add_space(cx)))
+            .on_click(cx.listener(|this, _, _, cx| this.submit_add_project(cx)))
             .when(!submit_busy, |el| {
                 el.child(
                     icon(icons::COMMAND)
@@ -1094,20 +1023,19 @@ impl Shell {
             .child(submit_chip)
             .child(
                 key_chip(&theme)
-                    .id("add-space-esc")
+                    .id("add-project-esc")
                     .cursor_pointer()
                     .hover(|s| s.bg(crate::theme::white_alpha(0.09)))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.add_space = None;
+                        this.add_project = None;
                         cx.notify();
                     }))
                     .child(SharedString::from("esc")),
             );
 
-        // ── breadcrumbs ("MacBook Pro / Projects / comet"): the quiet mono
-        //    path voice, `/` separators. The device crumb stands in for home —
-        //    everything up to the resolved home path folds into it; below
-        //    home the full path shows. Ancestors (device crumb included) are
+        // ── breadcrumbs ("Home / Projects / nova"): the quiet mono path
+        //    voice, `/` separators. The Home crumb stands in for the local
+        //    home path; below home the full path shows. Ancestors are
         //    clickable.
         let crumbs: AnyElement = match &listing {
             Some(listing) => {
@@ -1135,12 +1063,12 @@ impl Shell {
                     .font_family(theme.font_mono.clone())
                     .child({
                         let crumb = div()
-                            .id("add-space-crumb-device")
+                            .id("add-project-crumb-home")
                             .px(px(3.0))
                             .rounded(px(4.0))
-                            .child(device_name.clone());
+                            .child(SharedString::from("Home"));
                         if at_home {
-                            // Standing at home — the device crumb IS the
+                            // Standing at home — the Home crumb IS the
                             // current folder.
                             crumb.text_color(theme.text.opacity(0.85)).into_any_element()
                         } else {
@@ -1149,10 +1077,10 @@ impl Shell {
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(Theme::dark().text))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(flow) = this.add_space.as_mut() {
+                                    if let Some(flow) = this.add_project.as_mut() {
                                         flow.browser_repo = false;
                                     }
-                                    this.load_space_folders(None, cx);
+                                    this.load_project_folders(None, cx);
                                 }))
                                 .into_any_element()
                         }
@@ -1175,7 +1103,7 @@ impl Shell {
                                     )
                                     .child({
                                         let crumb = div()
-                                            .id(("add-space-crumb", ix))
+                                            .id(("add-project-crumb", ix))
                                             .px(px(3.0))
                                             .rounded(px(4.0))
                                             .text_color(if is_last {
@@ -1193,11 +1121,11 @@ impl Shell {
                                                 .on_click(cx.listener(
                                                     move |this, _, _, cx| {
                                                         if let Some(flow) =
-                                                            this.add_space.as_mut()
+                                                            this.add_project.as_mut()
                                                         {
                                                             flow.browser_repo = false;
                                                         }
-                                                        this.load_space_folders(
+                                                        this.load_project_folders(
                                                             Some(full.clone()),
                                                             cx,
                                                         );
@@ -1219,19 +1147,15 @@ impl Shell {
             div()
                 .px(px(8.0))
                 .py(px(6.0))
-                .child(popover::skeleton_rows("add-space-skeleton", &theme, 6))
+                .child(popover::skeleton_rows("add-project-skeleton", &theme, 6))
                 .into_any_element()
         } else if let Some(message) = load_error {
-            let device_line = device
-                .as_ref()
-                .map(|d| format!("{} didn't respond — is it online?", d.name))
-                .unwrap_or(message);
-            popover::error_row(&theme, &device_line)
+            popover::error_row(&theme, &message)
                 .px(px(14.0))
                 .py(px(10.0))
                 .child(
                     div()
-                        .id("add-space-retry")
+                        .id("add-project-retry")
                         .px(px(Theme::SPACE_SM))
                         .py(px(3.0))
                         .rounded(px(Theme::CONTROL_RADIUS))
@@ -1241,8 +1165,8 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.element_hover))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let path = this.add_space.as_ref().and_then(|f| f.browser_path.clone());
-                            this.load_space_folders(path, cx);
+                            let path = this.add_project.as_ref().and_then(|f| f.browser_path.clone());
+                            this.load_project_folders(path, cx);
                         }))
                         .child(SharedString::from("Retry")),
                 )
@@ -1270,7 +1194,7 @@ impl Shell {
                 .py(px(6.0))
                 .child(
                     div()
-                        .id("add-space-folders")
+                        .id("add-project-folders")
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&list_scroll)
@@ -1283,15 +1207,15 @@ impl Shell {
                     let name: SharedString = entry.name.clone().into();
                     let full = crate::pickers::child_path(&base_path, &entry.name);
                     let is_repo = entry.is_repo;
-                    popover::menu_row_nav(&theme, false, ix == active, format!("add-space-folder-{ix}"))
+                    popover::menu_row_nav(&theme, false, ix == active, format!("add-project-folder-{ix}"))
                         // The active-tab/session selection language: the wash
                         // plus the ring-only inset outline.
                         .when(ix == active, |el| {
                             el.shadow(crate::theme::glass_selected_shadows())
                         })
-                        .id(("add-space-folder", ix))
+                        .id(("add-project-folder", ix))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_space_descend(full.clone(), is_repo, cx);
+                            this.add_project_descend(full.clone(), is_repo, cx);
                         }))
                         .child(
                             icon(icons::FOLDER)
@@ -1315,115 +1239,9 @@ impl Shell {
                 .into_any_element()
         };
 
-        // ── devices rail (mock right column): platform glyph + name +
-        //    presence dot per row, an info line naming the browsed device.
-        //    Rows are the tab recipe (h-28 rounded-8 washes), vertical.
-        let rail = div()
-            .w(px(196.0))
-            .flex_none()
-            .border_l_1()
-            .border_color(hairline)
-            .px(px(8.0))
-            .py(px(8.0))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .pt(px(2.0))
-                    .pb(px(4.0))
-                    .text_size(px(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted.opacity(0.6))
-                    .child(SharedString::from("Devices")),
-            )
-            .children(devices.into_iter().enumerate().map(|(ix, dev)| {
-                let is_active = device.as_ref().is_some_and(|d| d.id == dev.id);
-                let online = device_presence.get(ix).copied().unwrap_or(false);
-                // The Devices-page platform mapping (settings::devices).
-                let platform_icon = match dev.platform.as_str() {
-                    "macos" | "darwin" => icons::LAPTOP,
-                    "web" => icons::GLOBAL,
-                    "ios" | "android" => icons::SMARTPHONE,
-                    _ => icons::MONITOR,
-                };
-                let name: SharedString = dev.name.clone().into();
-                let pick = dev.clone();
-                div()
-                    .id(("add-space-device", ix))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(12.5))
-                    .cursor_pointer()
-                    .when(is_active, |el| {
-                        // The sidebar's selection language: glass wash +
-                        // ring-only inset outline.
-                        el.bg(crate::theme::glass_selected_bg())
-                            .shadow(crate::theme::glass_selected_shadows())
-                            .text_color(theme.text)
-                    })
-                    .when(!is_active, |el| {
-                        el.text_color(theme.text_muted.opacity(0.7))
-                            .hover(|s| s.bg(theme.element_hover))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.add_space_pick_device(pick.clone(), cx);
-                    }))
-                    .child(
-                        icon(platform_icon)
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(theme.text_muted.opacity(0.8)),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(name))
-                    .child(
-                        div().size(px(5.0)).rounded_full().flex_none().when(online, |el| {
-                            // The Devices-page presence emerald, soft glow
-                            // included.
-                            let emerald = crate::theme::oklch(0.765, 0.177, 163.223);
-                            el.bg(emerald.opacity(0.9)).shadow(vec![gpui::BoxShadow {
-                                color: emerald.opacity(0.55),
-                                offset: gpui::point(px(0.0), px(0.0)),
-                                blur_radius: px(6.0),
-                                spread_radius: px(0.0),
-                                inset: false,
-                            }])
-                        })
-                        .when(!online, |el| el.bg(crate::theme::white_alpha(0.22))),
-                    )
-            }))
-            .child(div().h(px(1.0)).mx(px(2.0)).my(px(6.0)).bg(hairline))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(px(6.0))
-                    .text_size(px(11.0))
-                    .line_height(px(15.0))
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .child(
-                        icon(icons::INFO_CIRCLE)
-                            .size(px(12.0))
-                            .flex_none()
-                            .mt(px(1.0))
-                            .text_color(theme.text_muted.opacity(0.5)),
-                    )
-                    .child(div().min_w_0().child(SharedString::from(format!(
-                        "Showing folders from {device_name} only"
-                    )))),
-            );
-
-        // ── body: folder column (crumbs + list) beside the devices rail.
-        //    FIXED height — sparse folders, loading skeletons, and device
-        //    switches must not resize the card (the list fills and scrolls).
+        // ── body: local folder column (crumbs + list).
+        //    FIXED height — sparse folders and loading skeletons must not
+        //    resize the card (the list fills and scrolls).
         let body = div()
             .h(px(330.0))
             .flex()
@@ -1437,8 +1255,7 @@ impl Shell {
                     .flex_col()
                     .child(crumbs)
                     .child(list),
-            )
-            .child(rail);
+            );
 
         // ── footer: the shared key-cap legend voice (popover::key_hint).
         let footer = div()
@@ -1472,7 +1289,7 @@ impl Shell {
             });
 
         let card = div()
-            .id("add-space-palette")
+            .id("add-project-palette")
             .w(px(680.0))
             .rounded(px(14.0))
             .border_1()
@@ -1490,45 +1307,45 @@ impl Shell {
             .flex()
             .flex_col()
             .text_color(theme.text)
-            // On the keyboard dispatch path (see `AddSpaceFlow::focus`) — the
+            // On the keyboard dispatch path (see `CreateProjectFlow::focus`) — the
             // pickers' proven structure for frame-level keys with a focused
             // child input.
             .track_focus(&focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                this.add_space_key(event, cx)
+                this.add_project_key(event, cx)
             }))
             // Clicking the scrim dismisses (user requirement) — same close
             // path as Escape.
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.add_space = None;
+                this.add_project = None;
                 cx.notify();
             }))
             .child(input_row)
             .child(body)
             .child(footer)
             .into_any_element();
-        Some(popover::modal("add-space-dialog", viewport, card))
+        Some(popover::modal("add-project-dialog", viewport, card))
     }
 
-    // ---- space context menu / rename / delete overlays ----
+    // ---- project context menu / rename / delete overlays ----
 
-    pub(super) fn open_rename_space(&mut self, space_id: String, cx: &mut Context<Self>) {
-        self.space_menu = None;
+    pub(super) fn open_rename_project(&mut self, project_id: String, cx: &mut Context<Self>) {
+        self.project_menu = None;
         let current = self
             .state
             .read(cx)
-            .space_row(&space_id)
+            .project_row(&project_id)
             .map(|s| s.display_name().to_string())
             .unwrap_or_default();
-        let input = cx.new(|cx| ComposerInput::new("Space name", cx));
+        let input = cx.new(|cx| ComposerInput::new("Project name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
-                this.submit_rename_space(cx);
+                this.submit_rename_project(cx);
             }
         });
-        self.rename_space_dialog = Some(RenameSpaceDialog {
-            space_id,
+        self.rename_project_dialog = Some(RenameProjectDialog {
+            project_id,
             input,
             focus_pending: true,
             _events: events,
@@ -1536,32 +1353,32 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn submit_rename_space(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.rename_space_dialog.take() else {
+    pub(super) fn submit_rename_project(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.rename_project_dialog.take() else {
             return;
         };
         let name = dialog.input.read(cx).text().trim().to_string();
         if !name.is_empty() {
             self.mutate(
-                serde_json::json!({ "op": "renameSpace", "spaceId": dialog.space_id, "name": name }),
+                serde_json::json!({ "op": "renameProject", "projectId": dialog.project_id, "name": name }),
                 cx,
             );
         }
         cx.notify();
     }
 
-    pub(super) fn delete_space(&mut self, space_id: String, cx: &mut Context<Self>) {
-        self.delete_space_confirm = None;
+    pub(super) fn delete_project(&mut self, project_id: String, cx: &mut Context<Self>) {
+        self.delete_project_confirm = None;
         self.mutate(
-            serde_json::json!({ "op": "deleteSpace", "spaceId": space_id }),
+            serde_json::json!({ "op": "deleteProject", "projectId": project_id }),
             cx,
         );
         cx.notify();
     }
 
-    /// Space context menu + rename dialog + delete confirm (appended to the
+    /// Project context menu + rename dialog + delete confirm (appended to the
     /// shell's overlay list).
-    pub(super) fn render_space_overlays(
+    pub(super) fn render_project_overlays(
         &mut self,
         viewport: gpui::Size<Pixels>,
         window: &mut Window,
@@ -1570,34 +1387,34 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
-        if let Some((space_id, position)) = self.space_menu.clone() {
-            let rename_id = space_id.clone();
-            let delete_id = space_id.clone();
+        if let Some((project_id, position)) = self.project_menu.clone() {
+            let rename_id = project_id.clone();
+            let delete_id = project_id.clone();
             let menu = popover::popover_card(&theme)
                 .w(px(170.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.space_menu = None;
+                    this.project_menu = None;
                     cx.notify();
                 }))
                 .flex()
                 .flex_col()
                 .child(
-                    popover::menu_row(&theme, false, format!("space-menu-rename-{space_id}"))
-                        .id("space-menu-rename")
+                    popover::menu_row(&theme, false, format!("project-menu-rename-{project_id}"))
+                        .id("project-menu-rename")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_rename_space(rename_id.clone(), cx)
+                            this.open_rename_project(rename_id.clone(), cx)
                         }))
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Rename…")),
                 )
                 .child(popover::menu_separator())
                 .child(
-                    popover::menu_row(&theme, false, format!("space-menu-delete-{space_id}"))
-                        .id("space-menu-delete")
+                    popover::menu_row(&theme, false, format!("project-menu-delete-{project_id}"))
+                        .id("project-menu-delete")
                         .text_color(theme.danger)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.space_menu = None;
-                            this.delete_space_confirm = Some(delete_id.clone());
+                            this.project_menu = None;
+                            this.delete_project_confirm = Some(delete_id.clone());
                             cx.notify();
                         }))
                         .child(
@@ -1608,10 +1425,10 @@ impl Shell {
                         .child(SharedString::from("Remove…")),
                 )
                 .into_any_element();
-            overlays.push(popover::menu_at("space-context-menu", position, menu));
+            overlays.push(popover::menu_at("project-context-menu", position, menu));
         }
 
-        if let Some(dialog) = &mut self.rename_space_dialog {
+        if let Some(dialog) = &mut self.rename_project_dialog {
             if std::mem::take(&mut dialog.focus_pending) {
                 window.focus(&dialog.input.focus_handle(cx), cx);
             }
@@ -1619,11 +1436,11 @@ impl Shell {
             let card = popover::dialog_card(&theme)
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                     if ev.keystroke.key == "escape" {
-                        this.rename_space_dialog = None;
+                        this.rename_project_dialog = None;
                         cx.notify();
                     }
                 }))
-                .child(popover::dialog_title(&theme, "Rename space"))
+                .child(popover::dialog_title(&theme, "Rename project"))
                 .child(
                     div()
                         .mt(px(12.0))
@@ -1637,51 +1454,47 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "rename-space-cancel")
-                                .id("rename-space-cancel")
+                            popover::btn_ghost(&theme, "Cancel", "rename-project-cancel")
+                                .id("rename-project-cancel")
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.rename_space_dialog = None;
+                                    this.rename_project_dialog = None;
                                     cx.notify();
                                 })),
                         )
                         .child(
                             popover::btn_primary(&theme, "Rename")
-                                .id("rename-space-save")
+                                .id("rename-project-save")
                                 .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_rename_space(cx)),
+                                    cx.listener(|this, _, _, cx| this.submit_rename_project(cx)),
                                 ),
                         ),
                 )
                 .into_any_element();
-            overlays.push(popover::modal("rename-space-dialog", viewport, card));
+            overlays.push(popover::modal("rename-project-dialog", viewport, card));
         }
 
-        if let Some(space_id) = self.delete_space_confirm.clone() {
-            let (name, device, count) = {
+        if let Some(project_id) = self.delete_project_confirm.clone() {
+            let (name, count) = {
                 let state = self.state.read(cx);
-                let space = state.space_row(&space_id);
+                let project = state.project_row(&project_id);
                 (
-                    space
+                    project
                         .map(|s| s.display_name().to_string())
-                        .unwrap_or_else(|| "this space".into()),
-                    space
-                        .and_then(|s| state.device_name(&s.device_id))
-                        .unwrap_or("its device")
-                        .to_string(),
-                    state.chats_in_space(&space_id).len(),
+                        .unwrap_or_else(|| "this project".into()),
+                    state.chats_in_project(&project_id).len(),
                 )
             };
             let copy = if count == 1 {
                 format!(
-                    "Removing “{name}” permanently deletes its 1 session on {device}. This can’t be undone."
+                    "Removing “{name}” permanently deletes its 1 session. This can’t be undone."
                 )
             } else {
                 format!(
-                    "Removing “{name}” permanently deletes its {count} sessions on {device}. This can’t be undone."
+                    "Removing “{name}” permanently deletes its {count} sessions. This can’t be undone."
                 )
             };
             let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Remove space?"))
+                .child(popover::dialog_title(&theme, "Remove project?"))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, copy)))
                 .child(
                     div()
@@ -1691,23 +1504,23 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "delete-space-cancel")
-                                .id("delete-space-cancel")
+                            popover::btn_ghost(&theme, "Cancel", "delete-project-cancel")
+                                .id("delete-project-cancel")
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_space_confirm = None;
+                                    this.delete_project_confirm = None;
                                     cx.notify();
                                 })),
                         )
                         .child(
                             popover::btn_danger(&theme, "Remove")
-                                .id("delete-space-confirm")
+                                .id("delete-project-confirm")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_space(space_id.clone(), cx)
+                                    this.delete_project(project_id.clone(), cx)
                                 })),
                         ),
                 )
                 .into_any_element();
-            overlays.push(popover::modal("delete-space-dialog", viewport, card));
+            overlays.push(popover::modal("delete-project-dialog", viewport, card));
         }
 
         overlays

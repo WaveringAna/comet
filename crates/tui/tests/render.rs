@@ -10,7 +10,7 @@
 use chrono::Utc;
 use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use comet_proto::view::ConnectionStatus;
-use comet_proto::{AuthState, Chat, Session, SessionStatus, Space, ToolCall, UserProfile};
+use comet_proto::{AuthState, Chat, Session, SessionStatus, Project, ToolCall, UserProfile};
 use comet_tui::app::App;
 use comet_tui::keys::{Action, Focus};
 use comet_tui::link::Update;
@@ -19,8 +19,8 @@ use comet_tui::theme::Theme;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-fn space(id: &str, path: &str) -> Space {
-    Space {
+fn project(id: &str, path: &str) -> Project {
+    Project {
         id: id.into(),
         device_id: "dev".into(),
         path: path.into(),
@@ -47,7 +47,7 @@ fn chat(id: &str, title: &str) -> Chat {
         created_at: Utc::now(),
         harness_session_id: None,
         harness_session_cwd: None,
-        space_id: Some("s1".into()),
+        project_id: Some("s1".into()),
         last_seen_at: Some(Utc::now()),
     }
 }
@@ -71,7 +71,7 @@ fn text(id: &str, body: &str) -> MessagePart {
     }
 }
 
-/// A signed-in app with one space, two sessions, and a transcript.
+/// A signed-in app with one project, two sessions, and a transcript.
 fn populated() -> App {
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
@@ -83,7 +83,7 @@ fn populated() -> App {
         },
         org_id: Some("org".into()),
     })));
-    app.apply(Update::Spaces(vec![space("s1", "/dev/comet")]));
+    app.apply(Update::Projects(vec![project("s1", "/dev/comet")]));
     app.apply(Update::Chats(vec![
         chat("c1", "Rework the diff sidebar"),
         chat("c2", "Chase the flaky room test"),
@@ -177,7 +177,7 @@ fn a_populated_frame_shows_the_chrome_sidebar_and_transcript() {
     let rows = snapshot(&mut app, 100, 30);
     let screen = joined(&rows);
 
-    // The tab strip is the header: the selected space's sessions, plus `+`.
+    // The tab strip is the header: the selected project's sessions, plus `+`.
     assert!(rows[1].contains("Rework the diff"), "{}", rows[1]);
     assert!(
         rows[1].contains("Chase the flaky"),
@@ -186,9 +186,9 @@ fn a_populated_frame_shows_the_chrome_sidebar_and_transcript() {
     );
 
     // Sidebar: two sections.
-    assert!(screen.contains("Spaces"), "{screen}");
+    assert!(screen.contains("Projects"), "{screen}");
     assert!(screen.contains("Sessions"), "{screen}");
-    // Session rows carry a "space@device" sub-line under the title — where the
+    // Session rows carry a "project@device" sub-line under the title — where the
     // work happens, not which branch it happens on.
     assert!(screen.contains("comet@"), "sub-line missing:\n{screen}");
 
@@ -369,7 +369,7 @@ fn an_empty_workspace_says_what_to_do() {
     app.apply(Update::Connection(ConnectionStatus::Ready));
     let screen = joined(&snapshot(&mut app, 80, 20));
     assert!(screen.contains("No session open"), "{screen}");
-    assert!(screen.contains("No spaces yet"), "{screen}");
+    assert!(screen.contains("No projects yet"), "{screen}");
     assert!(screen.contains("No sessions yet"), "{screen}");
 }
 
@@ -388,7 +388,7 @@ fn hiding_the_sidebar_gives_its_columns_to_the_transcript() {
     let screen = joined(&without);
     // Sidebar-only chrome is gone…
     assert!(
-        !screen.contains("Spaces") && !screen.contains("Sessions"),
+        !screen.contains("Projects") && !screen.contains("Sessions"),
         "the sidebar is hidden, so its sections must be gone:\n{screen}"
     );
     // …but the tab strip is the main panel's, so it stays.
@@ -518,7 +518,7 @@ fn drawing_twice_with_no_changes_touches_nothing() {
 #[test]
 fn the_sidebar_follows_the_desktop_order() {
     // The reference sidebar reads: device, New session, rule, "Sessions", then a
-    // faint space heading with its two-line session rows, and the user pinned to
+    // faint project heading with its two-line session rows, and the user pinned to
     // the bottom (docs/reference/original-comet.png).
     let mut app = populated();
     let rows = snapshot(&mut app, 100, 24);
@@ -530,19 +530,19 @@ fn the_sidebar_follows_the_desktop_order() {
             .position(|row| row.contains(needle))
             .unwrap_or_else(|| panic!("{needle:?} missing from sidebar:\n{sidebar:#?}"))
     };
-    // Two sections, in comet-native's order: Spaces, then a flat global
+    // Two sections, in comet-native's order: Projects, then a flat global
     // Sessions list. Not one list grouped by project — that was the original
     // Electron app.
-    let spaces = index("Spaces");
-    let space_row = index("comet ");
+    let projects = index("Projects");
+    let project_row = index("comet ");
     let sessions = index("Sessions");
     let session = index("Rework the diff");
     assert!(
-        spaces < space_row && space_row < sessions && sessions < session,
+        projects < project_row && project_row < sessions && sessions < session,
         "sidebar order wrong:\n{sidebar:#?}"
     );
-    // The Spaces header carries its add affordance, right-aligned.
-    assert!(sidebar[spaces].trim_end().ends_with('+'), "{sidebar:#?}");
+    // The Projects header carries its add affordance, right-aligned.
+    assert!(sidebar[projects].trim_end().ends_with('+'), "{sidebar:#?}");
     // Two-line session rows: the sub-line is directly under its title.
     assert!(
         sidebar[session + 1].contains("comet@"),
@@ -680,11 +680,11 @@ fn the_working_strip_reports_elapsed_time() {
 }
 
 #[test]
-fn the_space_row_names_its_host_device() {
+fn the_project_row_names_its_host_device() {
     let mut app = populated();
     // The fixture's chats are hosted on "dev"; this engine is someone else.
     app.apply(Update::LocalDevice("laptop".into()));
-    // The space row names the host device, which is where "whose machine is
+    // The project row names the host device, which is where "whose machine is
     // this running on" lives in comet-native.
     let screen = joined(&snapshot(&mut app, 100, 24));
     assert!(screen.contains("dev"), "host device missing:\n{screen}");
@@ -808,23 +808,23 @@ fn a_selected_row_keeps_its_status_colour() {
 #[test]
 fn the_sessions_list_is_flat_and_global_not_grouped_by_space() {
     // comet-native's Sessions list answers "what needs me right now" across
-    // every space. Grouping it by project — which the original Electron app did
+    // every project. Grouping it by project — which the original Electron app did
     // — buries exactly that.
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
-    app.apply(Update::Spaces(vec![
-        space("s1", "/dev/alpha"),
-        Space {
+    app.apply(Update::Projects(vec![
+        project("s1", "/dev/alpha"),
+        Project {
             id: "s2".into(),
             path: "/dev/beta".into(),
-            ..space("s2", "/dev/beta")
+            ..project("s2", "/dev/beta")
         },
     ]));
     let mut in_beta = chat("c2", "Beta session");
-    in_beta.space_id = Some("s2".into());
+    in_beta.project_id = Some("s2".into());
     in_beta.last_message_at = Some(Utc::now());
     let mut in_alpha = chat("c1", "Alpha session");
-    in_alpha.space_id = Some("s1".into());
+    in_alpha.project_id = Some("s1".into());
     in_alpha.last_message_at = Some(Utc::now() - chrono::Duration::hours(2));
     app.apply(Update::Chats(vec![in_alpha, in_beta]));
 
@@ -839,7 +839,7 @@ fn the_sessions_list_is_flat_and_global_not_grouped_by_space() {
 
     // Both sessions sit under the single Sessions header…
     assert!(beta > sessions && alpha > sessions, "{sidebar:#?}");
-    // …in recency order, and adjacent: title + sub-line each, with no space
+    // …in recency order, and adjacent: title + sub-line each, with no project
     // heading spliced between them.
     assert!(beta < alpha, "recency order:\n{sidebar:#?}");
     assert_eq!(
@@ -850,30 +850,30 @@ fn the_sessions_list_is_flat_and_global_not_grouped_by_space() {
 }
 
 #[test]
-fn the_tab_strip_shows_only_the_selected_spaces_sessions() {
+fn the_tab_strip_shows_only_the_selected_projects_sessions() {
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
-    app.apply(Update::Spaces(vec![
-        space("s1", "/dev/alpha"),
-        space("s2", "/dev/beta"),
+    app.apply(Update::Projects(vec![
+        project("s1", "/dev/alpha"),
+        project("s2", "/dev/beta"),
     ]));
     let mut alpha = chat("c1", "Alpha session");
-    alpha.space_id = Some("s1".into());
+    alpha.project_id = Some("s1".into());
     let mut beta = chat("c2", "Beta session");
-    beta.space_id = Some("s2".into());
+    beta.project_id = Some("s2".into());
     app.apply(Update::Chats(vec![alpha, beta]));
 
-    app.selected_space = Some("s1".into());
+    app.selected_project = Some("s1".into());
     let rows = snapshot(&mut app, 100, 24);
     assert!(rows[1].contains("Alpha session"), "{}", rows[1]);
     assert!(
         !rows[1].contains("Beta session"),
-        "another space's session must not be a tab: {}",
+        "another project's session must not be a tab: {}",
         rows[0]
     );
 
-    // Switching space swaps the strip.
-    app.selected_space = Some("s2".into());
+    // Switching project swaps the strip.
+    app.selected_project = Some("s2".into());
     let rows = snapshot(&mut app, 100, 24);
     assert!(rows[1].contains("Beta session"), "{}", rows[1]);
     assert!(!rows[1].contains("Alpha session"), "{}", rows[1]);
@@ -882,7 +882,7 @@ fn the_tab_strip_shows_only_the_selected_spaces_sessions() {
 #[test]
 fn tabs_cycle_and_select_by_number() {
     let mut app = populated();
-    app.selected_space = Some("s1".into());
+    app.selected_project = Some("s1".into());
     let first = app.selected_chat.clone().expect("a selection");
 
     app.act(Action::CycleTab(1));
@@ -908,7 +908,7 @@ fn tabs_cycle_and_select_by_number() {
 }
 
 #[test]
-fn a_space_shows_its_host_and_flags_a_lapsed_one() {
+fn a_project_shows_its_host_and_flags_a_lapsed_one() {
     let mut app = populated();
     // Unknown device: no claim either way — silence beats a wrong "offline".
     let screen = joined(&snapshot(&mut app, 100, 24));
@@ -983,23 +983,23 @@ fn clicking_a_session_row_opens_it() {
 }
 
 #[test]
-fn clicking_a_space_activates_it_and_swaps_the_tabs() {
+fn clicking_a_project_activates_it_and_swaps_the_tabs() {
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
-    app.apply(Update::Spaces(vec![
-        space("s1", "/dev/alpha"),
-        space("s2", "/dev/beta"),
+    app.apply(Update::Projects(vec![
+        project("s1", "/dev/alpha"),
+        project("s2", "/dev/beta"),
     ]));
     let mut alpha = chat("c1", "Alpha session");
-    alpha.space_id = Some("s1".into());
+    alpha.project_id = Some("s1".into());
     let mut beta = chat("c2", "Beta session");
-    beta.space_id = Some("s2".into());
+    beta.project_id = Some("s2".into());
     app.apply(Update::Chats(vec![alpha, beta]));
-    app.selected_space = Some("s1".into());
+    app.selected_project = Some("s1".into());
 
     let (x, y) = cell_of(&mut app, 100, 24, "beta");
     app.click(x, y);
-    assert_eq!(app.selected_space.as_deref(), Some("s2"));
+    assert_eq!(app.selected_project.as_deref(), Some("s2"));
     let rows = snapshot(&mut app, 100, 24);
     assert!(rows[1].contains("Beta session"), "{}", rows[1]);
 }
@@ -1007,7 +1007,7 @@ fn clicking_a_space_activates_it_and_swaps_the_tabs() {
 #[test]
 fn clicking_a_tab_switches_to_it() {
     let mut app = populated();
-    app.selected_space = Some("s1".into());
+    app.selected_project = Some("s1".into());
     app.select_chat(Some("c1".into()));
     // The strip is three rows tall so its tabs have vertical padding; the labels
     // sit on the middle one.
@@ -1020,9 +1020,9 @@ fn clicking_a_tab_switches_to_it() {
 #[test]
 fn clicking_plus_starts_a_session_and_the_panes_take_focus() {
     let mut app = populated();
-    app.selected_space = Some("s1".into());
+    app.selected_project = Some("s1".into());
     let before = app.selected_chat.clone();
-    // The tab strip's `+`, not the Spaces header's — both are on screen.
+    // The tab strip's `+`, not the Projects header's — both are on screen.
     let rows = snapshot(&mut app, 100, 24);
     let x = column_of(&rows[1], rows[1].rfind('+').expect("the tab strip's +"));
     app.click(x, 1);
@@ -1082,16 +1082,16 @@ fn clicks_outside_any_target_do_nothing() {
 }
 
 #[test]
-fn the_spaces_plus_explains_itself_rather_than_doing_nothing() {
+fn the_projects_plus_explains_itself_rather_than_doing_nothing() {
     // There is no folder picker in the TUI yet; the affordance is still drawn
     // (it is part of the desktop sidebar), so clicking it must say why.
     let mut app = populated();
     let rows = snapshot(&mut app, 100, 24);
     let y = rows
         .iter()
-        .position(|row| row.contains("Spaces"))
-        .expect("the Spaces header");
-    // The Spaces header shares row 0 with the tab strip, so take the FIRST `+`
+        .position(|row| row.contains("Projects"))
+        .expect("the Projects header");
+    // The Projects header shares row 0 with the tab strip, so take the FIRST `+`
     // on that row — the sidebar's — not the last, which belongs to the tabs.
     let x = column_of(&rows[y], rows[y].find('+').expect("the add affordance"));
     let y = y as u16;
@@ -1125,13 +1125,13 @@ fn right_click_opens_a_context_menu_with_the_desktop_verbs() {
 }
 
 #[test]
-fn a_space_menu_offers_space_verbs_only() {
+fn a_project_menu_offers_project_verbs_only() {
     let mut app = populated();
     let (x, y) = cell_of(&mut app, 100, 26, "comet ");
     app.right_click(x, y);
     let screen = joined(&snapshot(&mut app, 100, 26));
-    assert!(screen.contains("Rename space"), "{screen}");
-    assert!(screen.contains("Remove space"), "{screen}");
+    assert!(screen.contains("Rename project"), "{screen}");
+    assert!(screen.contains("Remove project"), "{screen}");
     assert!(!screen.contains("Archive"), "not a session verb:\n{screen}");
 }
 
@@ -1443,7 +1443,7 @@ fn the_branch_picker_tags_current_and_materialized_refs() {
         "worktree tag missing:\n{screen}"
     );
 
-    // A space that is not a git checkout says so.
+    // A project that is not a git checkout says so.
     app.act(Action::CloseOverlay);
     app.apply(Update::Refs(vec![]));
     app.act(Action::PickRef);
@@ -1522,7 +1522,7 @@ fn each_chip_is_its_own_button() {
 
     // Distinct targets, not one lumped region: the footer carries where this
     // runs, the meta row carries who answers.
-    let footer = app.composer_footer().expect("a git space has a footer");
+    let footer = app.composer_footer().expect("a git project has a footer");
     assert!(!footer.reference.is_empty());
     assert!(!footer.checkout.is_empty());
     assert!(!app.composer_meta().model.is_empty());
@@ -1629,8 +1629,8 @@ fn a_drafts_model_and_effort_ride_the_session_it_creates() {
 }
 
 #[test]
-fn the_caret_is_drawn_so_a_trailing_space_is_visible() {
-    // Relying on the terminal's own cursor makes a trailing space invisible:
+fn the_caret_is_drawn_so_a_trailing_project_is_visible() {
+    // Relying on the terminal's own cursor makes a trailing project invisible:
     // the row is rendered without it, so nothing tells you it is there.
     let mut app = populated();
     app.focus = Focus::Composer;
@@ -1647,30 +1647,30 @@ fn the_caret_is_drawn_so_a_trailing_space_is_visible() {
         cell.bg, app.theme.text,
         "the caret cell must be painted, not left to the terminal"
     );
-    assert_eq!(cell.symbol(), " ", "and it sits on the space just typed");
+    assert_eq!(cell.symbol(), " ", "and it sits on the project just typed");
 
-    // One column left is the 'i' — so the block really is past the space.
+    // One column left is the 'i' — so the block really is past the project.
     let before = &terminal.backend().buffer()[(cursor.x - 1, cursor.y)];
     assert_eq!(before.symbol(), "i");
 }
 
-/// Two spaces, two sessions each, signed in.
+/// Two projects, two sessions each, signed in.
 fn two_spaces() -> App {
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
-    app.apply(Update::Spaces(vec![
-        space("s1", "/dev/alpha"),
-        space("s2", "/dev/beta"),
+    app.apply(Update::Projects(vec![
+        project("s1", "/dev/alpha"),
+        project("s2", "/dev/beta"),
     ]));
     let mut rows = Vec::new();
-    for (id, title, space_id, age) in [
+    for (id, title, project_id, age) in [
         ("a1", "Alpha one", "s1", 1i64),
         ("a2", "Alpha two", "s1", 2),
         ("b1", "Beta one", "s2", 3),
         ("b2", "Beta two", "s2", 4),
     ] {
         let mut chat = chat(id, title);
-        chat.space_id = Some(space_id.into());
+        chat.project_id = Some(project_id.into());
         chat.last_message_at = Some(Utc::now() - chrono::Duration::minutes(age));
         rows.push(chat);
     }
@@ -1679,33 +1679,33 @@ fn two_spaces() -> App {
 }
 
 #[test]
-fn switching_spaces_returns_you_to_where_you_were() {
+fn switching_projects_returns_you_to_where_you_were() {
     let mut app = two_spaces();
 
-    // Be somewhere specific in each space.
-    app.activate_space("s1".into());
+    // Be somewhere specific in each project.
+    app.activate_project("s1".into());
     app.select_chat(Some("a2".into()));
-    app.activate_space("s2".into());
+    app.activate_project("s2".into());
     app.select_chat(Some("b2".into()));
 
     // Coming back lands on the session you left, not the newest one.
-    app.activate_space("s1".into());
+    app.activate_project("s1".into());
     assert_eq!(app.selected_chat.as_deref(), Some("a2"));
-    app.activate_space("s2".into());
+    app.activate_project("s2".into());
     assert_eq!(app.selected_chat.as_deref(), Some("b2"));
 }
 
 #[test]
-fn a_space_you_have_never_opened_lands_on_its_newest_session() {
+fn a_project_you_have_never_opened_lands_on_its_newest_session() {
     let mut app = two_spaces();
-    app.activate_space("s2".into());
+    app.activate_project("s2".into());
     // `chats` is recency-sorted, so the newest of s2 is b1.
     assert_eq!(app.selected_chat.as_deref(), Some("b1"));
     assert!(app.draft.is_none());
 }
 
 #[test]
-fn an_empty_space_opens_the_new_session_canvas() {
+fn an_empty_project_opens_the_new_session_canvas() {
     let mut app = two_spaces();
     // Archive everything in s2, leaving it empty.
     let chats: Vec<comet_proto::Chat> = app
@@ -1713,7 +1713,7 @@ fn an_empty_space_opens_the_new_session_canvas() {
         .iter()
         .cloned()
         .map(|mut chat| {
-            if chat.space_id.as_deref() == Some("s2") {
+            if chat.project_id.as_deref() == Some("s2") {
                 chat.archived = true;
             }
             chat
@@ -1721,19 +1721,19 @@ fn an_empty_space_opens_the_new_session_canvas() {
         .collect();
     app.apply(Update::Chats(chats));
 
-    app.activate_space("s2".into());
+    app.activate_project("s2".into());
     assert!(
         app.draft.is_some(),
-        "an empty space must not leave a dead pane"
+        "an empty project must not leave a dead pane"
     );
     assert_eq!(app.selected_chat, None);
-    assert_eq!(app.draft.as_ref().unwrap().space_id, "s2");
+    assert_eq!(app.draft.as_ref().unwrap().project_id, "s2");
 }
 
 #[test]
 fn a_remembered_session_that_vanished_falls_back() {
     let mut app = two_spaces();
-    app.activate_space("s1".into());
+    app.activate_project("s1".into());
     app.select_chat(Some("a2".into()));
 
     // a2 is deleted elsewhere.
@@ -1745,8 +1745,8 @@ fn a_remembered_session_that_vanished_falls_back() {
         .collect();
     app.apply(Update::Chats(chats));
 
-    app.activate_space("s2".into());
-    app.activate_space("s1".into());
+    app.activate_project("s2".into());
+    app.activate_project("s1".into());
     assert_eq!(
         app.selected_chat.as_deref(),
         Some("a1"),
@@ -1755,15 +1755,15 @@ fn a_remembered_session_that_vanished_falls_back() {
 }
 
 #[test]
-fn clicking_a_space_row_restores_its_session() {
+fn clicking_a_project_row_restores_its_session() {
     let mut app = two_spaces();
-    app.activate_space("s1".into());
+    app.activate_project("s1".into());
     app.select_chat(Some("a2".into()));
-    app.activate_space("s2".into());
+    app.activate_project("s2".into());
 
     let (x, y) = cell_of(&mut app, 100, 28, "alpha");
     app.click(x, y);
-    assert_eq!(app.selected_space.as_deref(), Some("s1"));
+    assert_eq!(app.selected_project.as_deref(), Some("s1"));
     assert_eq!(app.selected_chat.as_deref(), Some("a2"));
 }
 
@@ -1776,7 +1776,7 @@ fn a_draft_survives_the_chats_frames_that_arrive_while_you_type() {
     // instead of continuing the one you had been moved to.
     let mut app = two_spaces();
     app.act(Action::NewSession);
-    let space = app.draft.as_ref().unwrap().space_id.clone();
+    let project = app.draft.as_ref().unwrap().project_id.clone();
 
     for _ in 0..5 {
         let chats = app.chats.clone();
@@ -1787,7 +1787,7 @@ fn a_draft_survives_the_chats_frames_that_arrive_while_you_type() {
             "and nothing may be selected under it"
         );
     }
-    assert_eq!(app.draft.as_ref().unwrap().space_id, space);
+    assert_eq!(app.draft.as_ref().unwrap().project_id, project);
 
     // Sending now starts the draft — one new session, not a stray one.
     app.composer.set_text("go");
@@ -1804,7 +1804,7 @@ fn a_draft_survives_the_chats_frames_that_arrive_while_you_type() {
 #[test]
 fn sending_in_an_open_session_never_creates_a_new_one() {
     let mut app = two_spaces();
-    app.activate_space("s1".into());
+    app.activate_project("s1".into());
     app.select_chat(Some("a1".into()));
 
     // Even after opening a draft and then picking a real session again, the
@@ -1831,7 +1831,7 @@ fn sending_in_an_open_session_never_creates_a_new_one() {
 #[test]
 fn clicking_a_session_while_drafting_switches_to_it() {
     let mut app = two_spaces();
-    app.activate_space("s1".into());
+    app.activate_project("s1".into());
     app.act(Action::NewSession);
     let (x, y) = cell_of(&mut app, 100, 28, "Alpha two");
     app.click(x, y);
@@ -2048,13 +2048,13 @@ fn the_footer_follows_a_session_as_well_as_a_draft() {
 }
 
 #[test]
-fn a_space_that_is_not_a_checkout_has_no_footer_at_all() {
+fn a_project_that_is_not_a_checkout_has_no_footer_at_all() {
     // An absent row, not an empty one: with no git there is no ref and no
     // worktree, so the two questions the footer answers do not arise.
     let mut app = populated();
-    let mut plain = space("s1", "/dev/comet");
+    let mut plain = project("s1", "/dev/comet");
     plain.git_detected = false;
-    app.apply(Update::Spaces(vec![plain]));
-    app.activate_space("s1".into());
+    app.apply(Update::Projects(vec![plain]));
+    app.activate_project("s1".into());
     assert!(app.composer_footer().is_none());
 }

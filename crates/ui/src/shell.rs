@@ -31,9 +31,7 @@ use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT};
 use crate::popover::{self, Loadable};
 use crate::rail;
-use crate::settings::accounts::AccountsPage;
 use crate::settings::archived::ArchivedPage;
-use crate::settings::devices::DevicesPage;
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
@@ -47,12 +45,12 @@ use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_heigh
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript};
 
-mod spaces;
+mod projects;
 mod tabs;
 
-use spaces::{AddSpaceFlow, RenameSpaceDialog};
+use projects::{CreateProjectFlow, RenameProjectDialog};
 
-actions!(shell, [ToggleSidebar, ToggleChanges, AddSpacePalette]);
+actions!(shell, [ToggleSidebar, ToggleChanges, CreateProjectPalette]);
 
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
@@ -131,25 +129,21 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             ToggleTerminal,
             None,
         ),
-        // Fixed: ⌘K summons the add-space palette (the ⌘K chip in its search
+        // Fixed: ⌘K summons the add-project palette (the ⌘K chip in its search
         // bar); pressing it again dismisses.
-        KeyBinding::new(&platform_combo("mod-k"), AddSpacePalette, None),
+        KeyBinding::new(&platform_combo("mod-k"), CreateProjectPalette, None),
     ]);
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
-    Devices,
-    Agents,
     Shortcuts,
     Archived,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 4] = [
-        SettingsSection::Devices,
-        SettingsSection::Agents,
+    pub const ALL: [SettingsSection; 2] = [
         SettingsSection::Shortcuts,
         SettingsSection::Archived,
     ];
@@ -158,8 +152,6 @@ impl SettingsSection {
     /// `settingsTitle` — the same strings in both places).
     pub fn label(self) -> &'static str {
         match self {
-            SettingsSection::Devices => "Devices",
-            SettingsSection::Agents => "Accounts",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Archived => "Archived sessions",
         }
@@ -173,13 +165,23 @@ pub enum Route {
     Settings(SettingsSection),
 }
 
-/// Per-chat panel open flags (comet parity: `sessionPanels` — the terminal and
-/// changes panels open *per session*, in memory only; heights and every other
-/// persisted setting stay global). New/unknown chats default to closed.
+/// The tool selected in the right panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightPanelTab {
+    Review,
+    Terminal,
+}
+
+/// Per-chat panel state (comet parity: `sessionPanels` — panel visibility and
+/// tab selection are in memory only; heights and every other persisted setting
+/// stay global). New/unknown chats default to closed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ChatPanels {
+    /// The conventional bottom-mounted terminal opened with Cmd/Ctrl+J.
     pub terminal_open: bool,
-    pub changes_open: bool,
+    /// Whether the right tool panel is visible. `None` shows its launcher.
+    pub right_panel_open: bool,
+    pub right_panel_tab: Option<RightPanelTab>,
 }
 
 /// The session-scoped panel map. Keys are chat ids; the new-chat canvas uses
@@ -201,11 +203,18 @@ impl SessionPanels {
         entry.terminal_open
     }
 
-    /// Flip the changes flag for `key`; returns the new value.
-    pub fn toggle_changes(&mut self, key: &str) -> bool {
+    /// Flip the right panel for `key`; returns the new value.
+    pub fn toggle_right_panel(&mut self, key: &str) -> bool {
         let entry = self.map.entry(key.to_string()).or_default();
-        entry.changes_open = !entry.changes_open;
-        entry.changes_open
+        entry.right_panel_open = !entry.right_panel_open;
+        entry.right_panel_open
+    }
+
+    /// Select a right-panel tool and open the panel for `key`.
+    pub fn select_right_panel_tab(&mut self, key: &str, tab: RightPanelTab) {
+        let entry = self.map.entry(key.to_string()).or_default();
+        entry.right_panel_open = true;
+        entry.right_panel_tab = Some(tab);
     }
 }
 
@@ -325,9 +334,8 @@ pub fn resort_offsets(
 }
 
 /// Estimated sidebar row height for the resort diff (title line 17px inside
-/// 6px vertical padding + the location subline's 14px line + 2px gap — Active
-/// rows always carry the folder · device subline).
-/// Session row height (FLIP estimate): space line + title + meta line
+/// 6px vertical padding + the location subline's 14px line + 2px gap).
+/// Session row height (FLIP estimate): project line + title + meta line
 /// (harness mark, plus branch for worktrees).
 const CHAT_ROW_HEIGHT: f32 = 61.0;
 /// Flex gap between sidebar list items.
@@ -420,40 +428,39 @@ pub struct Shell {
     /// "Drop images to attach" veil over the whole chat area; a drop stages
     /// the files in the composer.
     file_drag_active: bool,
-    /// Lazy panes: no entity (and no RPC) until first opened.
-    terminal: Option<Entity<TerminalPanel>>,
+    /// Lazy terminal surfaces: bottom and right each own their tabs and PTYs.
+    bottom_terminal: Option<Entity<TerminalPanel>>,
+    right_terminal: Option<Entity<TerminalPanel>>,
     changes: Option<Entity<Changes>>,
     /// Chat outlet vs settings pages.
     route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
-    devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
-    accounts_page: Option<Entity<AccountsPage>>,
     shortcuts_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
     chat_menu: Option<(String, Point<Pixels>)>,
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
-    /// Space-row context menu: (space id, window position).
-    space_menu: Option<(String, Point<Pixels>)>,
-    rename_space_dialog: Option<RenameSpaceDialog>,
-    /// Space id awaiting delete confirmation (hard delete + session cascade).
-    delete_space_confirm: Option<String>,
-    /// The add-space palette (⌘K-style; device tabs + folder search), `Some`
+    /// Project-row context menu: (project id, window position).
+    project_menu: Option<(String, Point<Pixels>)>,
+    rename_project_dialog: Option<RenameProjectDialog>,
+    /// Project id awaiting delete confirmation (hard delete + session cascade).
+    delete_project_confirm: Option<String>,
+    /// The add-project palette (⌘K-style local folder search), `Some`
     /// while open.
-    add_space: Option<AddSpaceFlow>,
-    /// Last selected chat per space (in-memory, like [`SessionPanels`]) — a
-    /// space switch lands back on the tab you left.
-    space_last_chat: std::collections::HashMap<String, String>,
+    add_project: Option<CreateProjectFlow>,
+    /// Last selected chat per project (in-memory, like [`SessionPanels`]) — a
+    /// project switch lands back on the tab you left.
+    project_last_chat: std::collections::HashMap<String, String>,
     /// Session tab currently hovered (close button appears on hover).
     tab_hover: Option<String>,
     /// Session-tab drag-reorder in flight (see `tabs::TabDragState`).
     tab_drag: Option<tabs::TabDragState>,
-    /// Space-row drag-reorder in flight (see `spaces::SpaceDragState`).
-    space_drag: Option<spaces::SpaceDragState>,
+    /// Project-row drag-reorder in flight (see `projects::ProjectDragState`).
+    project_drag: Option<projects::ProjectDragState>,
     /// Scroll position of the session tab region (drives the edge fades and
     /// the drop-index math under horizontal overflow).
     tabs_scroll: gpui::ScrollHandle,
@@ -462,11 +469,8 @@ pub struct Shell {
     tabs_scrolled_to: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
-    /// `settings.last_space_id` applied once after the first spaces frame.
-    space_boot_applied: bool,
-    /// Last seen session status per chat — the chime trigger compares against
-    /// it (a row's FIRST appearance never chimes, so boot stays silent).
-    sound_prev: std::collections::HashMap<String, comet_proto::SessionStatus>,
+    /// `settings.last_project_id` applied once after the first projects frame.
+    project_boot_applied: bool,
     user_menu_open: bool,
     /// Outside-click dismissal instant — suppresses the trigger click that
     /// follows the same mouse-down from instantly reopening the menu.
@@ -591,11 +595,9 @@ impl Shell {
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
         let route = match std::env::var("COMET_OPEN_ROUTE").ok().as_deref() {
-            Some("settings") | Some("settings/devices") => {
-                Route::Settings(SettingsSection::Devices)
+            Some("settings") | Some("settings/shortcuts") => {
+                Route::Settings(SettingsSection::Shortcuts)
             }
-            Some("settings/agents") => Route::Settings(SettingsSection::Agents),
-            Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {
@@ -627,31 +629,29 @@ impl Shell {
             transcript,
             composer,
             file_drag_active: false,
-            terminal: None,
+            bottom_terminal: None,
+            right_terminal: None,
             changes: None,
             route,
             nav,
-            devices_page: None,
             archived_page: None,
             shortcuts_page: None,
-            accounts_page: None,
             shortcuts_sub: None,
             chat_menu: None,
             rename_dialog: None,
             delete_confirm: None,
-            space_menu: None,
-            rename_space_dialog: None,
-            delete_space_confirm: None,
-            add_space: None,
-            space_last_chat: std::collections::HashMap::new(),
+            project_menu: None,
+            rename_project_dialog: None,
+            delete_project_confirm: None,
+            add_project: None,
+            project_last_chat: std::collections::HashMap::new(),
             tab_hover: None,
             tab_drag: None,
-            space_drag: None,
+            project_drag: None,
             tabs_scroll: gpui::ScrollHandle::new(),
             tabs_scrolled_to: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
-            space_boot_applied: false,
-            sound_prev: std::collections::HashMap::new(),
+            project_boot_applied: false,
             user_menu_open: false,
             user_menu_dismissed_at: None,
             sidebar_notice: None,
@@ -696,12 +696,12 @@ impl Shell {
     // ---- splash ----
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
-        // Capture knob: the add-space palette needs only the device registry.
-        if self.debug_dialog.as_deref() == Some("add-space")
+        // Capture knob: the add-project palette opens once local folders land.
+        if self.debug_dialog.as_deref() == Some("add-project")
             && !state.read(cx).devices.is_empty()
         {
             self.debug_dialog = None;
-            self.open_add_space(cx);
+            self.open_add_project(cx);
         }
         // Capture knob: pop the requested dialog once chats have landed.
         if let Some(which) = self.debug_dialog.clone()
@@ -716,74 +716,33 @@ impl Shell {
                 _ => {}
             }
         }
-        // Session chimes (herdr semantics, `sound::sound_for_transition`): a
-        // question rings whenever a session flips to AwaitingInput, a
-        // completion rings on the Working→Idle edge — for ANY session on any
-        // device. A row's first appearance only seeds the baseline, so boot
-        // (restored rows) and fresh sends stay silent.
-        //
-        // STALENESS-GATED like the dot (`effective_indicator`), for the same
-        // reason: raw row statuses include the past. A dead turn's Working row
-        // (host killed mid-run, Idle write lost to a wedged room) seeded
-        // prev=Working here, and the moment the old Idle finally synced in —
-        // typically piggybacked on the round-trip of a fresh send — the chime
-        // heard a phantom Working→Idle and rang "done" on send (user report
-        // 2026-07-31). The dot never showed that ghost; the chime must judge
-        // by the identical clock.
-        {
-            let now = Utc::now();
-            let sessions: Vec<(String, comet_proto::SessionStatus)> = state
-                .read(cx)
-                .sessions
-                .iter()
-                .map(|s| {
-                    use comet_proto::view::Indicator;
-                    let status = match comet_proto::view::effective_indicator(Some(s), now) {
-                        Indicator::Working => comet_proto::SessionStatus::Working,
-                        Indicator::AwaitingInput => comet_proto::SessionStatus::AwaitingInput,
-                        Indicator::Errored => comet_proto::SessionStatus::Errored,
-                        Indicator::None => comet_proto::SessionStatus::Idle,
-                    };
-                    (s.chat_id.clone(), status)
-                })
-                .collect();
-            for (chat_id, status) in sessions {
-                let prev = self.sound_prev.insert(chat_id, status);
-                if let Some(prev) = prev
-                    && self.settings.sound_enabled
-                    && let Some(sound) = crate::sound::sound_for_transition(prev, status)
-                {
-                    crate::sound::play(sound);
-                }
-            }
-        }
-        // Boot: restore the last selected space once the first spaces frame
+        // Boot: restore the last selected project once the first projects frame
         // lands (a still-existing row wins over the auto-selected first one;
-        // the boot-auto-selected chat's own space wins over both — selecting a
-        // chat implies its space, which `select_chat` already applied).
-        if !self.space_boot_applied && !state.read(cx).spaces.is_empty() {
-            self.space_boot_applied = true;
+        // the boot-auto-selected chat's own project wins over both — selecting a
+        // chat implies its project, which `select_chat` already applied).
+        if !self.project_boot_applied && !state.read(cx).projects.is_empty() {
+            self.project_boot_applied = true;
             if state.read(cx).selected_chat.is_none()
-                && let Some(last) = self.settings.last_space_id.clone()
-                && state.read(cx).space_row(&last).is_some()
+                && let Some(last) = self.settings.last_project_id.clone()
+                && state.read(cx).project_row(&last).is_some()
             {
-                state.update(cx, |s, cx| s.select_space(Some(last), cx));
+                state.update(cx, |s, cx| s.select_project(Some(last), cx));
             }
         }
-        // Track the per-space last chat + persist the selected space.
+        // Track the per-project last chat + persist the selected project.
         {
-            let (selected_space, selected_chat, chat_space) = {
+            let (selected_project, selected_chat, chat_project) = {
                 let s = state.read(cx);
-                let chat_space = s
+                let chat_project = s
                     .selected_chat_row()
-                    .and_then(|c| c.space_id.clone());
-                (s.selected_space.clone(), s.selected_chat.clone(), chat_space)
+                    .and_then(|c| c.project_id.clone());
+                (s.selected_project.clone(), s.selected_chat.clone(), chat_project)
             };
-            if let (Some(space), Some(chat)) = (chat_space, selected_chat) {
-                self.space_last_chat.insert(space, chat);
+            if let (Some(project), Some(chat)) = (chat_project, selected_chat) {
+                self.project_last_chat.insert(project, chat);
             }
-            if selected_space != self.settings.last_space_id && selected_space.is_some() {
-                self.settings.last_space_id = selected_space;
+            if selected_project != self.settings.last_project_id && selected_project.is_some() {
+                self.settings.last_project_id = selected_project;
                 self.schedule_save(cx);
             }
         }
@@ -808,13 +767,14 @@ impl Shell {
             self.right_tween = None;
             self.terminal_tween = None;
             let panels = self.panels.get(&self.panel_key(cx));
-            if let Some(panel) = self.terminal.clone() {
-                panel.update(cx, |panel, cx| panel.set_open(panels.terminal_open, cx));
-            }
-            if panels.changes_open {
+            if panels.right_panel_open
+                && panels.right_panel_tab == Some(RightPanelTab::Review)
+                && self.project_git_detected(cx)
+            {
                 let changes = self.changes_pane(cx);
                 changes.update(cx, |changes, cx| changes.ensure_watch(cx));
             }
+            self.sync_terminal_panels(cx);
         }
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
@@ -848,39 +808,64 @@ impl Shell {
         }
     }
 
-    /// Does the selected space's folder have git? Owner-stamped and synced —
+    /// Does the selected project's folder have git? Owner-stamped and synced —
     /// gates the Changes pane, its toggle, and Cmd-B with zero RPCs.
-    fn space_git_detected(&self, cx: &App) -> bool {
-        self.state.read(cx).selected_space_git()
+    fn project_git_detected(&self, cx: &App) -> bool {
+        self.state.read(cx).selected_project_git()
     }
 
-    /// The current chat's changes-pane flag (per-session, in-memory), gated on
-    /// the space having git at all: a stale per-chat open flag must not reopen
-    /// the pane after switching into a non-git space.
     /// The per-session panel key. The new-chat canvas (no selection) keys per
     /// SPACE — one shared "" key made a canvas toggle read as global state
     /// (user report).
     fn panel_key(&self, cx: &App) -> String {
         if self.active_chat.is_empty() {
-            let space = self
+            let project = self
                 .state
                 .read(cx)
-                .selected_space
+                .selected_project
                 .clone()
                 .unwrap_or_default();
-            format!("space-canvas:{space}")
+            format!("project-canvas:{project}")
         } else {
             self.active_chat.clone()
         }
     }
 
     fn right_pane_open(&self, cx: &App) -> bool {
-        self.panels.get(&self.panel_key(cx)).changes_open && self.space_git_detected(cx)
+        self.panels.get(&self.panel_key(cx)).right_panel_open
+    }
+
+    fn right_panel_tab(&self, cx: &App) -> Option<RightPanelTab> {
+        self.panels.get(&self.panel_key(cx)).right_panel_tab
+    }
+
+    fn right_terminal_open(&self, cx: &App) -> bool {
+        self.right_pane_open(cx) && self.right_panel_tab(cx) == Some(RightPanelTab::Terminal)
     }
 
     /// The current chat's terminal flag (per-session, in-memory).
     fn terminal_open(&self, cx: &App) -> bool {
         self.panels.get(&self.panel_key(cx)).terminal_open
+    }
+
+    /// Keep the independent terminal entities mounted only while their dock is
+    /// visible. Each entity retains its own per-chat tabs and PTYs while hidden.
+    fn sync_terminal_panels(&mut self, cx: &mut Context<Self>) {
+        let bottom_open = self.terminal_open(cx);
+        if bottom_open {
+            let panel = self.bottom_terminal_panel(cx);
+            panel.update(cx, |panel, cx| panel.set_open(true, cx));
+        } else if let Some(panel) = self.bottom_terminal.clone() {
+            panel.update(cx, |panel, cx| panel.set_open(false, cx));
+        }
+
+        let right_open = self.right_terminal_open(cx);
+        if right_open {
+            let panel = self.right_terminal_panel(cx);
+            panel.update(cx, |panel, cx| panel.set_open(true, cx));
+        } else if let Some(panel) = self.right_terminal.clone() {
+            panel.update(cx, |panel, cx| panel.set_open(false, cx));
+        }
     }
 
     fn right_target(&self, cx: &App) -> f32 {
@@ -900,19 +885,42 @@ impl Shell {
     }
 
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
-        // No git in this space → no diff pane, Cmd-B goes dead.
-        if !self.space_git_detected(cx) {
-            return;
-        }
         let from = self.right_target(cx);
         let key = self.panel_key(cx);
-        let open = self.panels.toggle_changes(&key);
+        let open = self.panels.toggle_right_panel(&key);
         self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
-        if open {
+        if open
+            && self.right_panel_tab(cx) == Some(RightPanelTab::Review)
+            && self.project_git_detected(cx)
+        {
             // Lazy: the Changes entity (and its WatchCheckoutDiffs) exists only
-            // once the pane has been opened.
+            // once Review has been selected.
             let changes = self.changes_pane(cx);
             changes.update(cx, |changes, cx| changes.ensure_watch(cx));
+        }
+        self.sync_terminal_panels(cx);
+        cx.notify();
+    }
+
+    fn select_right_panel_tab(
+        &mut self,
+        tab: RightPanelTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self.panel_key(cx);
+        self.panels.select_right_panel_tab(&key, tab);
+        if tab == RightPanelTab::Review && self.project_git_detected(cx) {
+            let changes = self.changes_pane(cx);
+            changes.update(cx, |changes, cx| changes.ensure_watch(cx));
+        }
+        self.sync_terminal_panels(cx);
+        if tab == RightPanelTab::Terminal {
+            if let Some(panel) = self.right_terminal.clone() {
+                window.focus(&panel.read(cx).focus_handle(), cx);
+            }
+        } else {
+            window.focus(&self.composer.focus_handle(cx), cx);
         }
         cx.notify();
     }
@@ -926,12 +934,21 @@ impl Shell {
         changes
     }
 
-    fn terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
-        if let Some(terminal) = &self.terminal {
+    fn bottom_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
+        if let Some(terminal) = &self.bottom_terminal {
             return terminal.clone();
         }
         let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), cx));
-        self.terminal = Some(terminal.clone());
+        self.bottom_terminal = Some(terminal.clone());
+        terminal
+    }
+
+    fn right_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
+        if let Some(terminal) = &self.right_terminal {
+            return terminal.clone();
+        }
+        let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), cx));
+        self.right_terminal = Some(terminal.clone());
         terminal
     }
 
@@ -951,15 +968,16 @@ impl Shell {
         let key = self.panel_key(cx);
         let open = self.panels.toggle_terminal(&key);
         self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
-        let panel = self.terminal_panel(cx);
-        panel.update(cx, |panel, cx| panel.set_open(open, cx));
+        self.sync_terminal_panels(cx);
         if open {
             // Opening lands keyboard focus IN the shell — typing goes straight
             // to the prompt, no click needed (comet terminal-panel.tsx: the
             // visible+active effect calls `terminal.focus()` on every open).
             // The handle is focusable before the panel's first paint; once the
             // terminal body mounts with `track_focus` it receives the keys.
-            window.focus(&panel.read(cx).focus_handle(), cx);
+            if let Some(panel) = self.bottom_terminal.clone() {
+                window.focus(&panel.read(cx).focus_handle(), cx);
+            }
         } else {
             // Hiding the panel removes the (likely focused) terminal view;
             // with nothing focused, window key bindings stop dispatching, so
@@ -1108,26 +1126,6 @@ impl Shell {
     /// Lazily create the entity for a settings section and return it renderable.
     fn settings_outlet(&mut self, section: SettingsSection, cx: &mut Context<Self>) -> AnyElement {
         match section {
-            SettingsSection::Devices => {
-                if self.devices_page.is_none() {
-                    let state = self.state.clone();
-                    self.devices_page = Some(cx.new(|cx| DevicesPage::new(state, cx)));
-                }
-                match &self.devices_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
-            }
-            SettingsSection::Agents => {
-                if self.accounts_page.is_none() {
-                    let state = self.state.clone();
-                    self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
-                }
-                match &self.accounts_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
-            }
             SettingsSection::Shortcuts => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
@@ -1624,15 +1622,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
-            SettingsSection::Devices => icons::MONITOR,
-            SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
         // Match the user's dragged sidebar width — the pane container clips to
         // it, so a hardcoded default here left hover washes stopping short of
-        // the sidebar's right edge (user-reported). Device identity lives on
-        // the Accounts page now — the one surface where the device matters.
+        // the sidebar's right edge (user-reported).
         div()
             .w(px(self.settings.sidebar_width))
             .h_full()
@@ -1728,7 +1723,7 @@ impl Shell {
 
     /// One session row (comet session-row.tsx): status rail on the left
     /// (a live 2×3 mini spinner while working, a dot otherwise), title +
-    /// relative time on the first line, "folder · device" underneath aligned
+    /// relative time on the first line, the project folder underneath aligned
     /// to the title. Click selects; right-click opens the context menu.
     #[allow(clippy::too_many_arguments)]
     fn render_chat_row(
@@ -1736,7 +1731,7 @@ impl Shell {
         id: String,
         title: SharedString,
         time_ago: SharedString,
-        space_name: SharedString,
+        project_name: SharedString,
         branch: Option<SharedString>,
         harness: Option<comet_proto::HarnessId>,
         status: comet_proto::ChatIndicator,
@@ -1746,8 +1741,8 @@ impl Shell {
     ) -> AnyElement {
         // Status is a rail, not a word (comet session-row.tsx): always present
         // so rows align and state changes read in place. Working animates (the
-        // composer-strip spinner, miniaturized); every other status is a dot.
-        let dot_color = spaces::status_dot_color(status, theme);
+        // composer-strip spinner, miniaturized); every other status is a faint dot.
+        let dot_color = projects::status_dot_color(status, theme);
         let status_rail: AnyElement = if status == comet_proto::ChatIndicator::Working {
             div()
                 .w(px(6.0))
@@ -1762,7 +1757,7 @@ impl Shell {
                 .into_any_element()
         } else {
             div()
-                .size(px(6.0))
+                .size(px(5.0))
                 .rounded_full()
                 .flex_none()
                 .bg(dot_color)
@@ -1806,7 +1801,7 @@ impl Shell {
                     cx.notify();
                 }),
             )
-            // Line 1: status rail, space name, time-ago.
+            // Line 1: status rail, project name, time-ago.
             .child(
                 div()
                     .w_full()
@@ -1823,7 +1818,7 @@ impl Shell {
                             .text_size(px(11.0))
                             .line_height(px(14.0))
                             .text_color(subline)
-                            .child(space_name),
+                            .child(project_name),
                     )
                     .child(
                         div()
@@ -1894,8 +1889,8 @@ impl Shell {
         (scrolled > 1.0, scrolled < max_scroll - 1.0)
     }
 
-    /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
-    /// section (folder + device rows, add-space), the global Active sessions
+    /// Chat-mode sidebar (projects overhaul): window-control strip, the Projects
+    /// section (folder rows, add-project), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let user = self.state.read(cx).auth_user().cloned();
@@ -1974,7 +1969,7 @@ impl Shell {
         let user_email: Option<SharedString> = user.as_ref().map(|u| u.email.clone().into());
         let user_menu = self.render_user_menu(user_line.clone(), user_email.clone(), theme, cx);
 
-        let spaces_section = self.render_spaces_section(theme, cx);
+        let projects_section = self.render_projects_section(theme, cx);
 
         div()
             .w(px(self.settings.sidebar_width))
@@ -1983,7 +1978,7 @@ impl Shell {
             .flex_col()
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
-            // Spaces + the global Active list share one scroll region. On
+            // Projects + the global Active list share one scroll region. On
             // glass the whole region paints inside an EdgeFade scope — a true
             // per-glyph gradient at active overflow edges.
             .child(crate::edge_fade::edge_faded(
@@ -2003,7 +1998,7 @@ impl Shell {
                             .px(px(Theme::SPACE_SM))
                             .flex()
                             .flex_col()
-                            .child(spaces_section)
+                            .child(projects_section)
                     .child(
                         div()
                             .px(px(Theme::SPACE_SM))
@@ -2371,7 +2366,7 @@ impl Shell {
                     popover::menu_row(theme, false, "user-menu-settings")
                         .id("user-menu-settings")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Devices, cx)
+                            this.open_settings(SettingsSection::Shortcuts, cx)
                         }))
                         .child(
                             icon(icons::SETTINGS_MINIMALISTIC)
@@ -2509,8 +2504,8 @@ impl Shell {
             overlays.push(popover::modal("rename-chat-dialog", viewport, card));
         }
 
-        overlays.extend(self.render_space_overlays(viewport, window, cx));
-        if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
+        overlays.extend(self.render_project_overlays(viewport, window, cx));
+        if let Some(overlay) = self.render_add_project_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
 
@@ -2599,7 +2594,6 @@ impl Shell {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let theme_bg = theme.bg;
-        let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
         // Settings route: just the section outlet — the section label lives in
         // the unified window titlebar now (render_title_bar).
@@ -2615,27 +2609,25 @@ impl Shell {
                 .into_any_element();
         }
 
-        let _ = (text, border);
         let has_selection = self.state.read(cx).selected_chat.is_some();
-        let has_spaces = !self.state.read(cx).spaces.is_empty();
-        let space_name: SharedString = self
+        let has_projects = !self.state.read(cx).projects.is_empty();
+        let project_name: SharedString = self
             .state
             .read(cx)
-            .selected_space_row()
+            .selected_project_row()
             .map(|s| s.display_name().to_string())
             .unwrap_or_default()
             .into();
 
         // Content outlet: selected chat → transcript; nothing selected → the
-        // "Send a message to start" canvas with a watermark; no spaces at all
+        // "Send a message to start" canvas with a watermark; no projects at all
         // → the onboarding card. The composer sits below the first two
         // (new-chat mode mints the chat id on first send).
         let outlet: AnyElement = if has_selection {
             self.transcript.clone().into_any_element()
-        } else if !has_spaces {
+        } else if !has_projects {
             // Onboarding (first boot / after the destructive wipe): no folders
             // to work in yet — one clear affordance.
-            let _ = faint;
             div()
                 .size_full()
                 .flex()
@@ -2643,7 +2635,7 @@ impl Shell {
                 .items_center()
                 .justify_center()
                 .child(motion::fade_in(
-                    "no-spaces-canvas",
+                    "no-projects-canvas",
                     div()
                         .flex()
                         .flex_col()
@@ -2660,7 +2652,7 @@ impl Shell {
                                 .text_size(px(16.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(SharedString::from("Add a space to get started")),
+                                .child(SharedString::from("Create a project to get started")),
                         )
                         .child(
                             div()
@@ -2668,15 +2660,15 @@ impl Shell {
                                 .text_size(px(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
                                 .child(SharedString::from(
-                                    "A space is a folder on one of your devices.",
+                                    "A project is a local folder where sessions run.",
                                 )),
                         )
                         .child(
-                            popover::btn_primary(&theme_owned, "Add a space")
-                                .id("onboarding-add-space")
+                            popover::btn_primary(&theme_owned, "Create a project")
+                                .id("onboarding-add-project")
                                 .mt(px(20.0))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.open_add_space(cx)
+                                    this.open_add_project(cx)
                                 })),
                         ),
                 ))
@@ -2684,11 +2676,11 @@ impl Shell {
         } else {
             // New-chat canvas (comet index.tsx): the dim comet mark watermark
             // (`h-12 text-foreground/[0.09]`) over the centered helper line —
-            // now naming the space the session will start in.
-            let helper: SharedString = if space_name.is_empty() {
+            // now naming the project the session will start in.
+            let helper: SharedString = if project_name.is_empty() {
                 "Send a message to start a new session.".into()
             } else {
-                format!("Send a message to start a session in {space_name}.").into()
+                format!("Send a message to start a session in {project_name}.").into()
             };
             div()
                 .size_full()
@@ -2779,7 +2771,7 @@ impl Shell {
             // conversation region, ABOVE the terminal dock (comet __root.tsx:
             // the terminal panel sits below the whole conversation column).
             .child(status)
-            .when(has_spaces, |el| el.child(self.composer.clone()))
+            .when(has_projects, |el| el.child(self.composer.clone()))
             .child(self.render_terminal_container(cx))
             .when(file_drag_active, |el| {
                 el.child(
@@ -2874,14 +2866,13 @@ impl Shell {
         }
         // Defensive: an open flag needs its entity (and set_open) even if
         // toggle_terminal never created one.
-        if self.terminal_open(cx) && self.terminal.is_none() {
-            let panel = self.terminal_panel(cx);
+        if self.terminal_open(cx) && self.bottom_terminal.is_none() {
+            let panel = self.bottom_terminal_panel(cx);
             panel.update(cx, |panel, cx| panel.set_open(true, cx));
         }
-        let Some(panel) = self.terminal.clone() else {
+        let Some(panel) = self.bottom_terminal.clone() else {
             return gpui::Empty.into_any_element();
         };
-        let border = Theme::of(cx).border;
         let handle_hover = Theme::of(cx).border_strong;
         let height = self.settings.terminal_height;
 
@@ -2928,8 +2919,6 @@ impl Shell {
             .w_full()
             .flex_none()
             .overflow_hidden()
-            .border_t_1()
-            .border_color(border)
             .h(px(self.eval_tween(tween, target)))
             .child(inner)
             .into_any_element()
@@ -3007,19 +2996,163 @@ impl Shell {
         }
     }
 
-    /// Right "Changes" pane — hidden by default, drag-resizable; content is the
-    /// lazy [`Changes`] diff viewer (created on first open).
+    fn render_right_panel_launcher_button(
+        &mut self,
+        id: &'static str,
+        tab: RightPanelTab,
+        icon_path: &'static str,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        div()
+            .id(id)
+            .w_full()
+            .h(px(56.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .px(px(16.0))
+            .rounded(px(10.0))
+            .bg(crate::theme::wash(0.025))
+            .hover(|s| s.bg(crate::theme::wash(0.07)))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_right_panel_tab(tab, window, cx);
+            }))
+            .child(icon(icon_path).size(px(18.0)).text_color(theme.text_muted))
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(label)),
+            )
+            .into_any_element()
+    }
+
+    fn render_right_panel_launcher(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let review = self.render_right_panel_launcher_button(
+            "right-panel-review-launcher",
+            RightPanelTab::Review,
+            icons::CHECKLIST,
+            "Review",
+            cx,
+        );
+        let terminal = self.render_right_panel_launcher_button(
+            "right-panel-terminal-launcher",
+            RightPanelTab::Terminal,
+            icons::TERMINAL,
+            "Terminal",
+            cx,
+        );
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(360.0))
+                    .max_w(px(480.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(review)
+                    .child(terminal),
+            )
+            .into_any_element()
+    }
+
+    fn render_right_panel_tabs(
+        &mut self,
+        active: RightPanelTab,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let buttons = [RightPanelTab::Review, RightPanelTab::Terminal]
+            .into_iter()
+            .map(|tab| {
+                let (id, icon_path, label) = match tab {
+                    RightPanelTab::Review => ("right-panel-review-tab", icons::CHECKLIST, "Review"),
+                    RightPanelTab::Terminal => {
+                        ("right-panel-terminal-tab", icons::TERMINAL, "Terminal")
+                    }
+                };
+                let selected = tab == active;
+                div()
+                    .id(id)
+                    .h(px(30.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(7.0))
+                    .px(px(10.0))
+                    .rounded(px(7.0))
+                    .when(selected, |el| el.bg(crate::theme::wash(0.08)))
+                    .text_size(px(12.0))
+                    .text_color(if selected {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_right_panel_tab(tab, window, cx);
+                    }))
+                    .child(icon(icon_path).size(px(15.0)).text_color(theme.text_muted))
+                    .child(SharedString::from(label))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .h(px(44.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(10.0))
+            .children(buttons)
+            .into_any_element()
+    }
+
+    fn render_right_review(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.project_git_detected(cx) {
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.0))
+                .text_color(Theme::of(cx).text_faint)
+                .child(SharedString::from("No uncommitted changes"))
+                .into_any_element();
+        }
+        let changes = self.changes_pane(cx);
+        // Idempotent — also covers a right panel selected before the engine
+        // finished booting.
+        changes.update(cx, |changes, cx| changes.ensure_watch(cx));
+        changes.into_any_element()
+    }
+
+    /// Right tool panel — hidden by default, drag-resizable. Its first state is
+    /// a small launcher; choosing Review or Terminal replaces that launcher
+    /// with tabs and the selected tool.
     fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let bg = theme.bg;
-        let content: AnyElement = if self.right_pane_open(cx) {
-            let changes = self.changes_pane(cx);
-            // Idempotent — also covers a persisted-open pane on boot.
-            changes.update(cx, |changes, cx| changes.ensure_watch(cx));
-            changes.into_any_element()
-        } else {
-            gpui::Empty.into_any_element()
+        let active = self.right_panel_tab(cx);
+        let content = match active {
+            None => self.render_right_panel_launcher(cx),
+            Some(RightPanelTab::Review) => self.render_right_review(cx),
+            Some(RightPanelTab::Terminal) => {
+                self.sync_terminal_panels(cx);
+                self.right_terminal_panel(cx).into_any_element()
+            }
         };
+        let tabs = active.map(|tab| self.render_right_panel_tabs(tab, cx));
         // Its OWN inset card (user request): the conversation card's right
         // gutter is the gap; padding (not margins) keeps the tweened width
         // container clean, and the resize grabber floats over the gap.
@@ -3039,11 +3172,12 @@ impl Shell {
             .left(px(0.0));
         let card = div()
             .size_full()
+            .flex()
+            .flex_col()
             .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
             .bg(bg)
             .overflow_hidden()
+            .when_some(tabs, |el, tabs| el.child(tabs))
             .child(content);
         let target = self.right_target(cx);
         self.pane_container(
@@ -3523,7 +3657,7 @@ fn window_control_button(
         // zoom handler — never fires with the pointer over a button. It also
         // removes the button's rect from the native Drag control-area
         // hit-test on Windows/Linux. The click-level stop_propagation is
-        // zed's ButtonLike belt on top. Double-click on EMPTY strip space
+        // zed's ButtonLike belt on top. Double-click on EMPTY strip project
         // still zooms — nothing occludes it there.
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
@@ -3684,12 +3818,12 @@ impl Render for Shell {
                     this.toggle_right_pane(cx)
                 }
             }))
-            .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
-                if this.add_space.is_some() {
-                    this.add_space = None;
+            .on_action(cx.listener(|this, _: &CreateProjectPalette, _, cx| {
+                if this.add_project.is_some() {
+                    this.add_project = None;
                     cx.notify();
                 } else {
-                    this.open_add_space(cx);
+                    this.open_add_project(cx);
                 }
             }));
 
@@ -3745,18 +3879,10 @@ impl Render for Shell {
                     Empty.into_any_element()
                 };
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                // The signature frame: the conversation card and — when the
-                // changes pane is open — a SECOND inset card beside it, both
-                // rounded hairline-bordered floats on the frost shell (the
-                // changes card is built inside `render_right_pane`).
+                // The conversation card and changes pane share the frost
+                // shell directly. Structure comes from spacing and material,
+                // not separator lines.
                 let theme = Theme::of(cx);
-                // Margins, radius, and border-color MELT over the same 200ms
-                // ease-out as the sidebar width (comet __root.tsx `<main>`
-                // `transition-[margin,border-radius,border-color]`; collapsed
-                // is `m-0 rounded-none border-transparent` — the border WIDTH
-                // stays, only its color fades, so layout never jumps by the
-                // hairline).
-                let border_color = theme.border;
                 let card = div()
                     .flex_1()
                     .min_w_0()
@@ -3764,7 +3890,6 @@ impl Render for Shell {
                     .flex_row()
                     .overflow_hidden()
                     .bg(theme.bg)
-                    .border_1()
                     .child(main);
                 // Manual drive on the SAME clock as the sidebar width tween.
                 // Crucially there is no `with_animation` wrapper here: the
@@ -3776,8 +3901,8 @@ impl Render for Shell {
                 //
                 // The inset card persists in EVERY state (user request): top
                 // gutter under the unified titlebar, constant left/right/
-                // bottom gutters, constant radius + hairline — the 8px left
-                // gap holds whether it borders the sidebar or the window edge.
+                // bottom gutters, and constant radius. The 8px left gap holds
+                // whether it meets the sidebar or the window edge.
                 // No top margin: the titlebar's own internal air (44px bar,
                 // 28px tabs) is the gap — an extra gutter read as a hole
                 // between the header and the app (user report).
@@ -3795,7 +3920,6 @@ impl Render for Shell {
                     .mr(px(right_gap))
                     .ml(px(8.0))
                     .rounded(px(12.0))
-                    .border_color(border_color)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (comet
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
@@ -3824,17 +3948,13 @@ impl Render for Shell {
                 // rides the same tween as the sidebar, so the tone melts away
                 // with the collapse instead of vanishing in a frame.
                 let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-                // Hairline on its right edge — full height like the tone,
-                // so the sidebar column reads as its own surface.
                 let sidebar_tone = div()
                     .absolute()
                     .top_0()
                     .bottom_0()
                     .left_0()
                     .w(px(sidebar_now))
-                    .bg(crate::theme::wash(0.05))
-                    .border_r_1()
-                    .border_color(border_color);
+                    .bg(crate::theme::wash(0.05));
                 let page = div()
                     .size_full()
                     .flex()
@@ -3930,14 +4050,15 @@ mod tests {
         );
     }
 
-    // ---- per-session panel flags (§1.10/1.11 parity: comet sessionPanels) ----
+    // ---- per-session panel state (§1.10/1.11 parity: comet sessionPanels) ----
 
     #[test]
     fn session_panels_default_closed_per_chat() {
         let panels = SessionPanels::default();
         assert_eq!(panels.get("a"), ChatPanels::default());
         assert!(!panels.get("a").terminal_open);
-        assert!(!panels.get("a").changes_open);
+        assert!(!panels.get("a").right_panel_open);
+        assert_eq!(panels.get("a").right_panel_tab, None);
         // The new-chat canvas ("" key) is its own session, also closed.
         assert!(!panels.get("").terminal_open);
     }
@@ -3950,11 +4071,13 @@ mod tests {
         assert!(panels.get("a").terminal_open);
         assert!(!panels.get("b").terminal_open);
         assert!(!panels.get("").terminal_open);
-        // Changes pane in B is independent of A's terminal.
-        assert!(panels.toggle_changes("b"));
-        assert!(panels.get("b").changes_open);
+        // Right-panel state in B is independent of A's bottom terminal.
+        assert!(panels.toggle_right_panel("b"));
+        assert!(panels.get("b").right_panel_open);
+        assert_eq!(panels.get("b").right_panel_tab, None);
+        panels.select_right_panel_tab("b", RightPanelTab::Review);
         assert!(!panels.get("b").terminal_open);
-        assert!(!panels.get("a").changes_open);
+        assert_eq!(panels.get("a").right_panel_tab, None);
         // Switching back to A restores A's state untouched.
         assert!(panels.get("a").terminal_open);
         // Toggling off round-trips.
@@ -3966,14 +4089,29 @@ mod tests {
     fn session_panels_both_flags_coexist_per_chat() {
         let mut panels = SessionPanels::default();
         panels.toggle_terminal("a");
-        panels.toggle_changes("a");
+        panels.select_right_panel_tab("a", RightPanelTab::Terminal);
         assert_eq!(
             panels.get("a"),
             ChatPanels {
                 terminal_open: true,
-                changes_open: true
+                right_panel_open: true,
+                right_panel_tab: Some(RightPanelTab::Terminal),
             }
         );
+        assert_eq!(panels.get("b"), ChatPanels::default());
+    }
+
+    #[test]
+    fn right_panel_opens_to_launcher_then_selects_a_scoped_tab() {
+        let mut panels = SessionPanels::default();
+        assert!(panels.toggle_right_panel("a"));
+        assert_eq!(panels.get("a").right_panel_tab, None);
+        panels.select_right_panel_tab("a", RightPanelTab::Terminal);
+        assert_eq!(
+            panels.get("a").right_panel_tab,
+            Some(RightPanelTab::Terminal)
+        );
+        assert!(panels.get("a").right_panel_open);
         assert_eq!(panels.get("b"), ChatPanels::default());
     }
 
@@ -4053,7 +4191,7 @@ mod tests {
     fn nav_push_then_back_and_forward() {
         let mut nav = NavHistory::new(chat("a"));
         nav.push(chat("b"));
-        nav.push(NavEntry::Settings(SettingsSection::Devices));
+        nav.push(NavEntry::Settings(SettingsSection::Shortcuts));
         assert!(nav.can_back());
         assert!(!nav.can_forward());
 
@@ -4072,7 +4210,7 @@ mod tests {
         assert_eq!(nav.forward(), Some(chat("b")));
         assert_eq!(
             nav.forward(),
-            Some(NavEntry::Settings(SettingsSection::Devices))
+            Some(NavEntry::Settings(SettingsSection::Shortcuts))
         );
         assert!(!nav.can_forward());
         assert_eq!(nav.forward(), None);
@@ -4084,8 +4222,8 @@ mod tests {
         nav.push(chat("a"));
         nav.push(chat("a"));
         assert_eq!(nav.len(), 1, "re-selecting the current route never stacks");
-        nav.push(NavEntry::Settings(SettingsSection::Agents));
-        nav.push(NavEntry::Settings(SettingsSection::Agents));
+        nav.push(NavEntry::Settings(SettingsSection::Shortcuts));
+        nav.push(NavEntry::Settings(SettingsSection::Shortcuts));
         assert_eq!(nav.len(), 2);
     }
 
@@ -4121,12 +4259,12 @@ mod tests {
     #[test]
     fn nav_settings_sections_are_distinct_entries() {
         let mut nav = NavHistory::new(chat("a"));
-        nav.push(NavEntry::Settings(SettingsSection::Devices));
+        nav.push(NavEntry::Settings(SettingsSection::Archived));
         nav.push(NavEntry::Settings(SettingsSection::Shortcuts));
         assert_eq!(nav.len(), 3, "section changes are navigations");
         assert_eq!(
             nav.back(),
-            Some(NavEntry::Settings(SettingsSection::Devices))
+            Some(NavEntry::Settings(SettingsSection::Archived))
         );
         assert_eq!(nav.back(), Some(chat("a")));
     }

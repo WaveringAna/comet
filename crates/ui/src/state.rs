@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 
 use comet_doc::SessionMessageEntry;
 use comet_engine::{Engine, EngineConfig, EngineRuntime, rpc::AuthRpc};
-use comet_proto::{AuthState, Chat, ChatIndicator, Device, HarnessId, Session, Space};
+use comet_proto::{AuthState, Chat, ChatIndicator, Device, HarnessId, Session, Project};
 use comet_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
 // ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ impl EngineHandle {
 pub use comet_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
-    parse_auth_state, project_label, sort_active, sort_chats, sort_spaces, sort_tabs,
+    parse_auth_state, project_label, sort_active, sort_chats, sort_projects, sort_tabs,
 };
 
 // ---------------------------------------------------------------------------
@@ -349,14 +349,14 @@ pub struct AppState {
     /// Auth stream value; `None` until the engine reports one (M4).
     pub auth: Option<AuthState>,
     pub devices: Vec<Device>,
-    /// Sorted (see [`sort_spaces`]).
-    pub spaces: Vec<Space>,
+    /// Sorted (see [`sort_projects`]).
+    pub projects: Vec<Project>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
-    /// The space whose tabs fill the main area. Healed by [`Self::apply_spaces`]
-    /// when the row vanishes; selecting a chat implies its space.
-    pub selected_space: Option<String>,
+    /// The project whose tabs fill the main area. Healed by [`Self::apply_projects`]
+    /// when the row vanishes; selecting a chat implies its project.
+    pub selected_project: Option<String>,
     pub selected_chat: Option<String>,
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
@@ -390,10 +390,10 @@ impl AppState {
             connection: ConnectionStatus::Connecting,
             auth: None,
             devices: Vec::new(),
-            spaces: Vec::new(),
+            projects: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
-            selected_space: None,
+            selected_project: None,
             selected_chat: None,
             transcript: Vec::new(),
             echoes: HashMap::new(),
@@ -426,21 +426,21 @@ impl AppState {
         self.sessions = sessions;
     }
 
-    pub fn apply_spaces(&mut self, mut spaces: Vec<Space>) {
-        sort_spaces(&mut spaces);
-        self.spaces = spaces;
-        // Heal a vanished selection (space deleted elsewhere): fall back to the
-        // first space; its chats died with it, so a matching chat selection is
+    pub fn apply_projects(&mut self, mut projects: Vec<Project>) {
+        sort_projects(&mut projects);
+        self.projects = projects;
+        // Heal a vanished selection (project deleted elsewhere): fall back to the
+        // first project; its chats died with it, so a matching chat selection is
         // healed by the accompanying chats frame (`apply_chats`).
-        if let Some(selected) = &self.selected_space
-            && !self.spaces.iter().any(|s| &s.id == selected)
+        if let Some(selected) = &self.selected_project
+            && !self.projects.iter().any(|s| &s.id == selected)
         {
-            self.selected_space = self.spaces.first().map(|s| s.id.clone());
+            self.selected_project = self.projects.first().map(|s| s.id.clone());
         }
-        // First frame with no selection yet: pick the first space so the shell
-        // never renders an empty main area while spaces exist.
-        if self.selected_space.is_none() {
-            self.selected_space = self.spaces.first().map(|s| s.id.clone());
+        // First frame with no selection yet: pick the first project so the shell
+        // never renders an empty main area while projects exist.
+        if self.selected_project.is_none() {
+            self.selected_project = self.projects.first().map(|s| s.id.clone());
         }
     }
 
@@ -522,25 +522,25 @@ impl AppState {
         self.chats.iter().filter(|c| !c.archived)
     }
 
-    pub fn selected_space_row(&self) -> Option<&Space> {
-        let id = self.selected_space.as_deref()?;
-        self.spaces.iter().find(|s| s.id == id)
+    pub fn selected_project_row(&self) -> Option<&Project> {
+        let id = self.selected_project.as_deref()?;
+        self.projects.iter().find(|s| s.id == id)
     }
 
-    pub fn space_row(&self, space_id: &str) -> Option<&Space> {
-        self.spaces.iter().find(|s| s.id == space_id)
+    pub fn project_row(&self, project_id: &str) -> Option<&Project> {
+        self.projects.iter().find(|s| s.id == project_id)
     }
 
-    pub fn space_for_chat(&self, chat: &Chat) -> Option<&Space> {
-        self.space_row(chat.space_id.as_deref()?)
+    pub fn project_for_chat(&self, chat: &Chat) -> Option<&Project> {
+        self.project_row(chat.project_id.as_deref()?)
     }
 
-    /// Non-archived chats of a space in tab (creation) order. Chats with a
-    /// dangling/missing `space_id` are invisible by construction.
-    pub fn chats_in_space(&self, space_id: &str) -> Vec<&Chat> {
+    /// Non-archived chats of a project in tab (creation) order. Chats with a
+    /// dangling/missing `project_id` are invisible by construction.
+    pub fn chats_in_project(&self, project_id: &str) -> Vec<&Chat> {
         let mut chats: Vec<&Chat> = self
             .visible_chats()
-            .filter(|c| c.space_id.as_deref() == Some(space_id))
+            .filter(|c| c.project_id.as_deref() == Some(project_id))
             .collect();
         sort_tabs(&mut chats);
         chats
@@ -567,10 +567,10 @@ impl AppState {
         }
     }
 
-    /// Does the selected space's folder have git? Drives the branch picker and
+    /// Does the selected project's folder have git? Drives the branch picker and
     /// the diff sidebar (owner-stamped, synced — no RPC).
-    pub fn selected_space_git(&self) -> bool {
-        self.selected_space_row().is_some_and(|s| s.git_detected)
+    pub fn selected_project_git(&self) -> bool {
+        self.selected_project_row().is_some_and(|s| s.git_detected)
     }
 
     /// Full display status for a chat (tab dots, Active list).
@@ -578,16 +578,16 @@ impl AppState {
         display_status(chat, self.session_for(&chat.id), now)
     }
 
-    /// The sidebar's Sessions list: every non-archived chat of a LIVE space,
+    /// The sidebar's Sessions list: every non-archived chat of a LIVE project,
     /// on any device — idle included — in pure recency order (status drives
     /// the dot, never the position; see [`sort_active`]).
     pub fn overview_chats(&self, now: DateTime<Utc>) -> Vec<(ChatIndicator, &Chat)> {
         let mut rows: Vec<(ChatIndicator, &Chat)> = self
             .visible_chats()
             .filter(|c| {
-                c.space_id
+                c.project_id
                     .as_deref()
-                    .is_some_and(|id| self.space_row(id).is_some())
+                    .is_some_and(|id| self.project_row(id).is_some())
             })
             .map(|c| (display_status(c, self.session_for(&c.id), now), c))
             .collect();
@@ -673,8 +673,8 @@ impl AppState {
             spawn_watch(
                 cx,
                 handle.clone(),
-                methods::WATCH_SPACES,
-                AppState::apply_spaces,
+                methods::WATCH_PROJECTS,
+                AppState::apply_projects,
             ),
             // Auth frames parse tolerantly — engine and proto tags differ today.
             spawn_watch(
@@ -700,7 +700,7 @@ impl AppState {
 
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
     /// dropping the old task drops its stream receiver, which cancels the doc
-    /// watch server-side. Selecting a chat also lands in its space and marks it
+    /// watch server-side. Selecting a chat also lands in its project and marks it
     /// seen (a global-list click must switch the tab strip too).
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
         if self.selected_chat == chat_id {
@@ -715,15 +715,15 @@ impl AppState {
         self.transcript.clear();
         self.transcript_task = None;
         if let Some(id) = chat_id.as_deref() {
-            // A chat implies its space; `select_chat(None)` (the new-session
-            // canvas) stays within the current space.
-            if let Some(space_id) = self
+            // A chat implies its project; `select_chat(None)` (the new-session
+            // canvas) stays within the current project.
+            if let Some(project_id) = self
                 .chats
                 .iter()
                 .find(|c| c.id == id)
-                .and_then(|c| c.space_id.clone())
+                .and_then(|c| c.project_id.clone())
             {
-                self.selected_space = Some(space_id);
+                self.selected_project = Some(project_id);
             }
             self.mark_chat_seen(id, cx);
         }
@@ -733,12 +733,12 @@ impl AppState {
         cx.notify();
     }
 
-    /// Select a space; the caller (shell) decides which chat to land on.
-    pub fn select_space(&mut self, space_id: Option<String>, cx: &mut Context<Self>) {
-        if self.selected_space == space_id {
+    /// Select a project; the caller (shell) decides which chat to land on.
+    pub fn select_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        if self.selected_project == project_id {
             return;
         }
-        self.selected_space = space_id;
+        self.selected_project = project_id;
         cx.notify();
     }
 
@@ -1137,16 +1137,16 @@ mod tests {
             created_at: base + TimeDelta::minutes(created_min),
             harness_session_id: None,
             harness_session_cwd: None,
-            space_id: None,
+            project_id: None,
             last_seen_at: None,
         }
     }
 
-    fn space(id: &str, device_id: &str, path: &str, created_min: i64) -> Space {
+    fn project(id: &str, device_id: &str, path: &str, created_min: i64) -> Project {
         let base = DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
             .unwrap()
             .to_utc();
-        Space {
+        Project {
             id: id.into(),
             device_id: device_id.into(),
             path: path.into(),
@@ -1316,48 +1316,48 @@ mod tests {
     }
 
     #[test]
-    fn apply_spaces_sorts_and_heals_selection() {
+    fn apply_projects_sorts_and_heals_selection() {
         let mut state = AppState::new();
-        state.apply_spaces(vec![
-            space("s2", "dev", "/b", 2),
-            space("s1", "dev", "/a", 1),
+        state.apply_projects(vec![
+            project("s2", "dev", "/b", 2),
+            project("s1", "dev", "/a", 1),
         ]);
-        let ids: Vec<&str> = state.spaces.iter().map(|s| s.id.as_str()).collect();
+        let ids: Vec<&str> = state.projects.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["s1", "s2"]);
-        // First frame auto-selects the first space.
-        assert_eq!(state.selected_space.as_deref(), Some("s1"));
-        state.selected_space = Some("s2".into());
-        // Vanished selection heals to the first space.
-        state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
-        assert_eq!(state.selected_space.as_deref(), Some("s1"));
-        // No spaces at all: selection clears.
-        state.apply_spaces(vec![]);
-        assert_eq!(state.selected_space, None);
+        // First frame auto-selects the first project.
+        assert_eq!(state.selected_project.as_deref(), Some("s1"));
+        state.selected_project = Some("s2".into());
+        // Vanished selection heals to the first project.
+        state.apply_projects(vec![project("s1", "dev", "/a", 1)]);
+        assert_eq!(state.selected_project.as_deref(), Some("s1"));
+        // No projects at all: selection clears.
+        state.apply_projects(vec![]);
+        assert_eq!(state.selected_project, None);
     }
 
     #[test]
-    fn chats_in_space_filters_and_orders() {
+    fn chats_in_project_filters_and_orders() {
         let mut state = AppState::new();
-        state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
-        let mut in_space_new = chat("new", 5, None);
-        in_space_new.space_id = Some("s1".into());
-        let mut in_space_old = chat("old", 1, Some(50)); // active but created first
-        in_space_old.space_id = Some("s1".into());
+        state.apply_projects(vec![project("s1", "dev", "/a", 1)]);
+        let mut in_project_new = chat("new", 5, None);
+        in_project_new.project_id = Some("s1".into());
+        let mut in_project_old = chat("old", 1, Some(50)); // active but created first
+        in_project_old.project_id = Some("s1".into());
         let mut other = chat("other", 2, None);
-        other.space_id = Some("s2".into());
+        other.project_id = Some("s2".into());
         let mut archived = chat("gone", 0, None);
-        archived.space_id = Some("s1".into());
+        archived.project_id = Some("s1".into());
         archived.archived = true;
-        let dangling = chat("dangling", 3, None); // no space id
-        state.apply_chats(vec![in_space_new, in_space_old, other, archived, dangling]);
+        let dangling = chat("dangling", 3, None); // no project id
+        state.apply_chats(vec![in_project_new, in_project_old, other, archived, dangling]);
         let ids: Vec<&str> = state
-            .chats_in_space("s1")
+            .chats_in_project("s1")
             .iter()
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(ids, ["old", "new"]);
-        // The overview shows every live-space chat (idle included) — chats of
-        // unknown spaces stay hidden. Completed ("old") outranks idle ("new").
+        // The overview shows every live-project chat (idle included) — chats of
+        // unknown projects stay hidden. Completed ("old") outranks idle ("new").
         let now = Utc::now();
         let overview: Vec<&str> = state
             .overview_chats(now)

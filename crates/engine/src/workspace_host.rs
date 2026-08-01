@@ -1,6 +1,6 @@
 //! WorkspaceHost — owns the per-user `WorkspaceDoc` (ARCHITECTURE §2.2, made
 //! per-user for privacy): local snapshot persistence, edge room sync
-//! (`ws3/{orgId}/{userId}`, offline-tolerant — spaces/sessions are private to
+//! (`ws3/{orgId}/{userId}`, offline-tolerant — projects/sessions are private to
 //! their owner, never org-visible), the device registry row for THIS device,
 //! and the typed watch channels the WatchChats/WatchDevices/WatchSessions RPC
 //! streams are fed from.
@@ -18,21 +18,21 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use chrono::Utc;
 use tokio::sync::watch;
 
-use comet_doc::{DeletedSpace, WorkspaceDoc, presence_key};
-use comet_proto::{Chat, ChatConfig, Device, Session, Space};
+use comet_doc::{DeletedProject, WorkspaceDoc, presence_key};
+use comet_proto::{Chat, ChatConfig, Device, Session, Project};
 use comet_sync::{DocsStore, RoomClient};
 
 use crate::doc_host::EdgeConfig;
 use crate::{EngineError, now_ms};
 
 /// Snapshot row id in the local `DocsStore` (chat ids never collide with it).
-/// `workspace2` = the spaces-overhaul destructive break: the legacy `workspace`
+/// `workspace2` = the projects-overhaul destructive break: the legacy `workspace`
 /// row is simply never read again. (The per-user room break — `ws2/{orgId}` →
 /// `ws3/{orgId}/{userId}` — needed no row-id bump: the local store itself moved
 /// to `orgs/{org}/{user}/`, so the old snapshot is unreachable anyway.)
-pub const WORKSPACE_DOC_ID: &str = "workspace2";
-/// Legacy (pre-spaces) snapshot row — best-effort deleted on open.
-const LEGACY_WORKSPACE_DOC_ID: &str = "workspace";
+pub const WORKSPACE_DOC_ID: &str = "workspace3";
+/// Legacy (pre-projects) snapshot row — best-effort deleted on open.
+const LEGACY_WORKSPACE_DOC_IDS: &[&str] = &["workspace", "workspace2"];
 /// Org used when none is configured (matches the edge's dev-mode `user@org` bearers).
 pub const DEFAULT_ORG_ID: &str = "dev-org";
 /// User used when none is configured (dev mode without a bearer).
@@ -82,7 +82,7 @@ pub struct WorkspaceHostConfig {
     pub platform: String,
     pub org_id: String,
     /// The signed-in user — workspace docs are per-user (`ws3/{orgId}/{userId}`):
-    /// spaces/sessions are private to their owner, never org-visible.
+    /// projects/sessions are private to their owner, never org-visible.
     pub user_id: String,
     /// When present, the host joins `/workspace/{orgId}/ws`. `None` = fully offline
     /// (local snapshots only; the doc still drives everything device-side).
@@ -96,7 +96,7 @@ struct WorkspaceHostInner {
     chats_tx: watch::Sender<Vec<Chat>>,
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
-    spaces_tx: watch::Sender<Vec<Space>>,
+    projects_tx: watch::Sender<Vec<Project>>,
     room: Mutex<Option<RoomClient>>,
     /// Freshest presence heartbeat (ms) we have EVER observed per device. The
     /// ephemeral store forgets entries after its 30s TTL and starts empty on a
@@ -141,7 +141,9 @@ impl WorkspaceHost {
         let doc = Arc::new(doc);
         // Destructive-break hygiene: drop the unreachable legacy snapshot row and
         // stamp the in-band schema version for the NEXT break to detect.
-        store.delete_snapshot(LEGACY_WORKSPACE_DOC_ID).ok();
+        for legacy_id in LEGACY_WORKSPACE_DOC_IDS {
+            store.delete_snapshot(legacy_id).ok();
+        }
         doc.ensure_schema_version()?;
 
         // Boot: upsert our own device row. A user-set name (RenameDevice is LWW from
@@ -176,7 +178,7 @@ impl WorkspaceHost {
         let (chats_tx, _) = watch::channel(state.chats);
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
-        let (spaces_tx, _) = watch::channel(state.spaces);
+        let (projects_tx, _) = watch::channel(state.projects);
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
@@ -186,7 +188,7 @@ impl WorkspaceHost {
                 chats_tx,
                 devices_tx,
                 sessions_tx,
-                spaces_tx,
+                projects_tx,
                 room: Mutex::new(None),
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
                 peer_alive: Mutex::new(None),
@@ -307,8 +309,8 @@ impl WorkspaceHost {
         self.inner.sessions_tx.subscribe()
     }
 
-    pub fn watch_spaces(&self) -> watch::Receiver<Vec<Space>> {
-        self.inner.spaces_tx.subscribe()
+    pub fn watch_projects(&self) -> watch::Receiver<Vec<Project>> {
+        self.inner.projects_tx.subscribe()
     }
 
     /// WatchSessions source: remote devices' rows from the workspace doc merged with
@@ -358,19 +360,19 @@ impl WorkspaceHost {
     /// Claim-on-first-command: create the chat row under OUR device id when a run
     /// command arrives for a chat with no row yet. No-op when the row exists.
     ///
-    /// Spaces invariant: every chat belongs to a space, so the claim resolves an
-    /// own-device space matching `cwd` — or auto-creates one (gitDetected false;
-    /// SpacesSync corrects on its next pass). A cwd-less claim (e.g. note_message
-    /// racing ahead of the run command) leaves `spaceId` unset; the row is
+    /// Projects invariant: every chat belongs to a project, so the claim resolves an
+    /// own-device project matching `cwd` — or auto-creates one (gitDetected false;
+    /// ProjectsSync corrects on its next pass). A cwd-less claim (e.g. note_message
+    /// racing ahead of the run command) leaves `projectId` unset; the row is
     /// invisible to the UI until a spaced claim/create lands. NOTE: a worktree
-    /// cwd claims a space *at the worktree path*, not the repo root — acceptable
+    /// cwd claims a project *at the worktree path*, not the repo root — acceptable
     /// for tooling-only (raw doc command) traffic.
     pub fn claim_chat(&self, chat_id: &str, cwd: Option<&str>) -> Result<(), EngineError> {
         if self.inner.doc.chat(chat_id)?.is_some() {
             return Ok(());
         }
-        let space_id = match cwd {
-            Some(cwd) => Some(self.space_for_path(cwd)?),
+        let project_id = match cwd {
+            Some(cwd) => Some(self.project_for_path(cwd)?),
             None => None,
         };
         self.inner.doc.upsert_chat(&Chat {
@@ -387,25 +389,25 @@ impl WorkspaceHost {
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
-            space_id,
+            project_id,
             last_seen_at: None,
         })?;
         Ok(())
     }
 
-    /// An own-device space whose path matches, else a freshly created one.
-    fn space_for_path(&self, path: &str) -> Result<String, EngineError> {
+    /// An own-device project whose path matches, else a freshly created one.
+    fn project_for_path(&self, path: &str) -> Result<String, EngineError> {
         let device_id = &self.inner.config.device_id;
-        if let Some(space) = self
+        if let Some(project) = self
             .inner
             .doc
-            .read_spaces()?
+            .read_projects()?
             .into_iter()
             .find(|s| s.device_id == *device_id && s.path == path)
         {
-            return Ok(space.id);
+            return Ok(project.id);
         }
-        let space = Space {
+        let project = Project {
             id: crate::new_id(),
             device_id: device_id.clone(),
             path: path.to_string(),
@@ -415,8 +417,8 @@ impl WorkspaceHost {
             checkout_id: None,
             created_at: Utc::now(),
         };
-        self.inner.doc.upsert_space(&space)?;
-        Ok(space.id)
+        self.inner.doc.upsert_project(&project)?;
+        Ok(project.id)
     }
 
     /// The chat's configured harness/model row, when present (RunRequest harness
@@ -493,28 +495,28 @@ impl WorkspaceHost {
 
     // ── Mutate surface (LWW writes accepted from any device) ────────────────
 
-    /// Create a chat *in a space*: the space fixes the host device and base cwd
-    /// (`cwd` override = an isolated-worktree path). Fails when the space row is
-    /// missing — the UI always creates chats from a picked space.
+    /// Create a chat *in a project*: the project fixes the host device and base cwd
+    /// (`cwd` override = an isolated-worktree path). Fails when the project row is
+    /// missing — the UI always creates chats from a picked project.
     pub fn create_chat(
         &self,
         chat_id: &str,
-        space_id: &str,
+        project_id: &str,
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
         if self.inner.doc.chat(chat_id)?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
-        let Some(space) = self.inner.doc.space(space_id)? else {
-            return Err(EngineError::Other(format!("no such space: {space_id}")));
+        let Some(project) = self.inner.doc.project(project_id)? else {
+            return Err(EngineError::Other(format!("no such project: {project_id}")));
         };
         self.inner.doc.upsert_chat(&Chat {
             id: chat_id.to_string(),
-            device_id: space.device_id.clone(),
+            device_id: project.device_id.clone(),
             title: None,
             archived: false,
-            cwd: Some(cwd.unwrap_or_else(|| space.path.clone())),
+            cwd: Some(cwd.unwrap_or_else(|| project.path.clone())),
             branch: None,
             checkout_id: None,
             config,
@@ -523,35 +525,35 @@ impl WorkspaceHost {
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
-            space_id: Some(space.id),
+            project_id: Some(project.id),
             last_seen_at: None,
         })?;
         Ok(())
     }
 
-    // ── spaces (Mutate surface + owner stamps) ──────────────────────────────
+    // ── projects (Mutate surface + owner stamps) ──────────────────────────────
 
-    /// Create a space (any device). Idempotent by id; a live duplicate of the
+    /// Create a project (any device). Idempotent by id; a live duplicate of the
     /// same `(deviceId, path)` is a no-op backstop (the UI reuses via
-    /// WatchSpaces). `git_detected` is seeded from the picker's FolderEntry;
-    /// the owning device's SpacesSync re-verifies.
-    pub fn create_space(
+    /// WatchProjects). `git_detected` is seeded from the picker's FolderEntry;
+    /// the owning device's ProjectsSync re-verifies.
+    pub fn create_project(
         &self,
-        space_id: &str,
+        project_id: &str,
         device_id: &str,
         path: &str,
         name: Option<String>,
         git_detected: bool,
     ) -> Result<(), EngineError> {
-        let spaces = self.inner.doc.read_spaces()?;
-        if spaces
+        let projects = self.inner.doc.read_projects()?;
+        if projects
             .iter()
-            .any(|s| s.id == space_id || (s.device_id == device_id && s.path == path))
+            .any(|s| s.id == project_id || (s.device_id == device_id && s.path == path))
         {
             return Ok(());
         }
-        self.inner.doc.upsert_space(&Space {
-            id: space_id.to_string(),
+        self.inner.doc.upsert_project(&Project {
+            id: project_id.to_string(),
             device_id: device_id.to_string(),
             path: path.to_string(),
             name,
@@ -563,14 +565,14 @@ impl WorkspaceHost {
         Ok(())
     }
 
-    pub fn rename_space(&self, space_id: &str, name: Option<&str>) -> Result<bool, EngineError> {
-        Ok(self.inner.doc.rename_space(space_id, name)?)
+    pub fn rename_project(&self, project_id: &str, name: Option<&str>) -> Result<bool, EngineError> {
+        Ok(self.inner.doc.rename_project(project_id, name)?)
     }
 
-    /// Hard-delete a space and its chats (doc cascade). The caller (rpc layer)
+    /// Hard-delete a project and its chats (doc cascade). The caller (rpc layer)
     /// tears down live runs / doc-host handles for the returned chat ids.
-    pub fn delete_space(&self, space_id: &str) -> Result<DeletedSpace, EngineError> {
-        Ok(self.inner.doc.delete_space(space_id)?)
+    pub fn delete_project(&self, project_id: &str) -> Result<DeletedProject, EngineError> {
+        Ok(self.inner.doc.delete_project(project_id)?)
     }
 
     /// Synced seen marker (any device; LWW + monotonic guard in the doc layer).
@@ -582,22 +584,22 @@ impl WorkspaceHost {
         Ok(self.inner.doc.set_chat_seen(chat_id, at)?)
     }
 
-    /// Owner-only git stamp (SpacesSync). Refuses rows owned by another device.
-    pub fn set_space_git(
+    /// Owner-only git stamp (ProjectsSync). Refuses rows owned by another device.
+    pub fn set_project_git(
         &self,
-        space_id: &str,
+        project_id: &str,
         detected: bool,
         checkout_id: Option<&str>,
     ) -> Result<bool, EngineError> {
-        match self.inner.doc.space(space_id)? {
-            Some(space) if space.device_id == self.inner.config.device_id => Ok(self
+        match self.inner.doc.project(project_id)? {
+            Some(project) if project.device_id == self.inner.config.device_id => Ok(self
                 .inner
                 .doc
-                .set_space_git(space_id, detected, checkout_id, Utc::now())?),
-            Some(space) => {
+                .set_project_git(project_id, detected, checkout_id, Utc::now())?),
+            Some(project) => {
                 tracing::warn!(
-                    space = %space_id, owner = %space.device_id,
-                    "refusing git stamp on space owned by another device"
+                    project = %project_id, owner = %project.device_id,
+                    "refusing git stamp on project owned by another device"
                 );
                 Ok(false)
             }
@@ -605,8 +607,8 @@ impl WorkspaceHost {
         }
     }
 
-    pub fn read_spaces(&self) -> Result<Vec<Space>, EngineError> {
-        Ok(self.inner.doc.read_spaces()?)
+    pub fn read_projects(&self) -> Result<Vec<Project>, EngineError> {
+        Ok(self.inner.doc.read_projects()?)
     }
 
     pub fn rename_chat(&self, chat_id: &str, title: &str) -> Result<bool, EngineError> {
@@ -720,7 +722,7 @@ impl WorkspaceHostInner {
                 self.chats_tx.send_replace(state.chats);
                 self.devices_tx.send_replace(state.devices);
                 self.sessions_tx.send_replace(state.sessions);
-                self.spaces_tx.send_replace(state.spaces);
+                self.projects_tx.send_replace(state.projects);
             }
             Err(err) => {
                 tracing::warn!(error = %err, "workspace read failed");

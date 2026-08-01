@@ -6,11 +6,11 @@
 //! map-of-maps means concurrent writers to *different* rows never conflict while writes
 //! to the *same* row settle field-by-field LWW (exactly right for renames/archives):
 //! - `devices`: LoroMap keyed by deviceId → row map {id, name, platform, lastSeenAt}
-//! - `spaces`: LoroMap keyed by spaceId → row map {id, deviceId, path, name?,
+//! - `projects`: LoroMap keyed by projectId → row map {id, deviceId, path, name?,
 //!   gitDetected, gitCheckedAt?, checkoutId?, createdAt}
 //! - `chats`: LoroMap keyed by chatId → row map {id, deviceId, title?, archived, cwd?,
 //!   branch?, checkoutId?, config?(json), lastMessagePreview?, lastMessageAt?, createdAt,
-//!   harnessSessionId?, harnessSessionCwd?, spaceId?, lastSeenAt?}
+//!   harnessSessionId?, harnessSessionCwd?, projectId?, lastSeenAt?}
 //! - `sessions`: LoroMap keyed by chatId → row map {chatId, deviceId, status, startedAt?,
 //!   updatedAt}
 //! - `meta`: LoroMap {schemaVersion} — in-band detection for future destructive changes
@@ -28,14 +28,14 @@ use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use comet_proto::{Chat, ChatConfig, Device, Session, SessionStatus, Space};
+use comet_proto::{Chat, ChatConfig, Device, Session, SessionStatus, Project};
 
 use crate::schema::DocError;
 
-/// Workspace doc schema version. v2 = the spaces overhaul (spaces container,
-/// chat spaceId/lastSeenAt) — a destructive break shipped via a fresh doc/room
+/// Workspace doc schema version. v2 = the projects overhaul (projects container,
+/// chat projectId/lastSeenAt) — a destructive break shipped via a fresh doc/room
 /// (`workspace2` / `ws2/{orgId}`), so no v1 reader exists.
-pub const WORKSPACE_SCHEMA_VERSION: i64 = 2;
+pub const WORKSPACE_SCHEMA_VERSION: i64 = 3;
 
 /// Ephemeral presence key for a device (`presence/{deviceId}` → online timestamp).
 pub fn presence_key(device_id: &str) -> String {
@@ -47,15 +47,15 @@ pub fn presence_key(device_id: &str) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceState {
     pub devices: Vec<Device>,
-    pub spaces: Vec<Space>,
+    pub projects: Vec<Project>,
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
 }
 
-/// Result of a `delete_space` cascade — the chat ids removed alongside the
-/// space so the engine can drop local run state / doc-host handles.
+/// Result of a `delete_project` cascade — the chat ids removed alongside the
+/// project so the engine can drop local run state / doc-host handles.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DeletedSpace {
+pub struct DeletedProject {
     pub existed: bool,
     pub chat_ids: Vec<String>,
 }
@@ -145,42 +145,42 @@ impl WorkspaceDoc {
         Ok(devices)
     }
 
-    // ── spaces ──────────────────────────────────────────────────────────────
+    // ── projects ──────────────────────────────────────────────────────────────
 
-    /// Upsert a full space row (creation from any device; owner-only fields are
+    /// Upsert a full project row (creation from any device; owner-only fields are
     /// enforced one layer up, in the engine).
-    pub fn upsert_space(&self, space: &Space) -> Result<(), DocError> {
-        let row = self.row("spaces", &space.id)?;
-        row.insert("id", space.id.as_str())?;
-        row.insert("deviceId", space.device_id.as_str())?;
-        row.insert("path", space.path.as_str())?;
-        set_opt_str(&row, "name", space.name.as_deref())?;
-        row.insert("gitDetected", space.git_detected)?;
-        set_opt_ms(&row, "gitCheckedAt", space.git_checked_at)?;
-        set_opt_str(&row, "checkoutId", space.checkout_id.as_deref())?;
-        row.insert("createdAt", space.created_at.timestamp_millis())?;
+    pub fn upsert_project(&self, project: &Project) -> Result<(), DocError> {
+        let row = self.row("projects", &project.id)?;
+        row.insert("id", project.id.as_str())?;
+        row.insert("deviceId", project.device_id.as_str())?;
+        row.insert("path", project.path.as_str())?;
+        set_opt_str(&row, "name", project.name.as_deref())?;
+        row.insert("gitDetected", project.git_detected)?;
+        set_opt_ms(&row, "gitCheckedAt", project.git_checked_at)?;
+        set_opt_str(&row, "checkoutId", project.checkout_id.as_deref())?;
+        row.insert("createdAt", project.created_at.timestamp_millis())?;
         self.doc.commit();
         Ok(())
     }
 
-    pub fn space(&self, space_id: &str) -> Result<Option<Space>, DocError> {
-        Ok(self.read_spaces()?.into_iter().find(|s| s.id == space_id))
+    pub fn project(&self, project_id: &str) -> Result<Option<Project>, DocError> {
+        Ok(self.read_projects()?.into_iter().find(|s| s.id == project_id))
     }
 
-    pub fn read_spaces(&self) -> Result<Vec<Space>, DocError> {
-        let mut spaces: Vec<Space> = self
-            .read_rows::<RawSpace>("spaces")?
+    pub fn read_projects(&self) -> Result<Vec<Project>, DocError> {
+        let mut projects: Vec<Project> = self
+            .read_rows::<RawProject>("projects")?
             .into_iter()
-            .map(Space::from)
+            .map(Project::from)
             .collect();
-        spaces.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(spaces)
+        projects.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(projects)
     }
 
     /// LWW display-name set from any device; `None` clears back to the derived
     /// name (basename of path). `false` when no such row.
-    pub fn rename_space(&self, space_id: &str, name: Option<&str>) -> Result<bool, DocError> {
-        let Some(row) = self.existing_row("spaces", space_id) else {
+    pub fn rename_project(&self, project_id: &str, name: Option<&str>) -> Result<bool, DocError> {
+        let Some(row) = self.existing_row("projects", project_id) else {
             return Ok(false);
         };
         set_opt_str(&row, "name", name)?;
@@ -188,17 +188,17 @@ impl WorkspaceDoc {
         Ok(true)
     }
 
-    /// Owner-stamped git presence for the space folder (SpacesSync; ownership is
+    /// Owner-stamped git presence for the project folder (ProjectsSync; ownership is
     /// asserted by the engine layer, this is mechanism only). `false` when no
     /// such row.
-    pub fn set_space_git(
+    pub fn set_project_git(
         &self,
-        space_id: &str,
+        project_id: &str,
         detected: bool,
         checkout_id: Option<&str>,
         checked_at: DateTime<Utc>,
     ) -> Result<bool, DocError> {
-        let Some(row) = self.existing_row("spaces", space_id) else {
+        let Some(row) = self.existing_row("projects", project_id) else {
             return Ok(false);
         };
         row.insert("gitDetected", detected)?;
@@ -208,17 +208,17 @@ impl WorkspaceDoc {
         Ok(true)
     }
 
-    /// Hard-delete a space and cascade to its chats: tombstone every chat row
-    /// (and session-status row) whose `spaceId` matches, then the space row —
+    /// Hard-delete a project and cascade to its chats: tombstone every chat row
+    /// (and session-status row) whose `projectId` matches, then the project row —
     /// one commit. Per-chat transcript docs remain (orphaned, accepted).
     /// Returns the removed chat ids so the engine can drop local state.
-    pub fn delete_space(&self, space_id: &str) -> Result<DeletedSpace, DocError> {
-        let spaces = self.doc.get_map("spaces");
-        let existed = spaces.get(space_id).is_some();
+    pub fn delete_project(&self, project_id: &str) -> Result<DeletedProject, DocError> {
+        let projects = self.doc.get_map("projects");
+        let existed = projects.get(project_id).is_some();
         let chat_ids: Vec<String> = self
             .read_chats()?
             .into_iter()
-            .filter(|c| c.space_id.as_deref() == Some(space_id))
+            .filter(|c| c.project_id.as_deref() == Some(project_id))
             .map(|c| c.id)
             .collect();
         let chats = self.doc.get_map("chats");
@@ -227,9 +227,9 @@ impl WorkspaceDoc {
             chats.delete(chat_id)?;
             sessions.delete(chat_id)?;
         }
-        spaces.delete(space_id)?;
+        projects.delete(project_id)?;
         self.doc.commit();
-        Ok(DeletedSpace { existed, chat_ids })
+        Ok(DeletedProject { existed, chat_ids })
     }
 
     // ── chats ───────────────────────────────────────────────────────────────
@@ -263,7 +263,7 @@ impl WorkspaceDoc {
             "harnessSessionCwd",
             chat.harness_session_cwd.as_deref(),
         )?;
-        set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
+        set_opt_str(&row, "projectId", chat.project_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
         self.doc.commit();
         Ok(())
@@ -445,7 +445,7 @@ impl WorkspaceDoc {
     pub fn read_all(&self) -> Result<WorkspaceState, DocError> {
         Ok(WorkspaceState {
             devices: self.read_devices()?,
-            spaces: self.read_spaces()?,
+            projects: self.read_projects()?,
             chats: self.read_chats()?,
             sessions: self.read_sessions()?,
         })
@@ -573,7 +573,7 @@ impl From<RawDevice> for Device {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawSpace {
+struct RawProject {
     id: String,
     device_id: String,
     path: String,
@@ -589,9 +589,9 @@ struct RawSpace {
     created_at: i64,
 }
 
-impl From<RawSpace> for Space {
-    fn from(raw: RawSpace) -> Self {
-        Space {
+impl From<RawProject> for Project {
+    fn from(raw: RawProject) -> Self {
+        Project {
             id: raw.id,
             device_id: raw.device_id,
             path: raw.path,
@@ -632,7 +632,7 @@ struct RawChat {
     #[serde(default)]
     harness_session_cwd: Option<String>,
     #[serde(default)]
-    space_id: Option<String>,
+    project_id: Option<String>,
     #[serde(default)]
     last_seen_at: Option<i64>,
 }
@@ -653,7 +653,7 @@ impl From<RawChat> for Chat {
             created_at: dt(raw.created_at),
             harness_session_id: raw.harness_session_id,
             harness_session_cwd: raw.harness_session_cwd,
-            space_id: raw.space_id,
+            project_id: raw.project_id,
             last_seen_at: raw.last_seen_at.map(dt),
         }
     }
@@ -724,13 +724,13 @@ mod tests {
             created_at: ts(2_000),
             harness_session_id: None,
             harness_session_cwd: None,
-            space_id: None,
+            project_id: None,
             last_seen_at: None,
         }
     }
 
-    fn space(id: &str, device_id: &str, path: &str) -> Space {
-        Space {
+    fn project(id: &str, device_id: &str, path: &str) -> Project {
+        Project {
             id: id.into(),
             device_id: device_id.into(),
             path: path.into(),
@@ -897,46 +897,46 @@ mod tests {
     }
 
     #[test]
-    fn spaces_round_trip_and_mutate() {
+    fn projects_round_trip_and_mutate() {
         let ws = WorkspaceDoc::new();
-        ws.upsert_space(&space("sp-1", "dev-a", "/home/u/project"))
+        ws.upsert_project(&project("sp-1", "dev-a", "/home/u/project"))
             .unwrap();
-        let row = ws.space("sp-1").unwrap().expect("row exists");
+        let row = ws.project("sp-1").unwrap().expect("row exists");
         assert_eq!(row.display_name(), "project");
         assert!(!row.git_detected);
 
-        assert!(ws.rename_space("sp-1", Some("My Project")).unwrap());
+        assert!(ws.rename_project("sp-1", Some("My Project")).unwrap());
         assert_eq!(
-            ws.space("sp-1").unwrap().unwrap().display_name(),
+            ws.project("sp-1").unwrap().unwrap().display_name(),
             "My Project"
         );
-        assert!(ws.rename_space("sp-1", None).unwrap());
-        assert_eq!(ws.space("sp-1").unwrap().unwrap().display_name(), "project");
+        assert!(ws.rename_project("sp-1", None).unwrap());
+        assert_eq!(ws.project("sp-1").unwrap().unwrap().display_name(), "project");
 
         assert!(
-            ws.set_space_git("sp-1", true, Some("checkout-abc"), ts(4_000))
+            ws.set_project_git("sp-1", true, Some("checkout-abc"), ts(4_000))
                 .unwrap()
         );
-        let row = ws.space("sp-1").unwrap().unwrap();
+        let row = ws.project("sp-1").unwrap().unwrap();
         assert!(row.git_detected);
         assert_eq!(row.checkout_id.as_deref(), Some("checkout-abc"));
         assert_eq!(row.git_checked_at, Some(ts(4_000)));
 
         // Unknown rows report false, never invent rows.
-        assert!(!ws.rename_space("nope", Some("x")).unwrap());
-        assert!(!ws.set_space_git("nope", true, None, ts(1)).unwrap());
+        assert!(!ws.rename_project("nope", Some("x")).unwrap());
+        assert!(!ws.set_project_git("nope", true, None, ts(1)).unwrap());
     }
 
     #[test]
-    fn delete_space_cascades_and_converges_across_peers() {
+    fn delete_project_cascades_and_converges_across_peers() {
         let a = WorkspaceDoc::new();
-        a.upsert_space(&space("sp-1", "dev-a", "/tmp/one")).unwrap();
-        a.upsert_space(&space("sp-2", "dev-a", "/tmp/two")).unwrap();
-        let mut in_space = chat("chat-1", "dev-a");
-        in_space.space_id = Some("sp-1".into());
+        a.upsert_project(&project("sp-1", "dev-a", "/tmp/one")).unwrap();
+        a.upsert_project(&project("sp-2", "dev-a", "/tmp/two")).unwrap();
+        let mut in_project = chat("chat-1", "dev-a");
+        in_project.project_id = Some("sp-1".into());
         let mut other = chat("chat-2", "dev-a");
-        other.space_id = Some("sp-2".into());
-        a.upsert_chat(&in_space).unwrap();
+        other.project_id = Some("sp-2".into());
+        a.upsert_chat(&in_project).unwrap();
         a.upsert_chat(&other).unwrap();
         a.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
             .unwrap();
@@ -947,7 +947,7 @@ mod tests {
             d
         });
 
-        let deleted = a.delete_space("sp-1").unwrap();
+        let deleted = a.delete_project("sp-1").unwrap();
         assert!(deleted.existed);
         assert_eq!(deleted.chat_ids, vec!["chat-1".to_string()]);
         cross_sync(&a, &b);
@@ -955,7 +955,7 @@ mod tests {
         for ws in [&a, &b] {
             let state = ws.read_all().unwrap();
             assert_eq!(
-                state.spaces.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                state.projects.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
                 vec!["sp-2"]
             );
             assert_eq!(
@@ -964,8 +964,8 @@ mod tests {
             );
             assert!(state.sessions.is_empty());
         }
-        // Idempotent on a gone space.
-        let again = b.delete_space("sp-1").unwrap();
+        // Idempotent on a gone project.
+        let again = b.delete_project("sp-1").unwrap();
         assert!(!again.existed);
         assert!(again.chat_ids.is_empty());
     }

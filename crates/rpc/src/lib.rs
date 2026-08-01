@@ -40,10 +40,10 @@ pub mod methods {
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_DEVICES: &str = "WatchDevices";
     pub const WATCH_SESSIONS: &str = "WatchSessions";
-    /// Spaces registry (device+folder pairs) from the workspace doc.
-    pub const WATCH_SPACES: &str = "WatchSpaces";
+    /// Projects registry (device+folder pairs) from the workspace doc.
+    pub const WATCH_PROJECTS: &str = "WatchProjects";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
-    /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
+    /// Params are tagged `{op: createChat|createProject|renameProject|deleteProject|
     /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —

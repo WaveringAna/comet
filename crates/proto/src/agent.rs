@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessId {
+    Pi,
     ClaudeCode,
     Codex,
     Cursor,
@@ -304,5 +305,10 @@ mod tests {
             serde_json::to_string(&HarnessId::ClaudeCode).unwrap(),
             "\"claude-code\""
         );
+    }
+
+    #[test]
+    fn pi_harness_id_uses_kebab_case() {
+        assert_eq!(serde_json::to_string(&HarnessId::Pi).unwrap(), "\"pi\"");
     }
 }

@@ -113,6 +113,7 @@ icon_assets![
     (COPY, "copy"),
     (COMET_LOGO, "comet-logo"),
     // Harness brand marks (icons.tsx).
+    (PI_MARK, "pi-mark"),
     (CLAUDE_MARK, "claude-mark"),
     (OPENAI_MARK, "openai-mark"),
     (CURSOR_MARK, "cursor-mark"),

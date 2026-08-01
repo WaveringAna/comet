@@ -213,38 +213,38 @@ async fn two_engines_share_a_workspace() {
         .await;
     }
 
-    // CreateSpace + CreateChat on A (Mutate over the real RPC surface), hosted
-    // by dev-a via the space.
+    // CreateProject + CreateChat on A (Mutate over the real RPC surface), hosted
+    // by dev-a via the project.
     let client_a = comet_rpc::memory_client(a.rpc_service());
     let client_b = comet_rpc::memory_client(b.rpc_service());
     client_a
         .call(
             methods::MUTATE,
             serde_json::json!({
-                "op": "createSpace", "spaceId": "space-1", "deviceId": "dev-a", "path": "/tmp"
+                "op": "createProject", "projectId": "project-1", "deviceId": "dev-a", "path": "/tmp"
             }),
         )
         .await
-        .expect("create space");
+        .expect("create project");
     client_a
         .call(
             methods::MUTATE,
             serde_json::json!({
-                "op": "createChat", "chatId": "chat-1", "spaceId": "space-1"
+                "op": "createChat", "chatId": "chat-1", "projectId": "project-1"
             }),
         )
         .await
         .expect("create chat");
-    // The space row crosses to B alongside the chat row.
+    // The project row crosses to B alongside the chat row.
     wait_for(
         || {
             b.workspace
-                .read_spaces()
+                .read_projects()
                 .unwrap_or_default()
                 .iter()
-                .any(|s| s.id == "space-1" && s.device_id == "dev-a" && s.path == "/tmp")
+                .any(|s| s.id == "project-1" && s.device_id == "dev-a" && s.path == "/tmp")
         },
-        "space row on B",
+        "project row on B",
     )
     .await;
     wait_for(
@@ -371,14 +371,14 @@ async fn non_host_engine_leaves_remote_chats_commands_alone() {
     let dir_a = tempfile::tempdir().unwrap();
     let a = assemble(dir_a.path(), "dev-a");
 
-    // The workspace says dev-b hosts this chat (via its dev-b space); a run
+    // The workspace says dev-b hosts this chat (via its dev-b project); a run
     // command in A's local copy of the session doc must NOT execute on A
     // (is_host gating).
     a.workspace
-        .create_space("space-remote", "dev-b", "/tmp/remote", None, false)
-        .expect("create remote space row");
+        .create_project("project-remote", "dev-b", "/tmp/remote", None, false)
+        .expect("create remote project row");
     a.workspace
-        .create_chat("chat-remote", "space-remote", None, None)
+        .create_chat("chat-remote", "project-remote", None, None)
         .expect("create remote-hosted chat row");
     queue_run(&a, "chat-remote", "cmd-remote-1", "m-1");
 
@@ -407,12 +407,12 @@ async fn chat_config_selects_the_run_harness() {
     let a = assemble(dir_a.path(), "dev-a"); // default harness = Mock ("Hello")
 
     a.workspace
-        .create_space("space-cfg", "dev-a", "/tmp/cfg", None, false)
-        .expect("create space");
+        .create_project("project-cfg", "dev-a", "/tmp/cfg", None, false)
+        .expect("create project");
     a.workspace
         .create_chat(
             "chat-cfg",
-            "space-cfg",
+            "project-cfg",
             Some(ChatConfig {
                 harness: HarnessId::Cursor,
                 model: None,

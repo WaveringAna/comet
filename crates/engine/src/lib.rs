@@ -22,7 +22,7 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
-pub mod spaces;
+pub mod projects;
 pub mod terminals;
 pub mod titles;
 pub mod uploads;
@@ -38,7 +38,7 @@ pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
-pub use spaces::SpacesSync;
+pub use projects::ProjectsSync;
 pub use terminals::Terminals;
 pub use titles::TitleGenerator;
 pub use uploads::{AttachmentChunk, Uploads};
@@ -100,7 +100,7 @@ pub struct EngineCore {
     pub repos: Repos,
     pub terminals: Terminals,
     pub diff_sync: CheckoutDiffSync,
-    pub spaces_sync: SpacesSync,
+    pub projects_sync: ProjectsSync,
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
     pub device_id: String,
@@ -192,7 +192,7 @@ impl EngineCore {
             repos.clone(),
         ));
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
-        let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        let projects_sync = ProjectsSync::start(repos.clone(), workspace.clone(), &device_id);
         Ok(Self {
             sessions,
             doc_host,
@@ -201,7 +201,7 @@ impl EngineCore {
             repos,
             terminals,
             diff_sync,
-            spaces_sync,
+            projects_sync,
             uploads,
             agent_accounts,
             device_id,

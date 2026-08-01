@@ -2022,17 +2022,17 @@ impl Composer {
             .selected_chat_row()
             .and_then(|c| c.cwd.clone());
         // The SPACE fixes the new chat's device + base folder — this is the
-        // behavioral core of spaces: sessions are minted onto the space's
+        // behavioral core of projects: sessions are minted onto the project's
         // device, not necessarily this one.
-        let space = self.state.read(cx).selected_space_row().cloned();
-        if is_new && space.is_none() {
-            self.failure = Some("Add a space first".into());
+        let project = self.state.read(cx).selected_project_row().cloned();
+        if is_new && project.is_none() {
+            self.failure = Some("Create a project first".into());
             cx.notify();
             return;
         }
         let local_device_id = self.state.read(cx).local_device_id.clone();
         let device_id = if is_new {
-            space
+            project
                 .as_ref()
                 .map(|s| s.device_id.clone())
                 .unwrap_or_else(|| "local".to_string())
@@ -2045,9 +2045,9 @@ impl Composer {
                 .unwrap_or_else(|| "local".to_string())
         };
         // Uploads/read-backs target the chat's HOST device (forwardable RPCs);
-        // for a new chat that's the space's device (None when it's local).
+        // for a new chat that's the project's device (None when it's local).
         let host_device_id = if is_new {
-            space
+            project
                 .as_ref()
                 .map(|s| s.device_id.clone())
                 .filter(|id| local_device_id.as_deref() != Some(id.as_str()))
@@ -2057,9 +2057,9 @@ impl Composer {
                 .selected_chat_row()
                 .map(|c| c.device_id.clone())
         };
-        let space_id = space.as_ref().map(|s| s.id.clone());
-        let space_path = space.as_ref().map(|s| s.path.clone());
-        let space_remote = space
+        let project_id = project.as_ref().map(|s| s.id.clone());
+        let project_path = project.as_ref().map(|s| s.path.clone());
+        let project_remote = project
             .as_ref()
             .is_some_and(|s| local_device_id.as_deref() != Some(s.device_id.as_str()));
         // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
@@ -2120,13 +2120,13 @@ impl Composer {
             let result: Result<(), String> = async {
                 // Resolve the working directory: existing chats keep theirs;
                 // new chats run per the checkout plan (t3code env-mode): the
-                // space's folder as-is, an EXISTING worktree of the picked ref
+                // project's folder as-is, an EXISTING worktree of the picked ref
                 // (a plain cwd override — multiple sessions share one
                 // worktree), or a fresh isolated worktree created off the
                 // picked base ref (CreateWorktree on send, targeted at the
-                // space's device; the RPC relay-forwards).
+                // project's device; the RPC relay-forwards).
                 let mut cwd = if is_new {
-                    space_path.clone()
+                    project_path.clone()
                 } else {
                     existing_cwd
                 }
@@ -2146,12 +2146,12 @@ impl Composer {
                         }
                         crate::pickers::CheckoutPlan::NewWorktree { base } => {
                             chat_branch = base.clone();
-                            if let (Some(repo_path), Some(base)) = (&space_path, base) {
+                            if let (Some(repo_path), Some(base)) = (&project_path, base) {
                                 let mut params = serde_json::json!({
                                     "repoPath": repo_path,
                                     "branch": base,
                                 });
-                                if space_remote
+                                if project_remote
                                     && let Some(object) = params.as_object_mut()
                                 {
                                     object.insert(
@@ -2177,11 +2177,11 @@ impl Composer {
                 // engine resolves device + cwd from the SPACE row (idempotent;
                 // the doc host would materialize the chat on first command
                 // anyway, so failures are non-fatal).
-                if is_new && let Some(space_id) = &space_id {
+                if is_new && let Some(project_id) = &project_id {
                     let mut mutate = serde_json::json!({
                         "op": "createChat",
                         "chatId": chat_id,
-                        "spaceId": space_id,
+                        "projectId": project_id,
                     });
                     if let Some(object) = mutate.as_object_mut() {
                         if let Some(worktree_cwd) = &worktree_cwd {
@@ -3132,7 +3132,7 @@ impl Render for Composer {
         let container = container.child(motion::fade_quick("composer-input", body));
         // Branch/worktree toolbar under the pill (t3code BranchToolbar): the
         // checkout-kind selector + ref picker for new sessions, read-only
-        // labels once the session exists. Git spaces only.
+        // labels once the session exists. Git projects only.
         let footer = self
             .pickers
             .update(cx, |pickers, cx| pickers.render_footer(cx));

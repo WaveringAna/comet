@@ -1,15 +1,15 @@
-//! The session tab strip — replaces the chat header (feature spec: spaces
-//! overhaul). Every non-archived session of the selected space is a tab:
+//! The session tab strip — replaces the chat header (feature spec: projects
+//! overhaul). Every non-archived session of the selected project is a tab:
 //! agent brand icon + title + a trailing slot that shows the status dot at
 //! rest and swaps to a close button on hover. `+` at the end opens the
 //! new-session canvas (the tab materializes on first send). The strip inherits
 //! the old header's titlebar duties: 44px tall, drag region, animated
-//! window-controls inset, and the toggle-changes button (git spaces only).
+//! window-controls inset, and the toggle-changes button (git projects only).
 //!
 //! Styling and drag-reorder mirror the terminal tab bar
 //! (`terminal/panel.rs::render_tab_bar`) — same fixed-width tabs, drop-index
 //! math, 150ms sibling slide, and drag ghost. The manual order is device-local
-//! (`UiSettings.tab_order`, keyed by space). Overflow scrolls horizontally
+//! (`UiSettings.tab_order`, keyed by project). Overflow scrolls horizontally
 //! with edge fades.
 
 use super::*;
@@ -33,9 +33,9 @@ pub(super) struct TabDragState {
     prev_over: usize,
 }
 
-/// The dragged-tab payload (gpui drag-and-drop), space-scoped.
+/// The dragged-tab payload (gpui drag-and-drop), project-scoped.
 struct TabDragPayload {
-    space: String,
+    project: String,
     from: usize,
     title: SharedString,
     brand: Option<(&'static str, Option<gpui::Hsla>)>,
@@ -76,7 +76,7 @@ impl Render for TabGhost {
     }
 }
 
-/// Resolve the visual tab order for a space: the manual (drag) order first —
+/// Resolve the visual tab order for a project: the manual (drag) order first —
 /// skipping chats that no longer exist — then any new chats appended in
 /// creation order. Pure.
 pub(super) fn resolve_tab_order(created_order: &[String], manual: &[String]) -> Vec<String> {
@@ -108,16 +108,16 @@ pub(super) fn next_after_close(order: &[String], closed: &str) -> Option<String>
 }
 
 impl Shell {
-    /// The space's tabs in VISUAL order (manual drag order over creation order).
-    fn tab_ids(&self, space_id: &str, cx: &App) -> Vec<String> {
+    /// The project's tabs in VISUAL order (manual drag order over creation order).
+    fn tab_ids(&self, project_id: &str, cx: &App) -> Vec<String> {
         let created: Vec<String> = self
             .state
             .read(cx)
-            .chats_in_space(space_id)
+            .chats_in_project(project_id)
             .iter()
             .map(|c| c.id.clone())
             .collect();
-        match self.settings.tab_order.get(space_id) {
+        match self.settings.tab_order.get(project_id) {
             Some(manual) => resolve_tab_order(&created, manual),
             None => created,
         }
@@ -127,10 +127,10 @@ impl Shell {
     /// last tab lands on the new-session canvas.
     pub(super) fn close_session_tab(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let (selected, order) = {
-            let space = self.state.read(cx).selected_space.clone();
-            let order = space
+            let project = self.state.read(cx).selected_project.clone();
+            let order = project
                 .as_deref()
-                .map(|space| self.tab_ids(space, cx))
+                .map(|project| self.tab_ids(project, cx))
                 .unwrap_or_default();
             (self.state.read(cx).selected_chat.clone(), order)
         };
@@ -165,12 +165,12 @@ impl Shell {
         }
     }
 
-    /// Commit a drag: persist the new visual order for the space (device-local).
-    fn commit_tab_reorder(&mut self, space: &str, from: usize, to: usize, cx: &mut Context<Self>) {
-        let mut order = self.tab_ids(space, cx);
+    /// Commit a drag: persist the new visual order for the project (device-local).
+    fn commit_tab_reorder(&mut self, project: &str, from: usize, to: usize, cx: &mut Context<Self>) {
+        let mut order = self.tab_ids(project, cx);
         if from < order.len() {
             reorder_tabs(&mut order, from, to);
-            self.settings.tab_order.insert(space.to_string(), order);
+            self.settings.tab_order.insert(project.to_string(), order);
             self.schedule_save(cx);
         }
         self.tab_drag = None;
@@ -186,10 +186,10 @@ impl Shell {
         if self.tab_drag.is_some() && !cx.has_active_drag() {
             self.tab_drag = None;
         }
-        let space_id = self.state.read(cx).selected_space.clone();
-        let order: Vec<String> = space_id
+        let project_id = self.state.read(cx).selected_project.clone();
+        let order: Vec<String> = project_id
             .as_deref()
-            .map(|space| self.tab_ids(space, cx))
+            .map(|project| self.tab_ids(project, cx))
             .unwrap_or_default();
         let tabs: Vec<(String, SharedString, Option<comet_proto::HarnessId>, ChatIndicator)> = {
             let state = self.state.read(cx);
@@ -223,8 +223,8 @@ impl Shell {
             Some(_) => {}
             None => self.tabs_scrolled_to = None,
         }
-        let has_space = space_id.is_some();
-        let git = self.space_git_detected(cx);
+        let has_project = project_id.is_some();
+        let git = self.project_git_detected(cx);
         let hovered = self.tab_hover.clone();
         let on_canvas = selected.is_none();
         // No sessions yet → the canvas already shows; a `+` would be redundant.
@@ -257,7 +257,7 @@ impl Shell {
                 let close_id = id.clone();
                 let middle_id = id.clone();
                 let hover_id = id.clone();
-                let drag_space = space_id.clone().unwrap_or_default();
+                let drag_project = project_id.clone().unwrap_or_default();
                 // NB: no `.occlude()` on the close button — the TAB already
                 // occludes (for the titlebar drag region), and an occluding
                 // child would block the tab's own hover hit-test: a flicker
@@ -286,7 +286,7 @@ impl Shell {
                     // Working animates (the sidebar's miniaturized gradient
                     // spinner) instead of a static pink dot; every other
                     // non-idle status stays a dot.
-                    let dot = spaces::status_dot_color(status, &theme);
+                    let dot = projects::status_dot_color(status, &theme);
                     div()
                         .size(px(20.0))
                         .flex_none()
@@ -358,7 +358,7 @@ impl Shell {
                     )
                     .on_drag(
                         TabDragPayload {
-                            space: drag_space,
+                            project: drag_project,
                             from: ix,
                             title: title.clone(),
                             brand,
@@ -423,7 +423,7 @@ impl Shell {
             .justify_center()
             .rounded(px(8.0))
             .cursor_pointer()
-            .bg(if on_canvas && has_space {
+            .bg(if on_canvas && has_project {
                 crate::theme::glass_selected_bg()
             } else {
                 motion::hover_blend(
@@ -432,7 +432,7 @@ impl Shell {
                     crate::theme::wash(0.12),
                 )
             })
-            .when(on_canvas && has_space, |el| {
+            .when(on_canvas && has_project, |el| {
                 el.shadow(crate::theme::glass_selected_shadows())
             })
             .on_hover(motion::hover_listener("session-tab-new"))
@@ -457,8 +457,8 @@ impl Shell {
         let fade_right = scrolled < max_scroll - 1.0;
         let glass = Theme::GLASS_ALPHA < 1.0;
         let bar_bg = theme.surface;
-        let drag_move_space = space_id.clone().unwrap_or_default();
-        let drop_space = space_id.clone().unwrap_or_default();
+        let drag_move_project = project_id.clone().unwrap_or_default();
+        let drop_project = project_id.clone().unwrap_or_default();
         let scroll_for_drag = self.tabs_scroll.clone();
         let tab_region = div()
             .relative()
@@ -476,7 +476,7 @@ impl Shell {
                     .on_drag_move::<TabDragPayload>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<TabDragPayload>, _, cx| {
                             let payload = event.drag(cx);
-                            if payload.space != drag_move_space {
+                            if payload.project != drag_move_project {
                                 return;
                             }
                             let from = payload.from;
@@ -491,7 +491,7 @@ impl Shell {
                     ))
                     .on_drop::<TabDragPayload>(cx.listener(
                         move |this, payload: &TabDragPayload, _, cx| {
-                            if payload.space != drop_space {
+                            if payload.project != drop_project {
                                 this.tab_drag = None;
                                 cx.notify();
                                 return;
@@ -501,8 +501,8 @@ impl Shell {
                                 .as_ref()
                                 .map(|d| d.over)
                                 .unwrap_or(payload.from);
-                            let space = drop_space.clone();
-                            this.commit_tab_reorder(&space, payload.from, to, cx);
+                            let project = drop_project.clone();
+                            this.commit_tab_reorder(&project, payload.from, to, cx);
                         },
                     ))
                     .children(tab_elements),
@@ -561,7 +561,7 @@ impl Shell {
             .pl(px(tabs_left))
             .pr(px(Theme::SPACE_LG))
             .child(tab_region)
-            .when(has_space && has_tabs, |el| el.child(new_tab))
+            .when(has_project && has_tabs, |el| el.child(new_tab))
             .child(div().flex_1())
             // Stable location: the toggle shows whether the pane is open or
             // not (the pane's own header is gone).

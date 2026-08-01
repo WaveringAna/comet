@@ -229,24 +229,24 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     CreateChat {
         chat_id: String,
-        /// The space the chat is created in — fixes host device + base cwd.
-        space_id: String,
+        /// The project the chat is created in — fixes host device + base cwd.
+        project_id: String,
         #[serde(default)]
         config: Option<ChatConfig>,
         /// The picked ref, named on the row from the first frame (the footer
         /// read "Select ref" until the diff reconciler stamped it).
         #[serde(default)]
         branch: Option<String>,
-        /// Cwd override (isolated-worktree path); default = the space's folder.
+        /// Cwd override (isolated-worktree path); default = the project's folder.
         #[serde(default)]
         cwd: Option<String>,
     },
-    /// Create a space (device + folder pair). Idempotent by id; a live
+    /// Create a project (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
-    /// picker's FolderEntry — the owning device's SpacesSync re-verifies.
+    /// picker's FolderEntry — the owning device's ProjectsSync re-verifies.
     #[serde(rename_all = "camelCase")]
-    CreateSpace {
-        space_id: String,
+    CreateProject {
+        project_id: String,
         device_id: String,
         path: String,
         #[serde(default)]
@@ -256,15 +256,15 @@ enum MutateParams {
     },
     /// LWW display-name set; `name: None` clears back to basename(path).
     #[serde(rename_all = "camelCase")]
-    RenameSpace {
-        space_id: String,
+    RenameProject {
+        project_id: String,
         #[serde(default)]
         name: Option<String>,
     },
-    /// Hard delete: cascades to every chat (and session row) in the space.
+    /// Hard delete: cascades to every chat (and session row) in the project.
     /// Live runs hosted here are interrupted best-effort.
     #[serde(rename_all = "camelCase")]
-    DeleteSpace { space_id: String },
+    DeleteProject { project_id: String },
     #[serde(rename_all = "camelCase")]
     RenameChat { chat_id: String, title: String },
     /// Set the chat's checkout branch label — the sidebar's
@@ -432,13 +432,13 @@ impl EngineRpc {
         match params {
             MutateParams::CreateChat {
                 chat_id,
-                space_id,
+                project_id,
                 config,
                 branch,
                 cwd,
             } => {
                 self.workspace
-                    .create_chat(&chat_id, &space_id, config, cwd)
+                    .create_chat(&chat_id, &project_id, config, cwd)
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
                     self.workspace
@@ -447,23 +447,23 @@ impl EngineRpc {
                 }
                 Ok(())
             }
-            MutateParams::CreateSpace {
-                space_id,
+            MutateParams::CreateProject {
+                project_id,
                 device_id,
                 path,
                 name,
                 git_detected,
             } => self
                 .workspace
-                .create_space(&space_id, &device_id, &path, name, git_detected)
+                .create_project(&project_id, &device_id, &path, name, git_detected)
                 .map_err(failed),
-            MutateParams::RenameSpace { space_id, name } => self
+            MutateParams::RenameProject { project_id, name } => self
                 .workspace
-                .rename_space(&space_id, name.as_deref())
+                .rename_project(&project_id, name.as_deref())
                 .map_err(failed)
                 .map(drop),
-            MutateParams::DeleteSpace { space_id } => {
-                let deleted = self.workspace.delete_space(&space_id).map_err(failed)?;
+            MutateParams::DeleteProject { project_id } => {
+                let deleted = self.workspace.delete_project(&project_id).map_err(failed)?;
                 // Best-effort teardown of live runs we host for the deleted chats
                 // (the doc rows are already tombstoned; a straggler run would only
                 // write into an orphaned session doc).
@@ -472,7 +472,7 @@ impl EngineRpc {
                 tokio::spawn(async move {
                     for chat_id in chat_ids {
                         if let Err(err) = sessions.interrupt(&chat_id).await {
-                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace interrupt skipped");
+                            tracing::debug!(chat = %chat_id, error = %err, "deleteProject interrupt skipped");
                         }
                     }
                 });
@@ -771,8 +771,8 @@ impl RpcService for EngineRpc {
             methods::WATCH_DEVICES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_devices(),
             ))),
-            methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
-                self.workspace.watch_spaces(),
+            methods::WATCH_PROJECTS => Ok(RpcReply::Stream(watch_stream(
+                self.workspace.watch_projects(),
             ))),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.

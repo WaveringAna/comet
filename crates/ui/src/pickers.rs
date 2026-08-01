@@ -64,7 +64,7 @@ pub struct DraftConfig {
 /// materialized as a worktree (the session reuses that checkout's path).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CheckoutKind {
-    /// The space's own folder — or the picked ref's existing worktree.
+    /// The project's own folder — or the picked ref's existing worktree.
     #[default]
     Local,
     /// A fresh isolated worktree created off the picked base ref on send.
@@ -75,13 +75,13 @@ pub enum CheckoutKind {
 /// [`Pickers::checkout_plan`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckoutPlan {
-    /// Run in the space folder as-is.
+    /// Run in the project folder as-is.
     CurrentCheckout,
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
     /// `CreateWorktree` off `base` on send (comet mints a `comet/<name>`
     /// branch). `base: None` = refs never loaded — send falls back to the
-    /// space folder rather than failing.
+    /// project folder rather than failing.
     NewWorktree { base: Option<String> },
 }
 
@@ -199,7 +199,7 @@ pub fn traits_summary(
 }
 
 // ---------------------------------------------------------------------------
-// Pure: folder-browser navigation (used by the shell's add-space flow)
+// Pure: folder-browser navigation (used by the shell's add-project flow)
 // ---------------------------------------------------------------------------
 
 /// Parent of an absolute path; `None` at the filesystem root.
@@ -268,18 +268,18 @@ pub struct Pickers {
     /// Selection the draft picks belong to — switching chats drops them so a
     /// pick made in one chat never leaks into another.
     draft_owner: Option<String>,
-    /// Space the branch draft/cache belong to (see the state observer).
-    space_owner: Option<String>,
+    /// Project the branch draft/cache belong to (see the state observer).
+    project_owner: Option<String>,
     open: Option<PickerKind>,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
     refs: Loadable<Vec<RepoRef>>,
-    /// Space id the `refs` slot belongs to (invalidated on space change).
-    refs_space: Option<String>,
+    /// Project id the `refs` slot belongs to (invalidated on project change).
+    refs_project: Option<String>,
     /// Highlighted row in the open list (keyboard nav).
     active: usize,
     /// Models-list scroll — keyboard nav keeps the highlighted row in view
-    /// (`scroll_to_item`; the add-space palette standard).
+    /// (`scroll_to_item`; the add-project palette standard).
     model_scroll: gpui::ScrollHandle,
     /// Shared search / URL / name input, reused across popovers.
     search: Entity<ComposerInput>,
@@ -330,17 +330,17 @@ impl Pickers {
                 this.config.model_options.clear();
                 this.switch_error = None;
             }
-            // A space switch invalidates the branch draft + cache — the folder
+            // A project switch invalidates the branch draft + cache — the folder
             // (and possibly the device) changed under them.
-            let space = state.read(cx).selected_space.clone();
-            if space != this.space_owner {
-                this.space_owner = space;
+            let project = state.read(cx).selected_project.clone();
+            if project != this.project_owner {
+                this.project_owner = project;
                 this.config.branch = None;
                 this.config.checkout = CheckoutKind::default();
                 this.refs = Loadable::Idle;
-                this.refs_space = None;
-                // Catalogs are per-DEVICE (fetched from the space's host):
-                // a space switch may land on another device, so refetch.
+                this.refs_project = None;
+                // Catalogs are per-DEVICE (fetched from the project's host):
+                // a project switch may land on another device, so refetch.
                 this.harnesses = Loadable::Idle;
                 this.models.clear();
             }
@@ -364,10 +364,10 @@ impl Pickers {
             .map(ComposerDefaults::load)
             .unwrap_or_default();
         let draft_owner = state.read(cx).selected_chat.clone();
-        let space_owner = state.read(cx).selected_space.clone();
+        let project_owner = state.read(cx).selected_project.clone();
         Self {
             state,
-            space_owner,
+            project_owner,
             config: DraftConfig::default(),
             defaults,
             data_dir,
@@ -376,7 +376,7 @@ impl Pickers {
             harnesses: Loadable::Idle,
             models: HashMap::new(),
             refs: Loadable::Idle,
-            refs_space: None,
+            refs_project: None,
             active: 0,
             model_scroll: gpui::ScrollHandle::new(),
             search,
@@ -416,14 +416,14 @@ impl Pickers {
         self.state.read(cx).engine().cloned()
     }
 
-    /// The selected space's device when it differs from the connected
+    /// The selected project's device when it differs from the connected
     /// engine's own — harness/model catalogs come from the device that RUNS
     /// the agents (the CLIs live there; the viewer may have neither claude
     /// nor codex installed — user report: "can't load codex models/traits
     /// anywhere" from a Mac without codex).
-    fn space_target(&self, cx: &App) -> Option<String> {
+    fn project_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let device = state.selected_space_row()?.device_id.clone();
+        let device = state.selected_project_row()?.device_id.clone();
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
@@ -451,10 +451,8 @@ impl Pickers {
                 return Some(harness);
             }
         }
-        // Fall back to the first VISIBLE harness: the registry lists the mock
-        // harness first, and resolving chips against it would boot the
-        // new-chat canvas onto "Mock" instead of Claude Code + its default
-        // model (it stays available under `COMET_HARNESS=mock`).
+        // Fall back to the first visible pi harness. Mock stays available only
+        // for the explicit e2e/dev override.
         self.harnesses
             .ready()
             .and_then(|list| visible_harnesses(list).first().map(|d| d.id))
@@ -634,7 +632,7 @@ impl Pickers {
         let Some(engine) = self.engine(cx) else {
             return;
         };
-        let target = self.space_target(cx);
+        let target = self.project_target(cx);
         self.harnesses = Loadable::Loading;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
@@ -678,7 +676,7 @@ impl Pickers {
         let Some(engine) = self.engine(cx) else {
             return;
         };
-        let target = self.space_target(cx);
+        let target = self.project_target(cx);
         self.models.insert(harness, Loadable::Loading);
         cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
@@ -713,18 +711,18 @@ impl Pickers {
         .detach();
     }
 
-    /// ListRefs for the selected SPACE's folder — targeted at the space's
-    /// device (relay-forwarded when remote), keyed/invalidated by space id.
+    /// ListRefs for the selected SPACE's folder — targeted at the project's
+    /// device (relay-forwarded when remote), keyed/invalidated by project id.
     /// Rows carry checkout state (`current`, `worktreePath`) so the picker can
     /// tag refs and the checkout-kind selector can offer worktree reuse.
     fn ensure_refs(&mut self, force: bool, cx: &mut Context<Self>) {
-        let Some(space) = self.state.read(cx).selected_space_row().cloned() else {
+        let Some(project) = self.state.read(cx).selected_project_row().cloned() else {
             return;
         };
-        if !space.git_detected {
+        if !project.git_detected {
             return;
         }
-        let fresh = self.refs_space.as_deref() == Some(space.id.as_str());
+        let fresh = self.refs_project.as_deref() == Some(project.id.as_str());
         if fresh && matches!(self.refs, Loadable::Loading) {
             return; // a load is already in flight
         }
@@ -740,24 +738,24 @@ impl Pickers {
             return;
         };
         let local = self.state.read(cx).local_device_id.clone();
-        // Stale-while-revalidate: a forced refresh of an already-loaded space
+        // Stale-while-revalidate: a forced refresh of an already-loaded project
         // keeps the current rows on screen while the reload runs — a send that
         // just minted a worktree (or a terminal-side branch) appears on the
         // popover's next open without the list ever flashing to a skeleton.
         if !(force && fresh && matches!(self.refs, Loadable::Ready(_))) {
             self.refs = Loadable::Loading;
         }
-        self.refs_space = Some(space.id.clone());
+        self.refs_project = Some(project.id.clone());
         self.refs_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
             params.insert(
                 "repoPath".into(),
-                serde_json::Value::String(space.path.clone()),
+                serde_json::Value::String(project.path.clone()),
             );
-            if local.as_deref() != Some(space.device_id.as_str()) {
+            if local.as_deref() != Some(project.device_id.as_str()) {
                 params.insert(
                     "targetDeviceId".into(),
-                    serde_json::Value::String(space.device_id.clone()),
+                    serde_json::Value::String(project.device_id.clone()),
                 );
             }
             let result = engine
@@ -803,7 +801,7 @@ impl Pickers {
             // Base pick for a new worktree, or the already-current ref.
             self.config.branch = Some(row.name.clone());
         } else {
-            // Local mode + a plain non-current ref: CHECK OUT the space
+            // Local mode + a plain non-current ref: CHECK OUT the project
             // folder (full t3code `switchRef` — picking `main` means "put my
             // local checkout on main", it must never flip the mode).
             self.switch_draft_ref(row, cx);
@@ -814,13 +812,13 @@ impl Pickers {
     }
 
     /// Draft-mode checkout switch: `git checkout` in the SPACE's folder
-    /// (relay-forwarded for remote spaces). Success records the pick and
+    /// (relay-forwarded for remote projects). Success records the pick and
     /// refreshes tags; failure keeps the popover open with git's message.
     fn switch_draft_ref(&mut self, row: RepoRef, cx: &mut Context<Self>) {
         if self.switching.is_some() {
             return; // one switch at a time
         }
-        let Some(space) = self.state.read(cx).selected_space_row().cloned() else {
+        let Some(project) = self.state.read(cx).selected_project_row().cloned() else {
             return;
         };
         let Some(engine) = self.engine(cx) else {
@@ -834,16 +832,16 @@ impl Pickers {
             let mut params = serde_json::Map::new();
             params.insert(
                 "repoPath".into(),
-                serde_json::Value::String(space.path.clone()),
+                serde_json::Value::String(project.path.clone()),
             );
             params.insert(
                 "refName".into(),
                 serde_json::Value::String(ref_name.clone()),
             );
-            if local.as_deref() != Some(space.device_id.as_str()) {
+            if local.as_deref() != Some(project.device_id.as_str()) {
                 params.insert(
                     "targetDeviceId".into(),
-                    serde_json::Value::String(space.device_id.clone()),
+                    serde_json::Value::String(project.device_id.clone()),
                 );
             }
             let result = engine
@@ -1513,7 +1511,7 @@ impl Pickers {
     }
 
     /// The composer footer row (t3code BranchToolbar): checkout-kind on the
-    /// left, the ref selector right-aligned. `None` for non-git spaces. On an
+    /// left, the ref selector right-aligned. `None` for non-git projects. On an
     /// existing session both sides are read-only labels ("Worktree" /
     /// "Local checkout" + the chat's branch).
     pub fn render_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1522,16 +1520,16 @@ impl Pickers {
         // right after send mints it) still renders the DRAFT footer — the
         // values are identical, so the toolbar never blinks through a
         // half-empty locked state.
-        let (space, session) = {
+        let (project, session) = {
             let state = self.state.read(cx);
-            let space = state.selected_space_row().cloned()?;
+            let project = state.selected_project_row().cloned()?;
             let session = state
                 .selected_chat
                 .as_ref()
                 .and_then(|_| state.selected_chat_row().cloned());
-            (space, session)
+            (project, session)
         };
-        if !space.git_detected {
+        if !project.git_detected {
             return None;
         }
         let new_chat = session.is_none();
@@ -1588,7 +1586,7 @@ impl Pickers {
         if let Some(chat) = &session {
             // The checkout KIND is fixed at creation (harness resume is
             // cwd-scoped — the session never moves folders): label only.
-            let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
+            let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != project.path);
             let (icon_path, label) = if is_worktree {
                 (crate::icons::FOLDER_WITH_FILES, "Worktree")
             } else {
@@ -1705,12 +1703,12 @@ impl Pickers {
     /// "Showing X of Y refs" footer when the list is capped.
     fn render_branch_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        if self.state.read(cx).selected_space_row().is_none() {
+        if self.state.read(cx).selected_project_row().is_none() {
             return div()
                 .p(px(Theme::SPACE_SM))
                 .text_size(px(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No space selected"))
+                .child(SharedString::from("No project selected"))
                 .into_any_element();
         }
         let rows = self.filtered_ref_rows(cx);
@@ -2324,6 +2322,7 @@ fn trait_chip(theme: &Theme, active: bool, highlighted: bool) -> gpui::Div {
 /// Claude-flavoured runs, so it wears the Claude mark).
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
     match harness {
+        HarnessId::Pi => (crate::icons::PI_MARK, None),
         HarnessId::ClaudeCode | HarnessId::Mock => (
             crate::icons::CLAUDE_MARK,
             Some(crate::icons::claude_brand()),
@@ -2374,25 +2373,18 @@ fn mock_harness_enabled() -> bool {
         == Some("mock")
 }
 
-/// Production pickers AND chip resolution hide the mock harness — the
-/// registry always lists it, but it must never surface in real UI (neither in
-/// the picker rail nor as the eager default the chips resolve against).
-/// `COMET_HARNESS=mock` shows it; otherwise it only remains when it's
-/// literally all there is (a dev build with no real harness registered).
+/// Production pickers and chip resolution expose pi only. Mock is retained
+/// for the explicit e2e/dev override; the legacy Claude Code and Codex
+/// adapters are not part of Nova's catalog.
 pub fn visible_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
     visible_harnesses_impl(list, mock_harness_enabled())
 }
 
 fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<HarnessDescriptor> {
-    if allow_mock {
-        return list.to_vec();
-    }
-    let real: Vec<HarnessDescriptor> = list
-        .iter()
-        .filter(|d| d.id != HarnessId::Mock)
+    list.iter()
+        .filter(|d| d.id == HarnessId::Pi || (allow_mock && d.id == HarnessId::Mock))
         .cloned()
-        .collect();
-    if real.is_empty() { list.to_vec() } else { real }
+        .collect()
 }
 
 /// Attach the (single) open popover overlay to its trigger chip.
@@ -2698,11 +2690,11 @@ mod tests {
     fn resolved_chat_config_requires_harness() {
         let mut resolved = ResolvedRunConfig::default();
         assert!(resolved.chat_config().is_none());
-        resolved.harness = Some(HarnessId::ClaudeCode);
+        resolved.harness = Some(HarnessId::Pi);
         resolved.model = Some("opus".into());
         resolved.reasoning = Some(ReasoningLevel::High);
         let config = resolved.chat_config().expect("harness set");
-        assert_eq!(config.harness, HarnessId::ClaudeCode);
+        assert_eq!(config.harness, HarnessId::Pi);
         assert_eq!(config.model.as_deref(), Some("opus"));
         assert_eq!(config.sandbox, SandboxLevel::WorkspaceWrite);
     }
@@ -2760,7 +2752,7 @@ mod tests {
     }
 
     #[test]
-    fn mock_harness_hidden_unless_alone() {
+    fn legacy_harnesses_are_not_visible() {
         let descriptor = |id: HarnessId, name: &str| HarnessDescriptor {
             id,
             name: name.into(),
@@ -2770,14 +2762,16 @@ mod tests {
         };
         let mixed = vec![
             descriptor(HarnessId::Mock, "Mock"),
+            descriptor(HarnessId::Pi, "Pi"),
             descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            descriptor(HarnessId::Codex, "Codex"),
         ];
-        // Env-independent core: mock hidden in production…
+        // Env-independent core: pi is the only production harness…
         let visible = visible_harnesses_impl(&mixed, false);
         assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].id, HarnessId::ClaudeCode);
+        assert_eq!(visible[0].id, HarnessId::Pi);
         let only_mock = vec![descriptor(HarnessId::Mock, "Mock")];
-        assert_eq!(visible_harnesses_impl(&only_mock, false).len(), 1);
+        assert!(visible_harnesses_impl(&only_mock, false).is_empty());
         // …and opted back in by COMET_HARNESS=mock (the e2e rig).
         assert_eq!(visible_harnesses_impl(&mixed, true).len(), 2);
         assert_eq!(visible_harnesses_impl(&mixed, true)[0].id, HarnessId::Mock);

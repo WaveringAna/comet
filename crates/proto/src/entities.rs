@@ -26,13 +26,13 @@ pub struct Device {
 }
 
 /// A synced (device, folder) pair — the unit of organization in the sidebar.
-/// Sessions belong to exactly one space; the space fixes their host device and
+/// Sessions belong to exactly one project; the project fixes their host device and
 /// base cwd. Folders need not be git repos: `git_detected` is stamped by the
-/// owning device (SpacesSync) and gates branch pickers / the diff sidebar on
+/// owning device (ProjectsSync) and gates branch pickers / the diff sidebar on
 /// every device without an RPC.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Space {
+pub struct Project {
     pub id: String,
     /// Owning device — fixed at create, immutable.
     pub device_id: String,
@@ -47,14 +47,14 @@ pub struct Space {
     /// Owner-stamped freshness timestamp of the last git check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_checked_at: Option<DateTime<Utc>>,
-    /// Owner-stamped when git: canonical checkout identity of the space root
+    /// Owner-stamped when git: canonical checkout identity of the project root
     /// (sha256(deviceId ‖ NUL ‖ git_dir)) — diff grouping key for root sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
-impl Space {
+impl Project {
     /// Name override, else basename(path), else the path itself.
     /// Lives here (proto) so UI and engine agree on the derivation.
     pub fn display_name(&self) -> &str {
@@ -110,11 +110,11 @@ pub struct Chat {
     /// is only injected when the next run launches from the same cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_cwd: Option<String>,
-    /// The space this chat belongs to. Invariant: `Some` for every UI-created
-    /// chat; rows with a missing/dangling space id are not rendered (the host
+    /// The project this chat belongs to. Invariant: `Some` for every UI-created
+    /// chat; rows with a missing/dangling project id are not rendered (the host
     /// device's repair sweep deletes its own danglers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub space_id: Option<String>,
+    pub project_id: Option<String>,
     /// Synced LWW seen marker — compared against `last_message_at` to derive
     /// the "completed (finished but unseen)" indicator. Reading a chat on any
     /// device clears the badge everywhere.

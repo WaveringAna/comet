@@ -335,7 +335,7 @@ mod tests {
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
-            space_id: None,
+            project_id: None,
             last_seen_at: None,
         }
     }
