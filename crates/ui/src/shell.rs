@@ -41,7 +41,9 @@ use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, GatePhase, Indicator, OrgRow, format_time_ago,
     org_name_valid, parse_orgs, sort_memberships,
 };
-use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
+use crate::terminal::panel::{
+    TerminalPanel, TerminalPanelEvent, ToggleTerminal, clamp_terminal_height,
+};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 
@@ -143,10 +145,7 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 2] = [
-        SettingsSection::Shortcuts,
-        SettingsSection::Archived,
-    ];
+    pub const ALL: [SettingsSection; 2] = [SettingsSection::Shortcuts, SettingsSection::Archived];
 
     /// Sidebar + header label (comet settings-sidebar.tsx SECTIONS / __root.tsx
     /// `settingsTitle` — the same strings in both places).
@@ -558,6 +557,9 @@ pub struct Shell {
     _state_observation: Subscription,
     _composer_events: Subscription,
     _transcript_events: Subscription,
+    /// One per lazily-built terminal panel (bottom, right): their feed rows
+    /// backlink into the transcript.
+    terminal_backlinks: Vec<Subscription>,
 }
 
 impl Shell {
@@ -710,6 +712,7 @@ impl Shell {
             _state_observation: observation,
             _composer_events: composer_events,
             _transcript_events: transcript_events,
+            terminal_backlinks: Vec::new(),
         }
     }
 
@@ -717,8 +720,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         // Capture knob: the add-project palette opens once local folders land.
-        if self.debug_dialog.as_deref() == Some("add-project")
-            && !state.read(cx).devices.is_empty()
+        if self.debug_dialog.as_deref() == Some("add-project") && !state.read(cx).devices.is_empty()
         {
             self.debug_dialog = None;
             self.open_add_project(cx);
@@ -753,10 +755,12 @@ impl Shell {
         {
             let (selected_project, selected_chat, chat_project) = {
                 let s = state.read(cx);
-                let chat_project = s
-                    .selected_chat_row()
-                    .and_then(|c| c.project_id.clone());
-                (s.selected_project.clone(), s.selected_chat.clone(), chat_project)
+                let chat_project = s.selected_chat_row().and_then(|c| c.project_id.clone());
+                (
+                    s.selected_project.clone(),
+                    s.selected_chat.clone(),
+                    chat_project,
+                )
             };
             if let (Some(project), Some(chat)) = (chat_project, selected_chat) {
                 self.project_last_chat.insert(project, chat);
@@ -959,6 +963,7 @@ impl Shell {
             return terminal.clone();
         }
         let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), cx));
+        self.watch_terminal_backlinks(&terminal, cx);
         self.bottom_terminal = Some(terminal.clone());
         terminal
     }
@@ -968,8 +973,22 @@ impl Shell {
             return terminal.clone();
         }
         let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), cx));
+        self.watch_terminal_backlinks(&terminal, cx);
         self.right_terminal = Some(terminal.clone());
         terminal
+    }
+
+    /// A feed row's backlink reveals that call in the conversation — the
+    /// mirror of the transcript's deep-link into the dock. The subscription
+    /// lives as long as the shell: panels are built once and kept.
+    fn watch_terminal_backlinks(&mut self, panel: &Entity<TerminalPanel>, cx: &mut Context<Self>) {
+        let transcript = self.transcript.clone();
+        let subscription = cx.subscribe(panel, move |_this: &mut Shell, _, event, cx| {
+            let TerminalPanelEvent::RevealTranscriptTool { tool_id } = event;
+            let tool_id = tool_id.clone();
+            transcript.update(cx, |transcript, cx| transcript.reveal_tool(&tool_id, cx));
+        });
+        self.terminal_backlinks.push(subscription);
     }
 
     fn terminal_target(&self, cx: &App) -> f32 {
@@ -1031,7 +1050,9 @@ impl Shell {
             self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
             self.terminal_tween_task = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor()
-                    .timer(RESIZE.total().mul_f32(motion::speed_scale()) + Duration::from_millis(30))
+                    .timer(
+                        RESIZE.total().mul_f32(motion::speed_scale()) + Duration::from_millis(30),
+                    )
                     .await;
                 this.update(cx, |shell, cx| {
                     shell.terminal_tween = None;
@@ -1835,7 +1856,9 @@ impl Shell {
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
             .bg(motion::hover_blend(&fade_key, rest_bg, hover))
-            .when(selected, |el| el.shadow(crate::theme::glass_selected_shadows()))
+            .when(selected, |el| {
+                el.shadow(crate::theme::glass_selected_shadows())
+            })
             .on_hover(motion::hover_listener(fade_key))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2102,39 +2125,33 @@ impl Shell {
                             .flex()
                             .flex_col()
                             .child(projects_section)
-                    .child(sessions_header)
-                    .child(if !list_items.is_empty() {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .pb(px(Theme::SPACE_SM))
-                            .children(list_items)
-                            .into_any_element()
-                    } else {
-                        div()
-                            .px(px(Theme::SPACE_SM))
-                            .pb(px(Theme::SPACE_SM))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from("No sessions yet"))
-                            .into_any_element()
-                    }),
+                            .child(sessions_header)
+                            .child(if !list_items.is_empty() {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .pb(px(Theme::SPACE_SM))
+                                    .children(list_items)
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .px(px(Theme::SPACE_SM))
+                                    .pb(px(Theme::SPACE_SM))
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from("No sessions yet"))
+                                    .into_any_element()
+                            }),
                     )
                     .when(lists_fade_top && !glass, |el| {
-                        el.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .h(px(24.0))
-                                .bg(gpui::linear_gradient(
-                                    180.0,
-                                    gpui::linear_color_stop(sidebar_fade, 0.0),
-                                    gpui::linear_color_stop(sidebar_fade.opacity(0.0), 1.0),
-                                )),
-                        )
+                        el.child(div().absolute().top_0().left_0().right_0().h(px(24.0)).bg(
+                            gpui::linear_gradient(
+                                180.0,
+                                gpui::linear_color_stop(sidebar_fade, 0.0),
+                                gpui::linear_color_stop(sidebar_fade.opacity(0.0), 1.0),
+                            ),
+                        ))
                     })
                     .when(lists_fade_bottom && !glass, |el| {
                         el.child(
@@ -2187,11 +2204,7 @@ impl Shell {
     /// it drives the whole flow — click to download, then click to restart into
     /// the staged bundle. Elsewhere (managed/source installs) it is advisory
     /// (`comet update`); click dismisses it for that version.
-    fn render_update_strip(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.state.read(cx).update.clone()?;
         if !status.update_available {
             return None;
@@ -2207,9 +2220,7 @@ impl Shell {
                 UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
                 UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
                 UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
-                UpdateFlow::Failed(message) => {
-                    (format!("Update failed: {message}").into(), true)
-                }
+                UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
             }
         } else {
             (
@@ -2225,10 +2236,7 @@ impl Shell {
         let (chip_bg, chip_bg_hover) = if failed {
             (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
         } else {
-            (
-                crate::theme::wash(0.11),
-                crate::theme::wash(0.16),
-            )
+            (crate::theme::wash(0.11), crate::theme::wash(0.16))
         };
 
         let mut strip = div()
@@ -2761,9 +2769,7 @@ impl Shell {
                             popover::btn_primary(&theme_owned, "Create a project")
                                 .id("onboarding-add-project")
                                 .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.open_add_project(cx)
-                                })),
+                                .on_click(cx.listener(|this, _, _, cx| this.open_add_project(cx))),
                         ),
                 ))
                 .into_any_element()
@@ -4028,13 +4034,7 @@ impl Render for Shell {
                     .h_full()
                     .flex_none()
                     .relative()
-                    .child(
-                        sidebar_handle
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left(px(-2.0)),
-                    );
+                    .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
                 let title_bar = self.render_title_bar(cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar,
                 // spanning the FULL window height (under the traffic lights,

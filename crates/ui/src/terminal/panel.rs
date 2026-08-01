@@ -18,14 +18,13 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, IntoElement, KeyBinding, KeyDownEvent,
-    MouseButton, Render, ScrollDelta, SharedString, Subscription, Task, Window, actions, div,
-    prelude::*, px,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, IntoElement, KeyBinding,
+    KeyDownEvent, MouseButton, Render, ScrollDelta, SharedString, Subscription, Task, Window,
+    actions, div, prelude::*, px,
 };
 
 use comet_doc::MessagePart;
-use comet_proto::view::single_line;
-use comet_proto::{Chat, HarnessId, TerminalEvent, TerminalSession, ToolCall, ToolOutputReply};
+use comet_proto::{Chat, HarnessId, TerminalEvent, TerminalSession, ToolOutputReply};
 use comet_rpc::methods;
 
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
@@ -52,15 +51,18 @@ pub const FEED_FLASH_MS: u64 = 1600;
 pub const FEED_OUTPUT_MAX_LINES: usize = 24;
 
 // ---------------------------------------------------------------------------
-// Agent command feed (the "<agent>'s terminal" tab — pure)
+// Agent tool feed (the "<agent>'s terminal" tab — pure)
 // ---------------------------------------------------------------------------
 
-/// One command in the agent feed.
+/// One tool call in the agent feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedEntry {
     /// The `MessagePart::Tool` id — the transcript deep-link anchors on it.
     pub id: String,
-    pub command: String,
+    /// The kind's verb, lowercase — "exec", "read", "edit" …
+    pub kind: &'static str,
+    /// Single-lined command, path, pattern or query.
+    pub detail: String,
     pub status: FeedStatus,
 }
 
@@ -76,38 +78,43 @@ pub enum FeedStatus {
     Unfinished,
 }
 
-/// Every shell command the agent ran, in transcript order — the agent
-/// terminal's scrollback. Commands are single-lined like the chips were (a
-/// literal newline would be a cursor move in this voice too). The full
-/// history stays reachable: the feed scrolls, and transcript deep-links
-/// anchor into it by tool id.
+/// EVERY tool the agent called, in transcript order — the agent terminal's
+/// scrollback is the run's tool history, not just its shell commands: the
+/// transcript summarizes what happened, this is where you go to see it, and
+/// a read whose output you want back is no different from a command's.
+/// Details are single-lined (a literal newline would be a cursor move in
+/// this voice too); transcript deep-links anchor by tool id.
 ///
 /// `live` is the session's staleness-gated indicator (`effective_indicator`
-/// != None): an unresolved command only reads as running while the session
-/// that launched it is actually alive.
-pub fn exec_feed(entries: &[comet_doc::SessionMessageEntry], live: bool) -> Vec<FeedEntry> {
+/// != None): an unresolved call only reads as running while the session that
+/// launched it is actually alive.
+pub fn tool_feed(entries: &[comet_doc::SessionMessageEntry], live: bool) -> Vec<FeedEntry> {
     entries
         .iter()
         .flat_map(|entry| entry.parts.iter())
         .filter_map(|part| match part {
             MessagePart::Tool {
                 id,
-                call: ToolCall::Exec { command },
+                call,
                 is_error,
                 resolved,
-            } => Some(FeedEntry {
-                id: id.clone(),
-                command: single_line(command),
-                status: if *is_error {
-                    FeedStatus::Failed
-                } else if *resolved {
-                    FeedStatus::Ok
-                } else if live {
-                    FeedStatus::Running
-                } else {
-                    FeedStatus::Unfinished
-                },
-            }),
+            } => {
+                let (label, detail) = comet_proto::view::tool_chip_content(call);
+                Some(FeedEntry {
+                    id: id.clone(),
+                    kind: crate::transcript::lower_label(label),
+                    detail,
+                    status: if *is_error {
+                        FeedStatus::Failed
+                    } else if *resolved {
+                        FeedStatus::Ok
+                    } else if live {
+                        FeedStatus::Running
+                    } else {
+                        FeedStatus::Unfinished
+                    },
+                })
+            }
             _ => None,
         })
         .collect()
@@ -453,6 +460,15 @@ impl Render for TabGhost {
     }
 }
 
+/// Events the shell listens for.
+#[derive(Debug, Clone)]
+pub enum TerminalPanelEvent {
+    /// A feed row's backlink was clicked: scroll the transcript to where this
+    /// `MessagePart::Tool` id was called. The reverse of the transcript's own
+    /// deep-link — the two views are one history seen from either end.
+    RevealTranscriptTool { tool_id: String },
+}
+
 pub struct TerminalPanel {
     state: Entity<AppState>,
     focus_handle: FocusHandle,
@@ -474,6 +490,8 @@ pub struct TerminalPanel {
     last_tail_fp: (usize, usize),
     _observe: Subscription,
 }
+
+impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
 
 impl TerminalPanel {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -549,12 +567,7 @@ impl TerminalPanel {
     /// "Session working directory is unavailable" (user report).
     fn chat_target(&self, chat: &str, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let device = state
-            .chats
-            .iter()
-            .find(|c| c.id == chat)?
-            .device_id
-            .clone();
+        let device = state.chats.iter().find(|c| c.id == chat)?.device_id.clone();
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
@@ -616,13 +629,11 @@ impl TerminalPanel {
         let Some(chat) = self.state.read(cx).selected_chat.clone() else {
             return false;
         };
-        self.chats
-            .get(&chat)
-            .is_some_and(|tabs| {
-                tabs.tabs
-                    .get(tabs.active)
-                    .is_some_and(|t| t.kind == TabKind::Agent)
-            })
+        self.chats.get(&chat).is_some_and(|tabs| {
+            tabs.tabs
+                .get(tabs.active)
+                .is_some_and(|t| t.kind == TabKind::Agent)
+        })
     }
 
     fn tab_mut(&mut self, chat: &str, key: u64) -> Option<&mut TerminalTab> {
@@ -1094,7 +1105,7 @@ impl TerminalPanel {
     fn toggle_feed_row(&mut self, chat: &str, tool_id: &str, cx: &mut Context<Self>) {
         let is_last = {
             let state = self.state.read(cx);
-            exec_feed(&state.transcript, true)
+            tool_feed(&state.transcript, true)
                 .last()
                 .is_some_and(|entry| entry.id == tool_id)
         };
@@ -1117,13 +1128,20 @@ impl TerminalPanel {
     /// Kick a `ToolOutput` call for an expanded, resolved, uncached row.
     /// Host-local lookup: the answer comes from the chat host's run journal
     /// (`target` routes there), never from the synced doc.
-    fn ensure_feed_fetch(&mut self, chat: &str, tool_id: &str, status: FeedStatus, cx: &mut Context<Self>) {
+    fn ensure_feed_fetch(
+        &mut self,
+        chat: &str,
+        tool_id: &str,
+        status: FeedStatus,
+        cx: &mut Context<Self>,
+    ) {
         if status == FeedStatus::Running {
             return;
         }
         let needs_fetch = {
             let entry = self.chats.entry(chat.to_owned()).or_default();
-            !entry.feed_outputs.contains_key(tool_id) && entry.feed_pending.insert(tool_id.to_owned())
+            !entry.feed_outputs.contains_key(tool_id)
+                && entry.feed_pending.insert(tool_id.to_owned())
         };
         if !needs_fetch {
             return;
@@ -1131,7 +1149,9 @@ impl TerminalPanel {
         let Some(engine) = self.engine(cx) else {
             if let Some(entry) = self.chats.get_mut(chat) {
                 entry.feed_pending.remove(tool_id);
-                entry.feed_outputs.insert(tool_id.to_owned(), FeedOutput::Unavailable);
+                entry
+                    .feed_outputs
+                    .insert(tool_id.to_owned(), FeedOutput::Unavailable);
             }
             return;
         };
@@ -1253,14 +1273,18 @@ impl TerminalPanel {
     /// (mono, `$` prompts, the running one spinning), scrollable through the
     /// full history. Deep-link anchors scroll to the group's first command;
     /// its rows flash briefly.
-    fn render_agent_feed(&mut self, chat: &str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_agent_feed(
+        &mut self,
+        chat: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let feed = {
             let state = self.state.read(cx);
-            let live = comet_proto::view::effective_indicator(
-                state.session_for(chat),
-                chrono::Utc::now(),
-            ) != comet_proto::view::Indicator::None;
-            exec_feed(&state.transcript, live)
+            let live =
+                comet_proto::view::effective_indicator(state.session_for(chat), chrono::Utc::now())
+                    != comet_proto::view::Indicator::None;
+            tool_feed(&state.transcript, live)
         };
 
         // Scroll target for this frame: a pending deep-link anchor wins, else
@@ -1333,14 +1357,13 @@ impl TerminalPanel {
                 .justify_center()
                 .text_size(px(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("no commands yet"))
+                .child(SharedString::from("no tool calls yet"))
                 .into_any_element();
         }
 
         // Owned snapshot: a `&str` set would borrow self across the mutable
         // fetch kicks below.
-        let flash: std::collections::HashSet<String> =
-            self.flash_ids.iter().cloned().collect();
+        let flash: std::collections::HashSet<String> = self.flash_ids.iter().cloned().collect();
         // Fetch kick for expanded, resolved, uncached rows — render-driven so
         // a row expanded mid-run fetches on the frame its command resolves
         // (the doc flip re-renders us; `feed_pending` kills the refire).
@@ -1399,17 +1422,61 @@ impl TerminalPanel {
                         (None, _) => FeedExpansion::Loading,
                     }
                 };
-                let row = feed_row(entry, flash.contains(entry.id.as_str()), &expansion, theme);
                 let tool_id = entry.id.clone();
+                let back_id = entry.id.clone();
                 let chat_for_click = chat_owned.clone();
-                row.id(SharedString::from(format!("feed-row-{}", entry.id)))
+                // The backlink: jump to where this call happened in the
+                // conversation. Hover-only — the row's own click is the
+                // output toggle, and a permanent second target on every row
+                // would make the feed twitchy to read.
+                let group: SharedString = format!("feed-row-group-{}", entry.id).into();
+                let backlink = div()
+                    .id(SharedString::from(format!("feed-back-{}", entry.id)))
+                    .flex_none()
+                    .size(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |el| el.opacity(1.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(crate::theme::white_alpha(0.08)))
+                    .tooltip(|_window, cx| {
+                        cx.new(|_| crate::transcript::RunTooltip {
+                            lines: vec!["Show in conversation".into()],
+                            mono: false,
+                        })
+                        .into()
+                    })
+                    .on_click(
+                        cx.listener(move |_this, _: &gpui::ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            cx.emit(TerminalPanelEvent::RevealTranscriptTool {
+                                tool_id: back_id.clone(),
+                            });
+                        }),
+                    )
+                    .child(
+                        crate::icons::icon(crate::icons::ARROW_UP)
+                            .size(px(11.0))
+                            .text_color(theme.text_faint),
+                    )
+                    .into_any_element();
+                let row = feed_row(
+                    entry,
+                    flash.contains(entry.id.as_str()),
+                    &expansion,
+                    backlink,
+                    theme,
+                );
+                row.group(group)
+                    .id(SharedString::from(format!("feed-row-{}", entry.id)))
                     .cursor_pointer()
                     .hover(|el| el.bg(crate::theme::white_alpha(0.03)))
-                    .on_click(cx.listener(
-                        move |this, _: &gpui::ClickEvent, _window, cx| {
-                            this.toggle_feed_row(&chat_for_click, &tool_id, cx);
-                        },
-                    ))
+                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _window, cx| {
+                        this.toggle_feed_row(&chat_for_click, &tool_id, cx);
+                    }))
             }))
             .into_any_element()
     }
@@ -1433,11 +1500,10 @@ impl TerminalPanel {
             .and_then(|c| c.config.as_ref())
             .map(|config| config.harness)
             .unwrap_or(HarnessId::Pi);
-        let session_live = comet_proto::view::effective_indicator(
-            state.session_for(chat),
-            chrono::Utc::now(),
-        ) != comet_proto::view::Indicator::None;
-        let agent_running = exec_feed(&state.transcript, session_live)
+        let session_live =
+            comet_proto::view::effective_indicator(state.session_for(chat), chrono::Utc::now())
+                != comet_proto::view::Indicator::None;
+        let agent_running = tool_feed(&state.transcript, session_live)
             .iter()
             .any(|e| e.status == FeedStatus::Running);
 
@@ -1523,7 +1589,11 @@ impl TerminalPanel {
                         let (text_color, bg, glyph_alpha) = if selected {
                             (theme.text, crate::theme::white_alpha(0.08), 0.8)
                         } else {
-                            (theme.text_muted.opacity(0.6), gpui::transparent_black(), 0.6)
+                            (
+                                theme.text_muted.opacity(0.6),
+                                gpui::transparent_black(),
+                                0.6,
+                            )
                         };
                         let close_btn = div()
                             .id(("terminal-tab-close", key))
@@ -1562,7 +1632,8 @@ impl TerminalPanel {
                                     ))
                                     .into_any_element()
                             } else {
-                                let (path, tint) = crate::pickers::harness_brand_icon(agent_harness);
+                                let (path, tint) =
+                                    crate::pickers::harness_brand_icon(agent_harness);
                                 crate::icons::icon(path)
                                     .size(px(16.0))
                                     .text_color(tint.unwrap_or(text_color.opacity(glyph_alpha)))
@@ -1716,12 +1787,19 @@ enum StreamDisposition {
     Stop,
 }
 
-/// One feed row: a command line in the agent's terminal voice — a status
-/// glyph (spinner while running, `✗` on failure, `$` otherwise) and the
-/// single-lined command, with a chevron marking it expandable. Deep-linked
-/// rows flash a wash. Expanded rows gain an output block under the command
-/// (variable height — the deep-link anchor still lands, gpui measures).
-fn feed_row(entry: &FeedEntry, flashing: bool, expansion: &FeedExpansion, theme: &Theme) -> gpui::Div {
+/// One feed row in the agent's terminal voice: a status glyph (spinner while
+/// running, `✗` on failure, `$` otherwise), the tool's verb, its single-lined
+/// detail, a hover-revealed `backlink` to where the call happened in the
+/// conversation, and a chevron marking the row expandable. Deep-linked rows
+/// flash a wash. Expanded rows gain an output block underneath (variable
+/// height — the deep-link anchor still lands, gpui measures).
+fn feed_row(
+    entry: &FeedEntry,
+    flashing: bool,
+    expansion: &FeedExpansion,
+    backlink: AnyElement,
+    theme: &Theme,
+) -> gpui::Div {
     let glyph: AnyElement = match entry.status {
         FeedStatus::Running => div()
             .size(px(16.0))
@@ -1745,7 +1823,8 @@ fn feed_row(entry: &FeedEntry, flashing: bool, expansion: &FeedExpansion, theme:
             .child(SharedString::from("✗"))
             .into_any_element(),
         // Finished rows — resolved or dead — read as settled history. A
-        // command whose session died mid-run never spins forever.
+        // call whose session died mid-run never spins forever. The prompt
+        // glyph belongs to the shell; everything else gets a quiet tick.
         FeedStatus::Ok | FeedStatus::Unfinished => div()
             .size(px(16.0))
             .flex_none()
@@ -1754,7 +1833,11 @@ fn feed_row(entry: &FeedEntry, flashing: bool, expansion: &FeedExpansion, theme:
             .justify_center()
             .text_size(px(12.0))
             .text_color(theme.text_faint)
-            .child(SharedString::from("$"))
+            .child(SharedString::from(if entry.kind == "exec" {
+                "$"
+            } else {
+                "·"
+            }))
             .into_any_element(),
     };
     let text_color = match entry.status {
@@ -1773,6 +1856,16 @@ fn feed_row(entry: &FeedEntry, flashing: bool, expansion: &FeedExpansion, theme:
         .when(flashing, |el| el.bg(crate::theme::white_alpha(0.06)))
         .child(glyph)
         .child(
+            // The verb, dimmer than what it acted on: the feed is scanned
+            // down the detail column, the kind is just how to read the row.
+            div()
+                .flex_none()
+                .font_family(theme.font_mono.clone())
+                .text_size(px(12.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(entry.kind)),
+        )
+        .child(
             div()
                 .flex_1()
                 .min_w_0()
@@ -1780,8 +1873,9 @@ fn feed_row(entry: &FeedEntry, flashing: bool, expansion: &FeedExpansion, theme:
                 .font_family(theme.font_mono.clone())
                 .text_size(px(12.0))
                 .text_color(text_color)
-                .child(SharedString::from(entry.command.clone())),
+                .child(SharedString::from(entry.detail.clone())),
         )
+        .child(backlink)
         .child(
             div()
                 .flex_none()
@@ -1910,6 +2004,7 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comet_proto::ToolCall;
 
     #[test]
     fn output_display_lines_tail_caps_with_markers() {
@@ -1953,39 +2048,52 @@ mod tests {
     }
 
     #[test]
-    fn exec_feed_extracts_commands_in_transcript_order() {
+    fn tool_feed_takes_every_call_in_transcript_order() {
         let mut text_entry = exec_entry("m0", "ignored", false, true);
         text_entry.parts = vec![MessagePart::Text {
             id: "t".into(),
             text: "prose".into(),
+        }];
+        let mut read_entry = exec_entry("m4", "ignored", false, true);
+        read_entry.parts = vec![MessagePart::Tool {
+            id: "tool-m4".into(),
+            call: ToolCall::ReadFile {
+                path: "crates/ui/src/transcript.rs".into(),
+            },
+            is_error: false,
+            resolved: true,
         }];
         let entries = vec![
             text_entry,
             exec_entry("m1", "ls -la", false, true),
             exec_entry("m2", "cargo test\n--quiet", false, false),
             exec_entry("m3", "false", true, true),
+            read_entry,
         ];
-        let feed = exec_feed(&entries, true);
-        assert_eq!(feed.len(), 3, "non-exec parts never enter the feed");
-        assert_eq!(feed[0].command, "ls -la");
+        let feed = tool_feed(&entries, true);
+        // The feed is the run's tool history: every call, shell or not; only
+        // non-tool parts (prose) stay out.
+        assert_eq!(feed.len(), 4);
+        assert_eq!((feed[0].kind, feed[0].detail.as_str()), ("exec", "ls -la"));
         assert_eq!(feed[0].status, FeedStatus::Ok);
         // Multi-line commands collapse to one terminal line.
-        assert_eq!(feed[1].command, "cargo test --quiet");
+        assert_eq!(feed[1].detail, "cargo test --quiet");
         assert_eq!(feed[1].status, FeedStatus::Running);
         assert_eq!(feed[2].status, FeedStatus::Failed);
+        assert_eq!(
+            (feed[3].kind, feed[3].detail.as_str()),
+            ("read", "crates/ui/src/transcript.rs")
+        );
         // Deep-link ids are the tool part ids.
         assert_eq!(feed[1].id, "tool-m2");
     }
 
     #[test]
-    fn exec_feed_unresolved_in_a_dead_session_is_not_running() {
+    fn tool_feed_unresolved_in_a_dead_session_is_not_running() {
         let entries = vec![exec_entry("m1", "sleep 99", false, false)];
-        assert_eq!(exec_feed(&entries, true)[0].status, FeedStatus::Running);
+        assert_eq!(tool_feed(&entries, true)[0].status, FeedStatus::Running);
         // A crashed session must never leave an eternal spinner.
-        assert_eq!(
-            exec_feed(&entries, false)[0].status,
-            FeedStatus::Unfinished
-        );
+        assert_eq!(tool_feed(&entries, false)[0].status, FeedStatus::Unfinished);
     }
 
     #[test]
@@ -2020,17 +2128,35 @@ mod tests {
 
     #[test]
     fn feed_row_expansion_auto_tail_with_manual_overrides() {
-        let pinned =
-            |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<HashSet<String>>();
+        let pinned = |ids: &[&str]| {
+            ids.iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<String>>()
+        };
         // The latest row auto-expands; older rows auto-collapse.
         assert!(is_feed_row_expanded(None, None, "c", true));
         assert!(!is_feed_row_expanded(None, None, "a", false));
         // A pinned older row stays expanded.
-        assert!(is_feed_row_expanded(Some(&pinned(&["a"])), None, "a", false));
+        assert!(is_feed_row_expanded(
+            Some(&pinned(&["a"])),
+            None,
+            "a",
+            false
+        ));
         // A dismissed latest row stays collapsed.
-        assert!(!is_feed_row_expanded(None, Some(&pinned(&["c"])), "c", true));
+        assert!(!is_feed_row_expanded(
+            None,
+            Some(&pinned(&["c"])),
+            "c",
+            true
+        ));
         // A dismissal on an older row is a no-op; a pin on the latest is a no-op.
-        assert!(!is_feed_row_expanded(None, Some(&pinned(&["a"])), "a", false));
+        assert!(!is_feed_row_expanded(
+            None,
+            Some(&pinned(&["a"])),
+            "a",
+            false
+        ));
         assert!(is_feed_row_expanded(Some(&pinned(&["c"])), None, "c", true));
     }
 
@@ -2046,7 +2172,10 @@ mod tests {
         };
         // Model wins, provider prefix stripped.
         assert_eq!(
-            agent_tab_name(Some(&config(HarnessId::Pi, Some("anthropic/claude-opus-4.5")))),
+            agent_tab_name(Some(&config(
+                HarnessId::Pi,
+                Some("anthropic/claude-opus-4.5")
+            ))),
             "claude-opus-4.5"
         );
         assert_eq!(
@@ -2063,7 +2192,10 @@ mod tests {
 
     #[test]
     fn short_model_name_strips_provider_prefix() {
-        assert_eq!(short_model_name("anthropic/claude-opus-4.5"), "claude-opus-4.5");
+        assert_eq!(
+            short_model_name("anthropic/claude-opus-4.5"),
+            "claude-opus-4.5"
+        );
         assert_eq!(short_model_name("gpt-5.1"), "gpt-5.1");
         assert_eq!(short_model_name(""), "");
     }
@@ -2071,7 +2203,10 @@ mod tests {
     #[test]
     fn pty_numbering_skips_the_pinned_agent_tab() {
         assert_eq!(next_pty_number([TabKind::Agent].into_iter()), 1);
-        assert_eq!(next_pty_number([TabKind::Agent, TabKind::Pty].into_iter()), 2);
+        assert_eq!(
+            next_pty_number([TabKind::Agent, TabKind::Pty].into_iter()),
+            2
+        );
         assert_eq!(next_pty_number([].into_iter()), 1);
     }
 

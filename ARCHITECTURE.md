@@ -202,8 +202,9 @@ feature spec `docs/research/feature-inventory.md` §1.
 - **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
   engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height
   drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
-  Each chat also gets an **agent terminal**: a read-only command feed (the turn's `exec` tool
-  calls in arrival order — `$ command` per row, spinner while running, ✕ on failure) pinned as
+  Each chat also gets an **agent terminal**: a read-only feed of EVERY tool the run called,
+  in arrival order — `<verb> <detail>` per row (`$` prompt glyph for shell rows, a quiet `·`
+  otherwise, spinner while running, ✕ on failure) — the run's tool history, pinned as
   the leftmost tab, titled "<model>'s terminal". In the transcript a run of consecutive tool
   calls is ONE collapsed summary line — a glyph, "Ran cargo, git · edited 2 files · read 3
   files" (program names parsed out of the shell strings — chains split on unquoted
@@ -216,16 +217,19 @@ feature spec `docs/research/feature-inventory.md` §1.
   the agent is doing right now. Nothing in a group paints brighter than the summary and
   failures never recolor a row — they say "· N failed" in words. The full detail list of a
   consolidated line rides a hover tooltip (the app's first tooltip — gpui gives a builder
-  hook, no card). Clicking a command line opens the dock, focuses the agent tab,
-  scrolls to that command, and flashes it. The feed follows its tail
-  xterm-style: while the scroll
+  hook, no card). Clicking any tool line opens the dock, focuses the agent tab,
+  scrolls to that call, and flashes it; each feed row carries the mirror of that link — a
+  hover-revealed ↑ that scrolls the transcript back to the group that made the call, opens
+  it, and flashes it. The two views are one history seen from either end. The feed follows
+  its tail xterm-style: while the scroll
   offset is pinned to the bottom, any change to the `(feed_len, tail_expansion_lines)`
-  fingerprint one-shot `scroll_to_bottom`s the latest command into view; scrolling back
-  disengages the follow (new commands never yank), scrolling to the bottom re-engages it,
+  fingerprint one-shot `scroll_to_bottom`s the latest call into view; scrolling back
+  disengages the follow (new calls never yank), scrolling to the bottom re-engages it,
   deep-link anchors always land. The latest row auto-expands (older ones auto-collapse as the tail moves); a manual click pins a
   row open or dismisses even the latest row, and pins survive the tail moving past. Output
-  under an expanded row is fetched live from the host's run journal via `ToolOutput`,
-  tail-24-lines shown. The sidebar session row shows the latest command as a `$ cmd` line
+  under an expanded row is fetched live from the host's run journal via `ToolOutput`
+  (kind-agnostic — a read's result is as fetchable as a command's), tail-24-lines shown.
+  The sidebar session row shows the latest shell command as a `$ cmd` line
   (host-stamped `lastCommand` on the workspace chat row, single-lined 120-char cap; the
   row's Working rail is what marks it as still running).
 - **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse

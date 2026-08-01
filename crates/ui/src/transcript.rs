@@ -81,6 +81,9 @@ const TOOL_DETAIL_SIZE: f32 = 12.5;
 /// line's a small hang inside it.
 const TOOL_ICON_SIZE: f32 = 13.0;
 const TOOL_ROW_PAD: f32 = 9.0;
+/// How long a group flashes after the agent terminal's backlink lands on it
+/// (the feed's own deep-link flash, seen from the other end).
+const REVEAL_FLASH_MS: u64 = 1600;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a FIXED-height strip (load-state flips never shift the virtualizer).
 pub const ATT_THUMB_W: f32 = 112.0;
@@ -762,6 +765,17 @@ pub fn group_summary(tools: &[ToolItem]) -> String {
     comet_proto::view::tool_group_summary(&pairs)
 }
 
+/// The row index of the group that called `tool_id` — where the agent
+/// terminal's backlink lands. Tool ids are unique per part, so the first
+/// match is the only one; a call from another chat (the dock outlives a
+/// chat switch) is simply absent.
+pub fn group_row_for_tool(rows: &[Row], tool_id: &str) -> Option<usize> {
+    rows.iter().position(|row| match &row.kind {
+        RowKind::ToolGroup { tools } => tools.iter().any(|t| t.id.as_ref() == tool_id),
+        _ => false,
+    })
+}
+
 // `single_line` and the per-kind chip label/detail are shared with the terminal
 // viewport (`comet_proto::view`): a tool must be named identically on every
 // surface, and the one-line collapse is needed for the same reason in both (a
@@ -961,6 +975,11 @@ pub struct Transcript {
     /// running) shows more. Keyed by row id, which is stable while the group
     /// streams, so an expansion survives the group growing.
     expanded_groups: std::collections::HashSet<SharedString>,
+    /// A group revealed from the agent terminal's backlink: it wears a wash
+    /// for [`REVEAL_FLASH_MS`] so the jump lands somewhere visible instead of
+    /// dropping you in the middle of a wall of text.
+    revealed_group: Option<SharedString>,
+    revealed_clear: Option<Task<()>>,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
     /// tick) — restick and escape are direction-aware
@@ -1033,6 +1052,8 @@ impl Transcript {
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             highlights: HighlightStore::default(),
             expanded_groups: std::collections::HashSet::new(),
+            revealed_group: None,
+            revealed_clear: None,
             show_jump_button: false,
             last_scroll_distance: 0.0,
             pinned: true,
@@ -1908,59 +1929,66 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let expanded = self.expanded_groups.contains(row_id);
+        let revealed = self.revealed_group.as_ref() == Some(row_id);
         let toggle_id = row_id.clone();
-        let mut column = div().flex().flex_col().child(
-            div()
-                .id(SharedString::from(format!("{row_id}-summary")))
-                .h(px(TOOL_LINE_HEIGHT))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(5.0))
-                .cursor_pointer()
-                // No indent and no tint, ever: the summary is a sentence
-                // in the reply's own column, just a quieter one. The
-                // chevron trails the text so nothing pushes it right.
-                .text_size(px(TOOL_SUMMARY_SIZE))
-                .text_color(theme.text_faint)
-                .hover(|s| s.text_color(theme.text_muted))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_group(&toggle_id, cx);
-                }))
-                .child(
-                    // The group's own mark, at the reply's left edge:
-                    // sliders, because a run is the agent adjusting
-                    // things rather than saying them.
-                    div()
-                        .flex_none()
-                        .size(px(TOOL_ICON_SIZE))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(crate::icons::TUNING)
-                                .size(px(TOOL_ICON_SIZE))
-                                .text_color(theme.text_faint),
-                        ),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(group_summary(tools))),
-                )
-                .child(
-                    // gpui paints an svg with its OWN color — it does not
-                    // inherit the row's, so the chevron says it here.
-                    crate::icons::icon(if expanded {
-                        crate::icons::ALT_ARROW_DOWN
-                    } else {
-                        crate::icons::ALT_ARROW_RIGHT
-                    })
-                    .size(px(9.0))
-                    .text_color(theme.text_faint),
-                ),
-        );
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .rounded(px(6.0))
+            // Backlink landing wash — paint only, the row never moves.
+            .when(revealed, |el| el.bg(crate::theme::white_alpha(0.05)))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{row_id}-summary")))
+                    .h(px(TOOL_LINE_HEIGHT))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_pointer()
+                    // No indent and no tint, ever: the summary is a sentence
+                    // in the reply's own column, just a quieter one. The
+                    // chevron trails the text so nothing pushes it right.
+                    .text_size(px(TOOL_SUMMARY_SIZE))
+                    .text_color(theme.text_faint)
+                    .hover(|s| s.text_color(theme.text_muted))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_group(&toggle_id, cx);
+                    }))
+                    .child(
+                        // The group's own mark, at the reply's left edge:
+                        // sliders, because a run is the agent adjusting
+                        // things rather than saying them.
+                        div()
+                            .flex_none()
+                            .size(px(TOOL_ICON_SIZE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                crate::icons::icon(crate::icons::TUNING)
+                                    .size(px(TOOL_ICON_SIZE))
+                                    .text_color(theme.text_faint),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(group_summary(tools))),
+                    )
+                    .child(
+                        // gpui paints an svg with its OWN color — it does not
+                        // inherit the row's, so the chevron says it here.
+                        crate::icons::icon(if expanded {
+                            crate::icons::ALT_ARROW_DOWN
+                        } else {
+                            crate::icons::ALT_ARROW_RIGHT
+                        })
+                        .size(px(9.0))
+                        .text_color(theme.text_faint),
+                    ),
+            );
         let running_id = latest_running(tools).map(|t| t.id.clone());
         if expanded {
             let runs = consolidate_runs(tools);
@@ -2023,6 +2051,33 @@ impl Transcript {
         if let Some(ix) = self.rows.iter().position(|r| &r.id == row_id) {
             self.list.splice(ix..ix + 1, 1);
         }
+        cx.notify();
+    }
+
+    /// The agent terminal's backlink: scroll to the group that called
+    /// `tool_id`, open it (the summary alone would not show the call you
+    /// clicked), and flash it. No-op when the call is not in this chat's
+    /// transcript — the dock outlives a chat switch, its rows do not.
+    pub fn reveal_tool(&mut self, tool_id: &str, cx: &mut Context<Self>) {
+        let Some(ix) = group_row_for_tool(&self.rows, tool_id) else {
+            return;
+        };
+        let row_id = self.rows[ix].id.clone();
+        if self.expanded_groups.insert(row_id.clone()) {
+            // Height changed — the list caches measurements per row.
+            self.list.splice(ix..ix + 1, 1);
+        }
+        self.revealed_group = Some(row_id);
+        self.revealed_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(REVEAL_FLASH_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.revealed_group = None;
+                cx.notify();
+            });
+        }));
+        self.scroll_to_row(ix, cx);
         cx.notify();
     }
 }
@@ -2151,13 +2206,14 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
         .into_any_element()
 }
 
-/// A hover tooltip listing a consolidated run's full detail lines — the
-/// app's first tooltip (gpui gives a builder hook, no card). Consolidation
-/// truncates to one line; the full list rides here so nothing is hidden.
-struct RunTooltip {
-    lines: Vec<String>,
-    /// Exec commands read better in the mono face; paths stay sans.
-    mono: bool,
+/// A hover tooltip card — the app's only one (gpui gives a builder hook, no
+/// card of its own). It lists a consolidated run's full detail lines, since
+/// consolidation truncates to one; the agent terminal borrows it for plain
+/// one-line hints.
+pub(crate) struct RunTooltip {
+    pub(crate) lines: Vec<String>,
+    /// Exec commands read better in the mono face; paths and prose stay sans.
+    pub(crate) mono: bool,
 }
 
 impl Render for RunTooltip {
@@ -2992,6 +3048,27 @@ mod tests {
             panic!("group expected")
         };
         assert_eq!(tools[0].id.as_ref(), "call-42");
+    }
+
+    #[test]
+    fn backlink_finds_the_group_that_owns_a_tool_id() {
+        let entry = assistant(
+            "m9",
+            MessageStatus::Complete,
+            vec![
+                text_part("t0", "before"),
+                tool_part("call-1", "ls"),
+                text_part("t1", "between"),
+                tool_part("call-2", "cargo test"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        // Rows: t0.0, g0(call-1), t1.0, g1(call-2) — each backlink lands on
+        // ITS group, not the first one.
+        assert_eq!(group_row_for_tool(&rows, "call-1"), Some(1));
+        assert_eq!(group_row_for_tool(&rows, "call-2"), Some(3));
+        // A call from another chat's feed is simply absent — no jump.
+        assert_eq!(group_row_for_tool(&rows, "call-99"), None);
     }
 
     #[test]
