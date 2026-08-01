@@ -207,9 +207,11 @@ feature spec `docs/research/feature-inventory.md` §1.
   the leftmost tab, titled "<model>'s terminal". Consecutive exec calls collapse in the
   transcript to a single "ran N command(s)" row; clicking it opens the dock, focuses the agent
   tab, scrolls to the first command of that turn, and flashes it (non-exec tool calls break the
-  group and keep their regular chips). The feed follows its tail: any change to the
-  `(feed_len, tail_expansion_lines)` fingerprint scrolls the latest command into view. The
-  latest row auto-expands (older ones auto-collapse as the tail moves); a manual click pins a
+  group and keep their regular chips). The feed follows its tail xterm-style: while the scroll
+  offset is pinned to the bottom, any change to the `(feed_len, tail_expansion_lines)`
+  fingerprint one-shot `scroll_to_bottom`s the latest command into view; scrolling back
+  disengages the follow (new commands never yank), scrolling to the bottom re-engages it,
+  deep-link anchors always land. The latest row auto-expands (older ones auto-collapse as the tail moves); a manual click pins a
   row open or dismisses even the latest row, and pins survive the tail moving past. Output
   under an expanded row is fetched live from the host's run journal via `ToolOutput`,
   tail-24-lines shown. The sidebar session row shows the latest command as a `$ cmd` line

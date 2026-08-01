@@ -130,6 +130,19 @@ pub fn follow_target(
     (prev != cur && cur.0 > 0).then(|| cur.0 - 1)
 }
 
+/// How close to the tail the scroll offset must sit for follow-bottom to
+/// yank (gpui offsets are negative going down; `max_offset` is the positive
+/// clamp, so at the tail `offset == -max_offset`).
+const FEED_FOLLOW_EPSILON: f32 = 2.0;
+
+/// Whether the feed is currently pinned to its tail — the xterm gate: a tail
+/// fingerprint change only yanks while this holds, so the user can scroll
+/// back through history during a live session without the next command
+/// dragging them down. Scrolling back to the bottom re-engages following.
+pub fn feed_at_bottom(offset_y: f32, max_offset_y: f32) -> bool {
+    max_offset_y + offset_y <= FEED_FOLLOW_EPSILON
+}
+
 /// Effective expansion for a feed row: the LATEST command auto-expands
 /// (older ones collapse as the tail moves) — a manual pin keeps a row open
 /// regardless, a manual dismissal keeps even the latest row shut.
@@ -449,8 +462,8 @@ pub struct TerminalPanel {
     tab_seq: u64,
     drag: Option<DragState>,
     last_selected: Option<String>,
-    /// Agent-feed scroll; one handle reused across chats (offset heals via
-    /// the follow-bottom rule on the first frame after a switch).
+    /// Agent-feed scroll; reset on chat switch so the new chat's first frame
+    /// follows to its tail (offset/max start zeroed = "at bottom").
     feed_scroll: gpui::ScrollHandle,
     /// Deep-link anchor: the tool id to scroll into view (consumed on render).
     pending_anchor: Option<String>,
@@ -501,11 +514,14 @@ impl TerminalPanel {
         if switched {
             self.last_selected = selected;
             self.drag = None;
-            // The feed belongs to the old chat: re-baseline so the first
-            // frame of the new chat follows to its tail, and drop any
+            // The feed belongs to the old chat: a fresh scroll handle (the
+            // carried offset would otherwise read "not at bottom" and the
+            // at-bottom gate would lock the new chat's follow), a re-baselined
+            // fingerprint so the first frame follows to the tail, and no
             // deep-link state aimed at rows that are no longer shown.
             self.pending_anchor = None;
             self.flash_ids.clear();
+            self.feed_scroll = gpui::ScrollHandle::new();
             self.last_tail_fp = (0, 0);
         }
         if self.open {
@@ -1293,7 +1309,19 @@ impl TerminalPanel {
             (feed.len(), tail_lines)
         };
         if let Some(ix) = follow_target(self.last_tail_fp, cur_fp, anchor_ix) {
-            self.feed_scroll.scroll_to_item(ix);
+            if anchor_ix.is_some() {
+                // Deep links always land, wherever the user scrolled.
+                self.feed_scroll.scroll_to_item(ix);
+            } else if feed_at_bottom(
+                self.feed_scroll.offset().y.into(),
+                self.feed_scroll.max_offset().y.into(),
+            ) {
+                // Tail-follow only while pinned to the tail — one-shot
+                // `scroll_to_bottom` (consumed at paint, includes the tail
+                // row's expansion); `scroll_to_item` would re-apply every
+                // prepaint until resolvable and fight the user's wheel.
+                self.feed_scroll.scroll_to_bottom();
+            }
         }
         self.last_tail_fp = cur_fp;
 
@@ -1332,8 +1360,11 @@ impl TerminalPanel {
         let chat_owned = chat.to_owned();
         div()
             .id("agent-feed-scroll")
-            .flex_1()
-            .min_h_0()
+            // The scroller takes the (definite) body height — `flex_1` here
+            // would grow it to content instead, overflowing its parent and
+            // leaving max_offset at 0 (no scrollable range). Same pattern as
+            // the sidebar scroller in shell.rs.
+            .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.feed_scroll)
             .p(px(super::view::TERM_PADDING))
@@ -1972,6 +2003,19 @@ mod tests {
         // A fully unchanged fingerprint never scrolls.
         assert_eq!(follow_target((5, 3), (5, 3), None), None);
         assert_eq!(follow_target((0, 0), (0, 0), None), None);
+    }
+
+    #[test]
+    fn feed_follow_gates_on_at_bottom() {
+        // Pinned to the tail (offset == -max): follow engages.
+        assert!(feed_at_bottom(-480.0, 480.0));
+        // Sub-pixel landing tolerance still counts.
+        assert!(feed_at_bottom(-478.5, 480.0));
+        // Scrolled back even a line: follow disengages.
+        assert!(!feed_at_bottom(-460.0, 480.0));
+        // Fresh handle / content that fits (max 0, offset 0): follow engages
+        // so a chat switch's first frame and short feeds still tail.
+        assert!(feed_at_bottom(0.0, 0.0));
     }
 
     #[test]
