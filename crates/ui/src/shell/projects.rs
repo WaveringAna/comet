@@ -160,6 +160,24 @@ impl Shell {
         cx.notify();
     }
 
+    /// Open a fresh session canvas in a project. The chat is materialized when
+    /// the user sends its first prompt, so clicking a sidebar affordance never
+    /// leaves behind empty sessions.
+    pub(super) fn open_new_session(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        let project_id = project_id.or_else(|| self.state.read(cx).selected_project.clone());
+        let Some(project_id) = project_id else {
+            // A session needs a project; keep the empty-state path useful.
+            self.open_add_project(cx);
+            return;
+        };
+        self.route = Route::Chat;
+        self.state.update(cx, |s, cx| {
+            s.select_project(Some(project_id), cx);
+            s.select_chat(None, cx);
+        });
+        cx.notify();
+    }
+
     /// Create the first session for a folder and land on it. The pi child is
     /// spawned when the user sends the first prompt; creating the chat here
     /// makes folder selection feel like one onboarding action instead of two.
@@ -473,8 +491,11 @@ impl Shell {
         };
         let select_id = id.clone();
         let menu_id = id.clone();
+        let new_session_id = id.clone();
+        let group = SharedString::from(format!("project-row-group-{id}"));
         div()
             .id(SharedString::from(format!("project-{id}")))
+            .group(group.clone())
             .flex()
             .flex_row()
             .items_center()
@@ -528,12 +549,36 @@ impl Shell {
             )
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_size(px(13.0))
                     .line_height(px(17.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .child(name),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("new-session-project-{id}")))
+                    .size(px(20.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .cursor_pointer()
+                    .opacity(0.0)
+                    .group_hover(group, |el| el.opacity(1.0))
+                    .hover(|el| el.bg(crate::theme::wash(0.14)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_new_session(Some(new_session_id.clone()), cx);
+                    }))
+                    .child(
+                        icon(icons::PLUS)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted.opacity(0.75)),
+                    ),
             )
     }
 

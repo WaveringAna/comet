@@ -1969,7 +1969,46 @@ impl Shell {
         let user_email: Option<SharedString> = user.as_ref().map(|u| u.email.clone().into());
         let user_menu = self.render_user_menu(user_line.clone(), user_email.clone(), theme, cx);
 
+        let selected_project = self.state.read(cx).selected_project.clone();
         let projects_section = self.render_projects_section(theme, cx);
+        let sessions_header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px(px(Theme::SPACE_SM))
+            .pt(px(12.0))
+            .pb(px(4.0))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted.opacity(0.6))
+                    .child(SharedString::from("Sessions")),
+            )
+            .child(
+                div()
+                    .id("new-session-section")
+                    .size(px(20.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .cursor_pointer()
+                    .when(selected_project.is_none(), |el| el.opacity(0.45))
+                    .bg(motion::hover_blend(
+                        "new-session-section",
+                        crate::theme::wash(0.0),
+                        crate::theme::wash(0.14),
+                    ))
+                    .on_hover(motion::hover_listener("new-session-section"))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_new_session(None, cx)))
+                    .child(
+                        icon(icons::PLUS)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted.opacity(0.75)),
+                    ),
+            );
 
         div()
             .w(px(self.settings.sidebar_width))
@@ -1999,16 +2038,7 @@ impl Shell {
                             .flex()
                             .flex_col()
                             .child(projects_section)
-                    .child(
-                        div()
-                            .px(px(Theme::SPACE_SM))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from("Sessions")),
-                    )
+                    .child(sessions_header)
                     .child(if !list_items.is_empty() {
                         div()
                             .flex()
