@@ -216,7 +216,10 @@ feature spec `docs/research/feature-inventory.md` §1.
   in the viewport from the transcript it already streams (`current_turn_streamed` ÷ time in
   `Working`, gated on `SessionStatus` so tool-round gaps don't reset the clock) — deliberately
   NOT a CRDT field, since a per-frame number would churn; it hands off to the settled whole-turn
-  average when generation completes. Both figures are measured, not estimated: pi reports
+  average when generation completes. The estimate counts text AND tool-call JSON (the model's
+  generated arguments), matching pi's `output` — but NOT thinking, because the engine drops
+  `ReasoningDelta` from the synced transcript (it is not rendered, matching comet), so the
+  viewport never sees it; including reasoning would need an engine-side host-local live feed. Both figures are measured, not estimated: pi reports
   `contextWindow` in `get_state` and per-message `usage` on `message_end`, the adapter times
   each message's stream, and the host sums a turn's messages and stamps `ChatUsage` on the
   workspace chat row once (small, LWW — a per-frame

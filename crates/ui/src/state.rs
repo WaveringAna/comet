@@ -566,10 +566,20 @@ impl AppState {
         self.working_since.is_some()
     }
 
-    /// Chars of assistant text in the current turn — everything after the last
-    /// User message. A fresh prompt appends a User message and rolls the
+    /// Chars of assistant output in the current turn — everything after the
+    /// last User message. A fresh prompt appends a User message and rolls the
     /// boundary forward, so completed tool-round messages of THIS turn stay
     /// counted while earlier turns drop out.
+    ///
+    /// Counts text AND the tool-call JSON, because pi's real `output` usage
+    /// (which the settled whole-turn average comes from) includes the tokens a
+    /// tool round spends on arguments — a text-only counter would undercount a
+    /// tool-heavy turn. Thinking is deliberately NOT here: the engine drops
+    /// `ReasoningDelta` from the fold (it is not rendered, matching comet), so
+    /// the synced transcript never carries it. The live readout is a
+    /// best-effort viewport estimate; it is honest that reasoning is invisible
+    /// to it, which is why the exact per-message-end figure still wins on
+    /// completion.
     pub fn current_turn_streamed(&self) -> u64 {
         let start = self
             .transcript
@@ -580,9 +590,12 @@ impl AppState {
             .iter()
             .filter(|e| e.role == MessageRole::Assistant)
             .flat_map(|e| e.parts.iter())
-            .filter_map(|p| match p {
-                MessagePart::Text { text, .. } => Some(text.chars().count() as u64),
-                _ => None,
+            .map(|p| match p {
+                MessagePart::Text { text, .. } => text.chars().count() as u64,
+                MessagePart::Tool { call, .. } => {
+                    serde_json::to_string(call).map_or(0, |s| s.chars().count() as u64)
+                }
+                _ => 0,
             })
             .sum()
     }
@@ -1470,11 +1483,35 @@ mod tests {
             text_entry("a1", MessageRole::Assistant, "reasoning round", false),
             text_entry("a2", MessageRole::Assistant, "another round", false),
             text_entry("a3", MessageRole::Assistant, "the live burst", true),
+            // A tool round: its JSON arguments are model-generated output tokens,
+            // exactly what pi's real `output` counts — so they belong in the live
+            // estimate too.
+            SessionMessageEntry {
+                id: "a4".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Tool {
+                    id: "a4-t".into(),
+                    call: comet_proto::ToolCall::ReadFile {
+                        path: "/src/main.rs".into(),
+                    },
+                    is_error: false,
+                    resolved: true,
+                }],
+                created_at: 0,
+                device_id: "d".into(),
+                status: None,
+                continuation_of: None,
+            },
         ];
-        // After the last User: a1+a2+a3, their literal lengths summed.
+        // Tool JSON is counted (exact serialized length), on top of the text.
+        let tool_json = serde_json::to_string(&comet_proto::ToolCall::ReadFile {
+            path: "/src/main.rs".into(),
+        })
+        .unwrap();
         let expected = ("reasoning round".chars().count()
             + "another round".chars().count()
-            + "the live burst".chars().count()) as u64;
+            + "the live burst".chars().count()
+            + tool_json.chars().count()) as u64;
         assert_eq!(
             state.current_turn_streamed(),
             expected,
