@@ -131,6 +131,19 @@ impl Theme {
         }
     }
 
+    /// Keep the paint system fixed while replacing only the two text roles.
+    /// Font family names are resolved by gpui and fall back to its platform
+    /// stack when a saved family is not installed on this machine.
+    pub fn with_fonts(
+        mut self,
+        ui_font: impl Into<SharedString>,
+        code_font: impl Into<SharedString>,
+    ) -> Self {
+        self.font_sans = ui_font.into();
+        self.font_mono = code_font.into();
+        self
+    }
+
     /// Read the theme global.
     pub fn of(cx: &App) -> &Theme {
         cx.global::<Theme>()

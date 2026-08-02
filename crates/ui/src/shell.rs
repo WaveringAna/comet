@@ -31,6 +31,7 @@ use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT};
 use crate::popover::{self, Loadable};
 use crate::rail;
+use crate::settings::appearance::{AppearanceEvent, AppearancePage};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
@@ -140,17 +141,23 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
 /// The settings sections (feature-inventory §1.5 routes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
+    Appearance,
     Shortcuts,
     Archived,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 2] = [SettingsSection::Shortcuts, SettingsSection::Archived];
+    pub const ALL: [SettingsSection; 3] = [
+        SettingsSection::Appearance,
+        SettingsSection::Shortcuts,
+        SettingsSection::Archived,
+    ];
 
     /// Sidebar + header label (comet settings-sidebar.tsx SECTIONS / __root.tsx
     /// `settingsTitle` — the same strings in both places).
     pub fn label(self) -> &'static str {
         match self {
+            SettingsSection::Appearance => "Appearance",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Archived => "Archived sessions",
         }
@@ -456,6 +463,8 @@ pub struct Shell {
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     archived_page: Option<Entity<ArchivedPage>>,
+    appearance_page: Option<Entity<AppearancePage>>,
+    appearance_sub: Option<Subscription>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     shortcuts_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
@@ -627,15 +636,21 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = UiSettings::load(&data_dir);
+        // Install persisted typography before the first shell frame so every
+        // surface, including the settings page itself, uses the saved roles.
+        cx.set_global(
+            Theme::dark().with_fonts(settings.ui_font.clone(), settings.code_font.clone()),
+        );
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
         // Dev/testing knob: `COMET_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
         let route = match std::env::var("COMET_OPEN_ROUTE").ok().as_deref() {
-            Some("settings") | Some("settings/shortcuts") => {
-                Route::Settings(SettingsSection::Shortcuts)
+            Some("settings") | Some("settings/appearance") => {
+                Route::Settings(SettingsSection::Appearance)
             }
+            Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {
@@ -673,6 +688,8 @@ impl Shell {
             route,
             nav,
             archived_page: None,
+            appearance_page: None,
+            appearance_sub: None,
             shortcuts_page: None,
             shortcuts_sub: None,
             chat_menu: None,
@@ -1246,6 +1263,38 @@ impl Shell {
     /// Lazily create the entity for a settings section and return it renderable.
     fn settings_outlet(&mut self, section: SettingsSection, cx: &mut Context<Self>) -> AnyElement {
         match section {
+            SettingsSection::Appearance => {
+                if self.appearance_page.is_none() {
+                    let page = cx.new(|cx| {
+                        AppearancePage::new(
+                            self.settings.ui_font.clone(),
+                            self.settings.code_font.clone(),
+                            cx,
+                        )
+                    });
+                    self.appearance_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &AppearanceEvent, cx| {
+                            let AppearanceEvent::Changed { ui_font, code_font } = event;
+                            this.settings.ui_font = ui_font.clone();
+                            this.settings.code_font = code_font.clone();
+                            this.transcript.update(cx, |transcript, cx| {
+                                transcript.invalidate_render_cache(cx);
+                            });
+                            cx.set_global(
+                                Theme::dark().with_fonts(ui_font.clone(), code_font.clone()),
+                            );
+                            this.schedule_save(cx);
+                            cx.notify();
+                        },
+                    ));
+                    self.appearance_page = Some(page);
+                }
+                match &self.appearance_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
             SettingsSection::Shortcuts => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
@@ -1791,6 +1840,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
+            SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
@@ -2569,7 +2619,7 @@ impl Shell {
                     popover::menu_row(theme, false, "user-menu-settings")
                         .id("user-menu-settings")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Shortcuts, cx)
+                            this.open_settings(SettingsSection::Appearance, cx)
                         }))
                         .child(
                             icon(icons::SETTINGS_MINIMALISTIC)

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod accounts;
+pub mod appearance;
 pub mod archived;
 pub mod composer;
 pub mod devices;
@@ -37,6 +38,10 @@ pub const TERMINAL_DEFAULT_HEIGHT: f32 = 280.0;
 
 /// Debounce for settings writes after a drag/toggle.
 pub const SAVE_DEBOUNCE_MS: u64 = 400;
+
+/// Bundled defaults for the two independently configurable text roles.
+pub const DEFAULT_UI_FONT: &str = "Geist";
+pub const DEFAULT_CODE_FONT: &str = "Geist Mono";
 
 const FILE_NAME: &str = "ui-settings.json";
 
@@ -67,6 +72,10 @@ pub struct UiSettings {
     pub terminal_height: f32,
     /// Legacy — see [`Self::right_pane_open`].
     pub terminal_open: bool,
+    /// Proportional family used by interface text.
+    pub ui_font: String,
+    /// Monospaced family used by code, terminal output, and key hints.
+    pub code_font: String,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
 }
@@ -84,6 +93,8 @@ impl Default for UiSettings {
             right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
+            ui_font: DEFAULT_UI_FONT.to_string(),
+            code_font: DEFAULT_CODE_FONT.to_string(),
             keymap: KeymapConfig::default(),
         }
     }
@@ -276,6 +287,12 @@ impl UiSettings {
             TERMINAL_ABS_MAX_HEIGHT,
             TERMINAL_DEFAULT_HEIGHT,
         );
+        if self.ui_font.trim().is_empty() {
+            self.ui_font = DEFAULT_UI_FONT.to_string();
+        }
+        if self.code_font.trim().is_empty() {
+            self.code_font = DEFAULT_CODE_FONT.to_string();
+        }
         self
     }
 
@@ -338,6 +355,8 @@ mod tests {
             right_pane_open: true,
             terminal_height: 320.0,
             terminal_open: true,
+            ui_font: "Inter".into(),
+            code_font: "Menlo".into(),
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
@@ -384,6 +403,8 @@ mod tests {
         assert_eq!(d.sidebar_width, 256.0);
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
+        assert_eq!(d.ui_font, DEFAULT_UI_FONT);
+        assert_eq!(d.code_font, DEFAULT_CODE_FONT);
         assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
     }
 

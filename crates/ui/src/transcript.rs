@@ -78,6 +78,9 @@ pub const TOOL_LINE_HEIGHT: f32 = 20.0;
 /// fine print. Nothing in a group is brighter than the summary.
 pub const TOOL_SUMMARY_SIZE: f32 = 14.0;
 const TOOL_LABEL_SIZE: f32 = 13.0;
+/// Fixed operation column so `read`, `exec`, `edit`, and `write` share one
+/// command start edge instead of shifting the detail by label width.
+const TOOL_LABEL_WIDTH: f32 = 40.0;
 const TOOL_DETAIL_SIZE: f32 = 12.5;
 /// Icon column: the summary's glyph sits at the reply's left edge, each call
 /// line's a small hang inside it.
@@ -1032,6 +1035,14 @@ pub struct Transcript {
 impl EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
+    /// Font changes alter every cached TextRun, including settled assistant
+    /// markdown and code blocks. Drop the render cache so the next frame
+    /// reshapes the transcript with the current theme fonts.
+    pub fn invalidate_render_cache(&mut self, cx: &mut Context<Self>) {
+        self.render_cache.borrow_mut().clear();
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
         // not the list's per-layout hard snap.
@@ -2016,7 +2027,7 @@ impl Transcript {
                 } else {
                     let live = run.items.iter().any(|i| running_id.as_ref() == Some(&i.id));
                     column = column.child(run_line(row_id, ix, run, live, theme, cx));
-                    if matches!(run.label, "write" | "edit") {
+                    if matches!(run.label, "write" | "edit" | "patch") {
                         for item in &run.items {
                             if let Some(diff) = self.tool_diffs.get(item.id.as_ref()) {
                                 column = column.child(tool_diff_preview(diff, theme));
@@ -2351,6 +2362,7 @@ fn tool_row(
         .flex_row()
         .items_center()
         .gap(px(6.0))
+        .font_family(theme.font_mono.clone())
         .text_color(theme.text_faint)
         .child(
             div()
@@ -2376,6 +2388,7 @@ fn tool_row(
         )
         .child(
             div()
+                .w(px(TOOL_LABEL_WIDTH))
                 .flex_none()
                 .text_size(px(TOOL_LABEL_SIZE))
                 .child(SharedString::from(label)),
@@ -2466,7 +2479,7 @@ fn run_line(
         detail = format!("{detail} · {failures} failed");
     }
     let tool_ids: Vec<String> = run.items.iter().map(|i| i.id.to_string()).collect();
-    let shows_diff = matches!(run.label, "write" | "edit");
+    let shows_diff = matches!(run.label, "write" | "edit" | "patch");
     let line = tool_row(
         row_id,
         &format!("run{ix}"),

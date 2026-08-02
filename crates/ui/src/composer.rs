@@ -815,6 +815,22 @@ impl ComposerInput {
             .unwrap_or(self.content.len())
     }
 
+    /// Selectable token under a double-click. `split_word_bound_indices`
+    /// gives us Unicode-safe byte ranges, so selection never splits a UTF-8
+    /// codepoint or treats the display glyph count as a byte offset.
+    fn word_range_at(&self, offset: usize) -> Range<usize> {
+        let offset = offset.min(self.content.len());
+        self.content
+            .split_word_bound_indices()
+            .find_map(|(start, word)| {
+                let end = start + word.len();
+                (start <= offset && (offset < end || (offset == end && start < end)))
+                    .then(|| (!word.trim().is_empty()).then_some(start..end))
+                    .flatten()
+            })
+            .unwrap_or(offset..offset)
+    }
+
     /// Byte range of the logical line containing `offset`.
     fn line_range_at(&self, offset: usize) -> Range<usize> {
         let start = self.content[..offset]
@@ -1053,12 +1069,21 @@ impl ComposerInput {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
-        self.is_selecting = true;
         let index = self.index_for_mouse_position(event.position);
-        if event.modifiers.shift {
-            self.select_to(index, cx);
+        if event.click_count >= 2 && !event.modifiers.shift {
+            let range = self.word_range_at(index);
+            self.selected_range = range;
+            self.selection_reversed = false;
+            self.reset_blink();
+            self.is_selecting = false;
+            cx.notify();
         } else {
-            self.move_to(index, cx);
+            self.is_selecting = true;
+            if event.modifiers.shift {
+                self.select_to(index, cx);
+            } else {
+                self.move_to(index, cx);
+            }
         }
     }
 
