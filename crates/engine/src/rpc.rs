@@ -933,6 +933,14 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)
             }
+            methods::TOOL_DIFF => {
+                let p: ToolOutputParams = parse_params(params)?;
+                let reply = self
+                    .sessions
+                    .journal_tool_diff(&p.chat_id, &p.tool_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&reply)
+            }
             methods::SUBSCRIBE_TERMINAL => {
                 let p: SubscribeTerminalParams = parse_params(params)?;
                 let rx = self

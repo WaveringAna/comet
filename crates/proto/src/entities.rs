@@ -416,6 +416,18 @@ pub struct ToolOutputReply {
     pub truncated: bool,
 }
 
+/// Host-local ephemeral diff for a write/edit tool call. The diff is derived from
+/// the run journal on demand and is never part of the synced session document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDiffReply {
+    pub found: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+}
+
 /// One `SubscribeTerminal` stream item. `seq` is a per-terminal monotonic counter
 /// used for replay resumption (`afterSeq`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

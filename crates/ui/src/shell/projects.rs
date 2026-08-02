@@ -69,7 +69,8 @@ pub(super) struct CreateProjectFlow {
     /// The local device id is retained internally for project compatibility;
     /// it is not a picker choice or a visible concept in this flow.
     device: Option<Device>,
-    /// Filter input; Enter descends into the highlighted folder.
+    /// Filter input; the right arrow descends into the highlighted folder and
+    /// Enter chooses the folder currently shown in the breadcrumbs.
     search: Entity<ComposerInput>,
     browser: Loadable<FolderListing>,
     /// Requested browser path (`None` = the local device's home).
@@ -897,9 +898,9 @@ impl Shell {
     }
 
     /// Palette keys (bubbling from the focused search input) — every legend
-    /// maps to a REAL key: ↑↓ navigate, →/⏎ open the highlighted folder,
-    /// ← up a level, ⌘⏎ add the OPEN folder, ⌫ (empty query) also goes up,
-    /// esc closes.
+    /// maps to a REAL key: ↑↓ navigate, → open the highlighted folder,
+    /// ← up a level, ⏎ or ⌘⏎ add the folder shown in the breadcrumbs,
+    /// ⌫ (empty query) also goes up, esc closes.
     fn add_project_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
         // ←/→ act on the FOLDERS, not the text cursor — the palette is a
         // navigator first; queries are short and edited with ⌫.
@@ -936,13 +937,9 @@ impl Shell {
                     cx.notify();
                 }
             }
-            // ⏎ opens the highlighted folder (an alias for →); the project is
-            // added with ⌘⏎ — and the chord acts on the folder OPEN in the
-            // breadcrumbs, not the highlight. The highlight auto-rests on the
-            // first row, so a chord that took it would add arbitrary
-            // subfolders; the usual target (a repo root full of subfolders)
-            // is only ever "the folder you're standing in".
-            popover::MenuKey::Enter => self.add_project_open_active(cx),
+            // Enter chooses the folder open in the breadcrumbs. Use → when
+            // the intent is to descend into the highlighted subfolder.
+            popover::MenuKey::Enter => self.submit_add_project(cx),
             popover::MenuKey::ModEnter => self.submit_add_project(cx),
             popover::MenuKey::Backspace => {
                 let empty = self
@@ -1020,9 +1017,9 @@ impl Shell {
                 .text_color(theme.text_muted.opacity(0.7))
         };
 
-        // ── search bar (the ⌘K bar): summon chip · input · "⌘ Enter" add ·
-        //    esc. The primary chip leads with the ⌘ glyph, then says "Enter"
-        //    in words (user request — the bare return arrow read as noise).
+        // ── search bar (the ⌘K bar): summon chip · input · use-this-folder
+        //    action · esc. Keep the shortcut visible, but name the action so
+        //    the current folder is easy to choose without knowing the chord.
         let submit_chip = popover::btn_primary(&theme, "")
             .id("add-project-submit")
             .h(px(22.0))
@@ -1040,12 +1037,16 @@ impl Shell {
             .when(submit_busy || listing.is_none(), |el| el.opacity(0.6))
             .on_click(cx.listener(|this, _, _, cx| this.submit_add_project(cx)))
             .when(!submit_busy, |el| {
-                el.child(
-                    icon(icons::COMMAND)
-                        .size(px(11.0))
-                        .text_color(crate::theme::grey(0x0e).opacity(0.8)),
+                el.child(SharedString::from("use this folder")).child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(2.0))
+                        .text_color(crate::theme::grey(0x0e).opacity(0.72))
+                        .child(icon(icons::COMMAND).size(px(11.0)))
+                        .child(SharedString::from("enter")),
                 )
-                .child(SharedString::from("Enter"))
             })
             .when(submit_busy, |el| el.child(SharedString::from("Adding…")));
         // Header and footer sit a shade DEEPER than the body (the shared
@@ -1329,6 +1330,7 @@ impl Shell {
             ))
             .child(popover::key_hint(&theme, icons::ARROW_LEFT, "Up"))
             .child(popover::key_hint(&theme, icons::ARROW_RIGHT, "Open"))
+            .child(popover::key_hint(&theme, icons::RETURN, "use this folder"))
             .when_some(error, |el, message| {
                 el.child(
                     div()

@@ -23,7 +23,7 @@
 //! inside the 70px band; own-send re-engages with the same glide.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ use gpui::{
 };
 
 use comet_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use comet_proto::ToolCall;
+use comet_proto::{ToolCall, ToolDiffReply};
 
 use crate::markdown::highlight::{Lang, LineCarry, Token, lang_for_tag, tokenize_line};
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
@@ -1022,6 +1022,10 @@ pub struct Transcript {
     attachment_loads: HashMap<(String, String), Task<()>>,
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
     attachment_retries: HashMap<(String, String), Task<()>>,
+    /// Ephemeral diffs fetched on demand for write/edit calls. Entries are
+    /// dropped when collapsed or when the selected chat changes.
+    tool_diffs: HashMap<String, ToolDiffReply>,
+    tool_diff_loads: HashSet<String>,
     _observe: Subscription,
 }
 
@@ -1073,6 +1077,8 @@ impl Transcript {
             attachment_preview: None,
             attachment_loads: HashMap::new(),
             attachment_retries: HashMap::new(),
+            tool_diffs: HashMap::new(),
+            tool_diff_loads: HashSet::new(),
             _observe: observe,
         };
         this.sync(cx);
@@ -1308,6 +1314,8 @@ impl Transcript {
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
             self.expanded_groups.clear();
+            self.tool_diffs.clear();
+            self.tool_diff_loads.clear();
             self.list.reset(0);
             self.pinned = true;
             self.spring.reset();
@@ -2008,6 +2016,15 @@ impl Transcript {
                 } else {
                     let live = run.items.iter().any(|i| running_id.as_ref() == Some(&i.id));
                     column = column.child(run_line(row_id, ix, run, live, theme, cx));
+                    if matches!(run.label, "write" | "edit") {
+                        for item in &run.items {
+                            if let Some(diff) = self.tool_diffs.get(item.id.as_ref()) {
+                                column = column.child(tool_diff_preview(diff, theme));
+                            } else if self.tool_diff_loads.contains(item.id.as_ref()) {
+                                column = column.child(tool_diff_loading(theme));
+                            }
+                        }
+                    }
                     ix += 1;
                 }
             }
@@ -2041,6 +2058,55 @@ impl Transcript {
             });
         }
         column.into_any_element()
+    }
+
+    /// Toggle an ephemeral write/edit preview. The engine derives it from its
+    /// host-local journal on demand; the transcript only keeps the open preview
+    /// long enough to paint it.
+    fn toggle_tool_diffs(&mut self, tool_ids: &[String], cx: &mut Context<Self>) {
+        let all_open = tool_ids.iter().all(|id| self.tool_diffs.contains_key(id));
+        if all_open {
+            for id in tool_ids {
+                self.tool_diffs.remove(id);
+            }
+            cx.notify();
+            return;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        for id in tool_ids {
+            if self.tool_diffs.contains_key(id) || !self.tool_diff_loads.insert(id.clone()) {
+                continue;
+            }
+            let chat_id = chat_id.clone();
+            let tool_id = id.clone();
+            let engine = engine.clone();
+            cx.spawn(async move |this, cx| {
+                let reply = engine
+                    .client()
+                    .call_as::<ToolDiffReply>(
+                        comet_rpc::methods::TOOL_DIFF,
+                        serde_json::json!({ "chatId": chat_id, "toolId": tool_id }),
+                    )
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.tool_diff_loads.remove(&tool_id);
+                    if let Ok(reply) = reply
+                        && reply.found
+                    {
+                        this.tool_diffs.insert(tool_id, reply);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        cx.notify();
     }
 
     /// Open/close a group and re-splice its row: the list caches measured
@@ -2326,6 +2392,57 @@ fn tool_row(
         )
 }
 
+/// Inline preview for a host-local write/edit diff. It is deliberately a quiet
+/// continuation of the tool row rather than a second card in the transcript.
+fn tool_diff_preview(diff: &ToolDiffReply, theme: &Theme) -> AnyElement {
+    let lines = diff.diff.as_deref().unwrap_or("no diff available");
+    div()
+        .id(SharedString::from(format!(
+            "tool-diff-{}",
+            fnv1a(lines.as_bytes())
+        )))
+        .ml(px(TOOL_ROW_PAD + TOOL_ICON_SIZE + 6.0))
+        .my(px(3.0))
+        .max_h(px(260.0))
+        .overflow_y_scroll()
+        .rounded(px(5.0))
+        .bg(crate::theme::white_alpha(0.035))
+        .border_l_1()
+        .border_color(crate::theme::white_alpha(0.10))
+        .px(px(8.0))
+        .py(px(5.0))
+        .font_family(theme.font_mono.clone())
+        .text_size(px(11.0))
+        .children(lines.lines().map(|line| {
+            let color = if line.starts_with('+') && !line.starts_with("+++") {
+                theme.accent.opacity(0.9)
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                theme.danger.opacity(0.82)
+            } else if line.starts_with("---") || line.starts_with("+++") {
+                theme.text_muted.opacity(0.7)
+            } else {
+                theme.text_muted.opacity(0.82)
+            };
+            div()
+                .whitespace_nowrap()
+                .text_color(color)
+                .child(SharedString::from(line.to_string()))
+        }))
+        .into_any_element()
+}
+
+fn tool_diff_loading(theme: &Theme) -> AnyElement {
+    div()
+        .ml(px(TOOL_ROW_PAD + TOOL_ICON_SIZE + 6.0))
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .text_size(px(11.0))
+        .text_color(theme.text_faint)
+        .child(SharedString::from("loading diff…"))
+        .into_any_element()
+}
+
 /// One consolidated same-kind run on a single line: sibling paths fold into
 /// brace groups (`crates/ui/src/{transcript.rs,composer.rs}`), and whatever
 /// still overflows truncates — row heights are uniform by construction, and
@@ -2349,6 +2466,7 @@ fn run_line(
         detail = format!("{detail} · {failures} failed");
     }
     let tool_ids: Vec<String> = run.items.iter().map(|i| i.id.to_string()).collect();
+    let shows_diff = matches!(run.label, "write" | "edit");
     let line = tool_row(
         row_id,
         &format!("run{ix}"),
@@ -2360,11 +2478,15 @@ fn run_line(
     )
     .cursor_pointer()
     .hover(|s| s.text_color(theme.text))
-    .on_click(cx.listener(move |_this, _, _, cx| {
+    .on_click(cx.listener(move |this, _, _, cx| {
         cx.stop_propagation();
-        cx.emit(TranscriptEvent::OpenAgentTerminal {
-            tool_ids: tool_ids.clone(),
-        });
+        if shows_diff {
+            this.toggle_tool_diffs(&tool_ids, cx);
+        } else {
+            cx.emit(TranscriptEvent::OpenAgentTerminal {
+                tool_ids: tool_ids.clone(),
+            });
+        }
     }));
     if run.items.len() > 1 {
         line.tooltip(move |_window, cx| {

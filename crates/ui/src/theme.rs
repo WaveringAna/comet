@@ -189,20 +189,18 @@ pub fn white_alpha(alpha: f32) -> Hsla {
 }
 
 /// Selected-state glass treatment (tabs, session rows, space rows): a
-/// TRANSLUCENT wash the vibrancy reads through — heavier flat washes blocked
-/// the glass (user request).
+/// quiet lift that separates the row without turning it into a solid card.
+/// Keep selection below hover's visual weight; the brighter title carries the
+/// rest of the affordance.
 pub fn glass_selected_bg() -> Hsla {
-    wash(0.14)
+    wash(0.07)
 }
 
-/// The selected chip's bright outline, as an INSET shadow: gpui paints inset
-/// shadows ON TOP of the background, edges only — a border with zero layout
-/// cost. Drop shadows are filled rects painted BEHIND the element, and behind
-/// a 5% fill they showed straight through as an opaque dark plate with a
-/// greyed ring (user report) — nothing may paint behind a glass chip.
+/// A restrained inset edge for selected rows. It should clarify the active
+/// surface without reading as a button outline.
 pub fn glass_selected_shadows() -> Vec<gpui::BoxShadow> {
     vec![gpui::BoxShadow {
-        color: white_alpha(0.09),
+        color: white_alpha(0.04),
         offset: gpui::point(gpui::px(0.0), gpui::px(0.0)),
         blur_radius: gpui::px(0.0),
         spread_radius: gpui::px(1.0),

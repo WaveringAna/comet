@@ -78,6 +78,7 @@ pub mod methods {
     /// A tool result's captured output from the chat host's run journal
     /// (ControlRpc, relay-forwardable — journals are host-local by design).
     pub const TOOL_OUTPUT: &str = "ToolOutput";
+    pub const TOOL_DIFF: &str = "ToolDiff";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";

@@ -113,11 +113,71 @@ impl ResolvedRunConfig {
 // Pure: default resolution (no "Default" placeholders — a concrete pick always)
 // ---------------------------------------------------------------------------
 
-/// The harness's default model: the first catalog row (both curated catalogs
-/// lead with the flagship — comet's `pickDefaultModel` Opus preference maps to
-/// the same row here).
+/// The harness's default model: the first displayed row. Catalogs are sorted
+/// before they enter the picker's state, so this is deterministic even when a
+/// harness returns models in discovery order.
 pub fn default_model(models: &[Model]) -> Option<&Model> {
     models.first()
+}
+
+/// Sort a runtime model catalog for people rather than preserving provider
+/// discovery order: newest numeric version first, then stronger models within
+/// the same version, then the base model before named variants. The final
+/// label/id tie-breakers keep the result stable for equal metadata.
+pub fn sort_models(models: &mut [Model]) {
+    models.sort_by(|a, b| {
+        model_version_parts(model_label(b))
+            .cmp(&model_version_parts(model_label(a)))
+            .then_with(|| max_reasoning(&b).cmp(&max_reasoning(&a)))
+            .then_with(|| model_variant_key(model_label(a)).cmp(&model_variant_key(model_label(b))))
+            .then_with(|| {
+                a.label
+                    .to_ascii_lowercase()
+                    .cmp(&b.label.to_ascii_lowercase())
+            })
+            .then_with(|| a.id.to_ascii_lowercase().cmp(&b.id.to_ascii_lowercase()))
+    });
+}
+
+fn model_label(model: &Model) -> &str {
+    if model.label.is_empty() {
+        &model.id
+    } else {
+        &model.label
+    }
+}
+
+fn model_version_parts(label: &str) -> Vec<u64> {
+    let mut parts = Vec::new();
+    let mut number = String::new();
+    for character in label.chars() {
+        if character.is_ascii_digit() {
+            number.push(character);
+        } else if !number.is_empty() {
+            parts.push(number.parse::<u64>().unwrap_or(0));
+            number.clear();
+        }
+    }
+    if !number.is_empty() {
+        parts.push(number.parse::<u64>().unwrap_or(0));
+    }
+    parts
+}
+
+fn model_variant_key(label: &str) -> String {
+    let end = label
+        .char_indices()
+        .rev()
+        .find(|(_, character)| character.is_ascii_digit())
+        .map(|(ix, character)| ix + character.len_utf8())
+        .unwrap_or(0);
+    label[end..]
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+        .to_ascii_lowercase()
+}
+
+fn max_reasoning(model: &Model) -> Option<ReasoningLevel> {
+    model.reasoning_levels.iter().max().copied()
 }
 
 /// A model's default reasoning: X-High when the ladder offers it (comet
@@ -690,7 +750,10 @@ impl Pickers {
             this.update(cx, |pickers, cx| {
                 let loaded = match result {
                     Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
-                        Ok(models) => Loadable::Ready(models),
+                        Ok(mut models) => {
+                            sort_models(&mut models);
+                            Loadable::Ready(models)
+                        }
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),
@@ -2724,6 +2787,44 @@ mod tests {
         ];
         assert_eq!(default_model(&models).map(|m| &*m.id), Some("flagship"));
         assert!(default_model(&[]).is_none());
+    }
+
+    #[test]
+    fn model_catalog_is_sorted_newest_first() {
+        use ReasoningLevel::*;
+
+        let model = |id: &str, reasoning_levels: Vec<ReasoningLevel>| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels,
+            options: vec![],
+        };
+        let mut models = vec![
+            model("gpt-5.4-mini", vec![XHigh]),
+            model("gpt-5.3-codex-spark", vec![XHigh]),
+            model("gpt-5.6-luna", vec![Max]),
+            model("gpt-5.4", vec![XHigh]),
+            model("gpt-5.6-sol", vec![Ultra]),
+            model("gpt-5.5", vec![XHigh]),
+        ];
+
+        sort_models(&mut models);
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-5.6-sol",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex-spark",
+            ]
+        );
     }
 
     #[test]

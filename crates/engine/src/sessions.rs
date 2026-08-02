@@ -238,6 +238,62 @@ impl SessionsEngine {
         })
     }
 
+    /// Host-local ephemeral diff lookup for a write/edit tool. Full tool inputs
+    /// remain in the run journal only; the diff is derived per request and is
+    /// never copied into the synced document or retained in an engine cache.
+    pub fn journal_tool_diff(
+        &self,
+        chat_id: &str,
+        tool_id: &str,
+    ) -> Result<comet_proto::ToolDiffReply, EngineError> {
+        let events = self.inner.journal.replay(chat_id, 0)?;
+        let mut call = None;
+        for (_, event) in events.iter().rev() {
+            if let AgentEvent::ToolCall {
+                id,
+                call: candidate,
+            } = event
+                && id == tool_id
+            {
+                call = Some(candidate);
+                break;
+            }
+        }
+        let Some(call) = call else {
+            return Ok(comet_proto::ToolDiffReply {
+                found: false,
+                path: None,
+                diff: None,
+            });
+        };
+        let (path, old, new) = match call {
+            ToolCall::WriteFile { path, content } => {
+                (path, String::new(), content.clone().unwrap_or_default())
+            }
+            ToolCall::EditFile {
+                path,
+                old_string,
+                new_string,
+            } => (
+                path,
+                old_string.clone().unwrap_or_default(),
+                new_string.clone().unwrap_or_default(),
+            ),
+            _ => {
+                return Ok(comet_proto::ToolDiffReply {
+                    found: false,
+                    path: None,
+                    diff: None,
+                });
+            }
+        };
+        Ok(comet_proto::ToolDiffReply {
+            found: true,
+            path: Some(path.clone()),
+            diff: Some(ephemeral_diff(&path, &old, &new)),
+        })
+    }
+
     /// Start (or route) a run for `chat_id`.
     ///
     /// - The user message entry is written to the doc immediately (id = `message_id`).
@@ -628,6 +684,41 @@ impl SessionsEngine {
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
     }
+}
+
+/// Compact, host-local presentation diff. This deliberately favors bounded
+/// storage and a readable tool preview over a full Myers diff: edits show the
+/// replaced block, while writes show the new file as additions.
+fn ephemeral_diff(path: &str, old: &str, new: &str) -> String {
+    const MAX_DIFF_BYTES: usize = 48 * 1024;
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+    let truncated = if old.is_empty() {
+        append_diff_lines(&mut out, "+ ", new, MAX_DIFF_BYTES)
+    } else {
+        let old_truncated = append_diff_lines(&mut out, "- ", old, MAX_DIFF_BYTES);
+        if old_truncated {
+            true
+        } else {
+            append_diff_lines(&mut out, "+ ", new, MAX_DIFF_BYTES)
+        }
+    };
+    if truncated {
+        out.push_str("… diff truncated …\n");
+    }
+    out
+}
+
+fn append_diff_lines(out: &mut String, prefix: &str, source: &str, max_bytes: usize) -> bool {
+    for line in source.lines() {
+        let needed = prefix.len() + line.len() + 1;
+        if out.len() + needed > max_bytes {
+            return true;
+        }
+        out.push_str(prefix);
+        out.push_str(line);
+        out.push('\n');
+    }
+    false
 }
 
 impl Inner {
