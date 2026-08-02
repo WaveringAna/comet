@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use comet_proto::{Chat, ChatConfig, Device, Project, Session, SessionStatus};
+use comet_proto::{Chat, ChatConfig, ChatUsage, Device, Project, Session, SessionStatus};
 
 use crate::schema::DocError;
 
@@ -269,6 +269,10 @@ impl WorkspaceDoc {
         )?;
         set_opt_str(&row, "projectId", chat.project_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
+        match &chat.usage {
+            Some(usage) => row.insert("usage", LoroValue::from(serde_json::to_value(usage)?))?,
+            None => row.delete("usage")?,
+        }
         self.doc.commit();
         Ok(())
     }
@@ -416,6 +420,15 @@ impl WorkspaceDoc {
             return Ok(false);
         };
         row.insert("lastCommand", command)?;
+        self.doc.commit();
+        Ok(true)
+    }
+
+    pub fn set_chat_usage(&self, chat_id: &str, usage: ChatUsage) -> Result<bool, DocError> {
+        let Some(row) = self.existing_row("chats", chat_id) else {
+            return Ok(false);
+        };
+        row.insert("usage", LoroValue::from(serde_json::to_value(usage)?))?;
         self.doc.commit();
         Ok(true)
     }
@@ -653,6 +666,8 @@ struct RawChat {
     project_id: Option<String>,
     #[serde(default)]
     last_seen_at: Option<i64>,
+    #[serde(default)]
+    usage: Option<comet_proto::ChatUsage>,
 }
 
 impl From<RawChat> for Chat {
@@ -674,6 +689,7 @@ impl From<RawChat> for Chat {
             harness_session_cwd: raw.harness_session_cwd,
             project_id: raw.project_id,
             last_seen_at: raw.last_seen_at.map(dt),
+            usage: raw.usage,
         }
     }
 }
@@ -746,6 +762,7 @@ mod tests {
             harness_session_cwd: None,
             project_id: None,
             last_seen_at: None,
+            usage: None,
         }
     }
 
@@ -1093,5 +1110,41 @@ mod tests {
         ));
         // Everything else on the row survived the conflict.
         assert_eq!(a.chat("chat-1").unwrap().unwrap().device_id, "dev-a");
+    }
+
+    #[test]
+    fn set_chat_usage_survives_upsert_chat() {
+        let ws = WorkspaceDoc::new();
+        ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+
+        let usage = ChatUsage {
+            context_tokens: 12_000,
+            context_window: 200_000,
+            last_turn_tokens: 450,
+            last_turn_ms: 1_500,
+        };
+        assert!(ws.set_chat_usage("chat-1", usage).unwrap());
+
+        let read = ws.chat("chat-1").unwrap().unwrap();
+        assert_eq!(read.usage, Some(usage));
+
+        // Unknown chat row returns false.
+        assert!(!ws.set_chat_usage("nope", usage).unwrap());
+
+        // A read → modify → upsert cycle must preserve usage (the full-row upsert
+        // rewrites every key it knows).
+        let mut cycled = ws.chat("chat-1").unwrap().unwrap();
+        cycled.branch = Some("wip-branch".into());
+        ws.upsert_chat(&cycled).unwrap();
+
+        let reread = ws.chat("chat-1").unwrap().unwrap();
+        assert_eq!(reread.branch.as_deref(), Some("wip-branch"));
+        assert_eq!(reread.usage, Some(usage));
+
+        // Setting usage to None in chat and upserting clears it.
+        let mut cleared = reread;
+        cleared.usage = None;
+        ws.upsert_chat(&cleared).unwrap();
+        assert_eq!(ws.chat("chat-1").unwrap().unwrap().usage, None);
     }
 }

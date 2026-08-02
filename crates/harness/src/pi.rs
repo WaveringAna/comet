@@ -310,7 +310,11 @@ async fn run_session(session: PiSession) {
     // `message_end`. remember whether the current assistant message already
     // produced a delta so the completion frame cannot append it a second time.
     let mut assistant_text_emitted = false;
-
+    // pi reports the model's context window once, in the `get_state` reply;
+    // per-turn token counts arrive on `message_end`. the stream's wall time is
+    // ours to measure - nothing in the protocol carries it.
+    let mut context_window = 0u64;
+    let mut assistant_started: Option<std::time::Instant> = None;
     'main: loop {
         tokio::select! {
             line = stdout.next_line() => match line {
@@ -332,6 +336,7 @@ async fn run_session(session: PiSession) {
                                 prompt_error = Some(value.get("error").and_then(Value::as_str).unwrap_or("pi get_state failed").into());
                             } else if let Some(data) = value.get("data") {
                                 session_id = data.get("sessionId").and_then(Value::as_str).unwrap_or(&session_id).to_owned();
+                                context_window = data.get("model").and_then(|m| m.get("contextWindow")).and_then(Value::as_u64).unwrap_or(0);
                             }
                             if !started {
                                 started = true;
@@ -402,6 +407,7 @@ async fn run_session(session: PiSession) {
                             if value.get("message").and_then(|m| m.get("role")).and_then(Value::as_str) == Some("assistant") {
                                 assistant_message_id = value.get("message").and_then(|m| m.get("id")).and_then(Value::as_str).unwrap_or(&assistant_message_id).to_owned();
                                 assistant_text_emitted = false;
+                                assistant_started = Some(std::time::Instant::now());
                             }
                         }
                         "message_update" => {
@@ -422,6 +428,7 @@ async fn run_session(session: PiSession) {
                             let message = value.get("message").unwrap_or(&Value::Null);
                             let id = message.get("id").and_then(Value::as_str).unwrap_or(&assistant_message_id).to_owned();
                             if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                                let duration_ms = assistant_started.take().map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
                                 if !assistant_text_emitted {
                                     if let Some(text) = message_text(message) { if !send_event(&event_tx, AgentEvent::TextDelta { text }).await { break 'main; } }
                                 }
@@ -430,6 +437,9 @@ async fn run_session(session: PiSession) {
                                     last_error = Some(error.clone());
                                     if !send_event(&event_tx, AgentEvent::Error { message: error }).await { break 'main; }
                                 } else if !send_event(&event_tx, AgentEvent::AssistantMessageCompleted { assistant_message_id: id }).await { break 'main; }
+                                if let Some((input_tokens, output_tokens, context_tokens)) = message.get("usage").and_then(parse_pi_usage) {
+                                    if !send_event(&event_tx, AgentEvent::Usage { input_tokens, output_tokens, context_tokens, context_window, duration_ms }).await { break 'main; }
+                                }
                             }
                         }
                         "tool_execution_start" => {
@@ -591,6 +601,34 @@ fn message_text(message: &Value) -> Option<String> {
         })
         .collect::<String>();
     (!text.is_empty()).then_some(text)
+}
+/// `(input, output, context)` out of an assistant message's `usage`. context
+/// is counted exactly as pi counts it for compaction (`totalTokens` when the
+/// provider gave one, else the four parts summed), so nova's gauge and pi's
+/// own footer never disagree. `None` when the frame carried no numbers - a
+/// zeroed reading would wipe a good one downstream.
+fn parse_pi_usage(usage: &Value) -> Option<(u64, u64, u64)> {
+    if !usage.is_object() {
+        return None;
+    }
+    let input = usage.get("input").and_then(Value::as_u64).unwrap_or(0);
+    let output = usage.get("output").and_then(Value::as_u64).unwrap_or(0);
+    let cache_read = usage.get("cacheRead").and_then(Value::as_u64).unwrap_or(0);
+    let cache_write = usage.get("cacheWrite").and_then(Value::as_u64).unwrap_or(0);
+    let total_tokens = usage
+        .get("totalTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let context_tokens = if total_tokens > 0 {
+        total_tokens
+    } else {
+        input + output + cache_read + cache_write
+    };
+    if input == 0 && output == 0 && context_tokens == 0 {
+        None
+    } else {
+        Some((input, output, context_tokens))
+    }
 }
 
 fn parse_pi_models(output: &str) -> Vec<Model> {
@@ -898,5 +936,37 @@ mod tests {
         assert_eq!(models[0].description.as_deref(), Some("openai-codex"));
         assert!(!models[0].reasoning_levels.is_empty());
         assert!(models[1].reasoning_levels.is_empty());
+    }
+    #[test]
+    fn parse_pi_usage_extracts_tokens_and_handles_total_tokens() {
+        assert_eq!(
+            parse_pi_usage(&json!({
+                "input": 100,
+                "output": 50,
+                "cacheRead": 20,
+                "cacheWrite": 10,
+                "totalTokens": 500
+            })),
+            Some((100, 50, 500))
+        );
+        assert_eq!(
+            parse_pi_usage(&json!({
+                "input": 100,
+                "output": 50,
+                "cacheRead": 20,
+                "cacheWrite": 10
+            })),
+            Some((100, 50, 180))
+        );
+        assert_eq!(
+            parse_pi_usage(&json!({
+                "input": 10,
+                "output": 5,
+                "totalTokens": 0
+            })),
+            Some((10, 5, 15))
+        );
+        assert_eq!(parse_pi_usage(&json!({})), None);
+        assert_eq!(parse_pi_usage(&json!({"input": 0, "output": 0})), None);
     }
 }

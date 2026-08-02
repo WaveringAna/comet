@@ -2364,6 +2364,7 @@ mod tests {
             harness_session_cwd: None,
             project_id: Some(project_id.into()),
             last_seen_at: None,
+            usage: None,
         }
     }
 

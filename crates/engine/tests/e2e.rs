@@ -301,7 +301,8 @@ async fn queued_run_command_executes_end_to_end() {
 
     // Journal replay: the full script in order, terminal Done last.
     let replay = core.sessions.subscribe(CHAT, 0).unwrap().0;
-    assert_eq!(replay.len(), mock_script().len());
+    let expected_count = mock_script().len() + 1; // +1 for pre-Done Usage event from MockHarness
+    assert_eq!(replay.len(), expected_count);
     assert!(matches!(
         replay.last().map(|j| &j.event),
         Some(AgentEvent::Done {
@@ -310,7 +311,7 @@ async fn queued_run_command_executes_end_to_end() {
         })
     ));
     let seqs: Vec<u64> = replay.iter().map(|j| j.seq).collect();
-    assert_eq!(seqs, (1..=mock_script().len() as u64).collect::<Vec<_>>());
+    assert_eq!(seqs, (1..=expected_count as u64).collect::<Vec<_>>());
 
     // The live broadcast delivered the same events.
     let mut broadcast_count = 0usize;
@@ -318,8 +319,7 @@ async fn queued_run_command_executes_end_to_end() {
         assert!(event.seq >= 1);
         broadcast_count += 1;
     }
-    assert_eq!(broadcast_count, mock_script().len());
-
+    assert_eq!(broadcast_count, expected_count);
     // Final session status: Idle.
     assert_eq!(
         core.sessions.session_status(CHAT).map(|s| s.status),

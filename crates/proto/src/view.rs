@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::{AuthState, Chat, ChatIndicator, Project, Session, SessionStatus};
+use crate::{AuthState, Chat, ChatIndicator, ChatUsage, Project, Session, SessionStatus};
 
 // ---------------------------------------------------------------------------
 // Connection + status
@@ -270,6 +270,87 @@ pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
         return format!("{mo}mo");
     }
     format!("{}y", d / 365)
+}
+
+// ---------------------------------------------------------------------------
+// Run cost — tokens/sec and the context gauge (both viewports render these)
+// ---------------------------------------------------------------------------
+
+/// Generation speed of the last reply. `None` when either half is missing, so
+/// a surface never renders a rate it did not measure.
+pub fn tokens_per_sec(usage: &ChatUsage) -> Option<f32> {
+    (usage.last_turn_tokens > 0 && usage.last_turn_ms > 0)
+        .then(|| usage.last_turn_tokens as f32 * 1000.0 / usage.last_turn_ms as f32)
+}
+
+/// "47 tok/s" — one decimal under 10, where the difference is worth reading.
+pub fn format_rate(rate: f32) -> String {
+    format!("{} tok/s", format_rate_value(rate))
+}
+
+/// Just the number, for surfaces that set the unit in its own type (the gpui
+/// strip runs the digits in mono and the unit in the text face — one string
+/// would carry the mono space between them, and it reads as a gap).
+pub fn format_rate_value(rate: f32) -> String {
+    if rate < 10.0 {
+        format!("{rate:.1}")
+    } else {
+        format!("{rate:.0}")
+    }
+}
+
+/// How full the model's context is. The gauge is a battery: it starts full and
+/// green and drains toward red as the conversation fills the window, so
+/// [`ContextGauge::level`] is how many cells are still LIT.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextGauge {
+    /// Fraction of the window in use, clamped to 0..=1.
+    pub fraction: f32,
+    /// Cells lit, 1..=5 — the discrete state the color steps through. Never
+    /// zero: an empty battery would read as "no reading", and when there is
+    /// no reading there is no gauge at all.
+    pub level: u8,
+}
+
+/// The gauge for a stamped usage, or `None` when the window is unknown (no
+/// denominator, no reading) or nothing has been counted yet.
+pub fn context_gauge(usage: &ChatUsage) -> Option<ContextGauge> {
+    if usage.context_window == 0 || usage.context_tokens == 0 {
+        return None;
+    }
+    let fraction = (usage.context_tokens as f32 / usage.context_window as f32).clamp(0.0, 1.0);
+    // Thresholds sit where the reading changes meaning, not on even fifths:
+    // the last cell is a warning — pi auto-compacts in the high 80s — so it
+    // gets the narrow band, and the roomy half of the window gets the wide one.
+    let level = match fraction {
+        f if f < 0.25 => 5,
+        f if f < 0.50 => 4,
+        f if f < 0.70 => 3,
+        f if f < 0.85 => 2,
+        _ => 1,
+    };
+    Some(ContextGauge { fraction, level })
+}
+
+/// "62k / 200k · 31%" — the gauge's own words, for a tooltip or a status line.
+pub fn format_context(usage: &ChatUsage) -> String {
+    let pct = context_gauge(usage)
+        .map(|g| g.fraction * 100.0)
+        .unwrap_or(0.0);
+    format!(
+        "{} / {} · {pct:.0}%",
+        compact_count(usage.context_tokens),
+        compact_count(usage.context_window)
+    )
+}
+
+/// Token counts read as magnitudes, not digits: 62k, 1.2M.
+pub fn compact_count(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{}k", n / 1_000),
+        _ => format!("{:.1}M", n as f32 / 1_000_000.0),
+    }
 }
 
 /// Session-row sub-line, "project · branch" (comet `chatLocation`): the repo

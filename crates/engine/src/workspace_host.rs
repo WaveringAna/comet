@@ -19,7 +19,7 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use comet_doc::{DeletedProject, WorkspaceDoc, presence_key};
-use comet_proto::{Chat, ChatConfig, Device, Project, Session};
+use comet_proto::{Chat, ChatConfig, ChatUsage, Device, Project, Session};
 use comet_sync::{DocsStore, RoomClient};
 
 use crate::doc_host::EdgeConfig;
@@ -392,6 +392,7 @@ impl WorkspaceHost {
             harness_session_cwd: None,
             project_id,
             last_seen_at: None,
+            usage: None,
         })?;
         Ok(())
     }
@@ -468,6 +469,18 @@ impl WorkspaceHost {
         });
         if let Err(err) = result {
             tracing::warn!(chat = %chat_id, error = %err, "workspace last-command write failed");
+        }
+    }
+
+    pub fn note_usage(&self, chat_id: &str, usage: ChatUsage) {
+        let result = self.claim_chat(chat_id, None).and_then(|_| {
+            self.inner
+                .doc
+                .set_chat_usage(chat_id, usage)
+                .map_err(EngineError::from)
+        });
+        if let Err(err) = result {
+            tracing::warn!(chat = %chat_id, error = %err, "workspace usage write failed");
         }
     }
 
@@ -549,6 +562,7 @@ impl WorkspaceHost {
             harness_session_cwd: None,
             project_id: Some(project.id),
             last_seen_at: None,
+            usage: None,
         })?;
         Ok(())
     }

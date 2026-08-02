@@ -279,6 +279,9 @@ impl Normalizer {
                 let usage = AgentEvent::Usage {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
+                    context_tokens: 0,
+                    context_window: 0,
+                    duration_ms: 0,
                 };
                 let done = if f.subtype == "success" {
                     AgentEvent::Done {

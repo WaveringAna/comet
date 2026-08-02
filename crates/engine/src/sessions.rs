@@ -30,7 +30,7 @@ use comet_doc::{
 };
 use comet_harness::{CancellationToken, Harness, RunControls, SteerMessage};
 use comet_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, ToolCall,
+    AgentEvent, ChatUsage, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, ToolCall,
     UserInputAnswer, UserInputQuestion,
 };
 
@@ -826,6 +826,11 @@ impl Inner {
         }
     }
 
+    fn note_usage(&self, chat_id: &str, usage: ChatUsage) {
+        if let Some(ws) = self.workspace() {
+            ws.note_usage(chat_id, usage);
+        }
+    }
     /// Record the chat's harness-native session id (and its cwd): live-process
     /// cache plus the durable workspace chat row — the row is what survives an
     /// engine restart (comet sessions.ts:1039).
@@ -1309,6 +1314,29 @@ async fn drive_run(
                 ..
             } => {
                 inner.note_command(&chat_id, command);
+            }
+            AgentEvent::Usage {
+                context_tokens,
+                context_window,
+                output_tokens,
+                duration_ms,
+                ..
+            } => {
+                if *context_tokens > 0
+                    || *context_window > 0
+                    || *output_tokens > 0
+                    || *duration_ms > 0
+                {
+                    inner.note_usage(
+                        &chat_id,
+                        ChatUsage {
+                            context_tokens: *context_tokens,
+                            context_window: *context_window,
+                            last_turn_tokens: *output_tokens,
+                            last_turn_ms: *duration_ms,
+                        },
+                    );
+                }
             }
             _ => {}
         }

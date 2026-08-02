@@ -246,11 +246,25 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         output_truncated: bool,
     },
-    /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
+    /// A finished assistant turn's cost, as the harness measured it: what the
+    /// reply spent, how full the model's context now is, and how long the
+    /// stream took. Never persisted to docs — the host stamps the chat row
+    /// with what the viewports display (`Chat::usage`).
     #[serde(rename_all = "camelCase")]
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        /// What the NEXT request will carry: the conversation as the provider
+        /// counted it, cache included (pi's `calculateContextTokens`).
+        /// 0 when the harness cannot say.
+        #[serde(default)]
+        context_tokens: u64,
+        /// The model's context window. 0 when unknown.
+        #[serde(default)]
+        context_window: u64,
+        /// Wall time the reply took to stream. 0 when unmeasured.
+        #[serde(default)]
+        duration_ms: u64,
     },
     Error {
         message: String,

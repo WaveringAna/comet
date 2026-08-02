@@ -55,12 +55,12 @@
 //!   region here stays free for the same reason.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
-use comet_proto::view::{ConnectionStatus, GatePhase};
+use comet_proto::view::{ConnectionStatus, ContextGauge, GatePhase};
 
 use crate::app::{App, ChipKind, Hit, Overlay, Row};
 use crate::keys::{Focus, HELP};
@@ -498,6 +498,42 @@ fn draw_sidebar_row(
 // Main panel
 // ---------------------------------------------------------------------------
 
+/// The context gauge as five cells, draining left to right, tinted by level —
+/// the terminal's read of the gpui strip's battery. Pure.
+pub fn context_gauge_bar(gauge: ContextGauge) -> (&'static str, Color) {
+    match gauge.level {
+        5 => ("[#####]", Color::Green),
+        4 => ("[####·]", Color::LightGreen),
+        3 => ("[###··]", Color::Yellow),
+        2 => ("[##···]", Color::Rgb(255, 140, 0)),
+        _ => ("[#····]", Color::Red),
+    }
+}
+
+/// The status strip's right cluster: the last reply's speed and the context
+/// gauge, both derived in `comet_proto::view` so this reads exactly what the
+/// gpui strip reads. Empty until a turn has been measured.
+fn cost_spans<'a>(app: &App, theme: &Theme) -> Vec<Span<'a>> {
+    let Some(usage) = app.selected_chat_row().and_then(|chat| chat.usage) else {
+        return Vec::new();
+    };
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    if let Some(rate) = comet_proto::view::tokens_per_sec(&usage) {
+        spans.push(Span::styled(
+            comet_proto::view::format_rate(rate),
+            theme.hint(),
+        ));
+    }
+    if let Some(gauge) = comet_proto::view::context_gauge(&usage) {
+        let (bar, tint) = context_gauge_bar(gauge);
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", theme.hint()));
+        }
+        spans.push(Span::styled(bar, Style::default().fg(tint)));
+    }
+    spans
+}
+
 fn draw_main(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     // A column of terminal background down each side of the main pane.
     //
@@ -805,9 +841,22 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
 }
 
 /// The reserved strip above the composer (the original's `h-6`): the working
-/// indicator, or the scroll notice. Reserved even when empty so the composer
-/// never shifts under the cursor.
+/// indicator or the scroll notice on the left, the run's cost on the right.
+/// Reserved even when empty so the composer never shifts under the cursor.
 fn draw_status_strip(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // The cost readout is the state of the CONVERSATION, not of a run in
+    // flight, so it outlives the working line and rides every branch below
+    // (the gpui strip does the same — one reading, two surfaces).
+    let cost = cost_spans(app, theme);
+    if !cost.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(cost)).alignment(Alignment::Right),
+            Rect {
+                width: area.width.saturating_sub(PAD as u16),
+                ..area
+            },
+        );
+    }
     // A notice outranks everything else here: it is the only channel the app has
     // for "that didn't work", and it used to live on a status bar that no longer
     // exists. This row is already reserved, so it costs nothing to land here.

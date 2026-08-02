@@ -196,6 +196,25 @@ pub fn glass_selected_bg() -> Hsla {
     wash(0.07)
 }
 
+/// The context gauge's five states, lit-cell count → color: a battery drains
+/// green → lime → amber → orange → red. The only hue ramp in a monochrome
+/// app, and it earns the exception by being a MEASUREMENT — the reading is
+/// the color, so it has to be legible at a glance and at 10px.
+pub fn context_ramp(level: u8) -> Hsla {
+    match level {
+        5 => oklch(0.792, 0.209, 151.711), // green-400
+        4 => oklch(0.841, 0.238, 128.850), // lime-400
+        3 => oklch(0.828, 0.189, 84.429),  // amber-400
+        2 => oklch(0.750, 0.183, 55.934),  // orange-400
+        _ => oklch(0.704, 0.191, 22.216),  // red-400
+    }
+}
+
+/// The selected chip's bright outline, as an INSET shadow: gpui paints inset
+/// shadows ON TOP of the background, edges only — a border with zero layout
+/// cost. Drop shadows are filled rects painted BEHIND the element, and behind
+/// a 5% fill they showed straight through as an opaque dark plate with a
+/// greyed ring (user report) — nothing may paint behind a glass chip.
 /// A restrained inset edge for selected rows. It should clarify the active
 /// surface without reading as a button outline.
 pub fn glass_selected_shadows() -> Vec<gpui::BoxShadow> {

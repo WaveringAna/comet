@@ -100,6 +100,14 @@ impl Harness for MockHarness {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         let delay = std::time::Duration::from_millis(delay_ms);
+        // Dev/testing knob: `COMET_MOCK_CONTEXT_PCT=N` (0..=100, default 31) sets
+        // the simulated context window fullness reported in the pre-Done Usage event
+        // as a percentage of a 200,000 context_window.
+        let mock_context_pct = std::env::var("COMET_MOCK_CONTEXT_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v.min(100))
+            .unwrap_or(31);
 
         // Dev/testing knob: `COMET_MOCK_QUESTION=1` swaps in a run that asks
         // the user questions mid-stream via `controls.request_input` (the
@@ -140,6 +148,13 @@ impl Harness for MockHarness {
                             picked.join("**, **")
                         }
                     ),
+                });
+                let _ = tx.send(AgentEvent::Usage {
+                    input_tokens: 64,
+                    output_tokens: 30,
+                    context_tokens: 200_000 * mock_context_pct / 100,
+                    context_window: 200_000,
+                    duration_ms: 800,
                 });
                 let _ = tx.send(AgentEvent::Done {
                     status: DoneStatus::Completed,
@@ -306,7 +321,7 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
-        let events: Vec<Result<AgentEvent, HarnessError>> = body
+        let pre_tail_events: Vec<AgentEvent> = body
             .iter()
             .cycle()
             .take(body.len() * repeat)
@@ -316,6 +331,27 @@ impl Harness for MockHarness {
             .chain(table_event)
             .chain(mend_event)
             .chain(error_event)
+            .collect();
+        let total_chars: usize = pre_tail_events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text } => Some(text.chars().count()),
+                _ => None,
+            })
+            .sum();
+        let output_tokens = (total_chars / 4).max(1) as u64;
+        let context_window = 200_000u64;
+        let context_tokens = context_window * mock_context_pct / 100;
+        let usage_event = AgentEvent::Usage {
+            input_tokens: 128,
+            output_tokens,
+            context_tokens,
+            context_window,
+            duration_ms: 1200,
+        };
+        let events: Vec<Result<AgentEvent, HarnessError>> = pre_tail_events
+            .into_iter()
+            .chain(std::iter::once(usage_event))
             .chain(tail.iter().cloned())
             .map(Ok)
             .collect();

@@ -124,6 +124,11 @@ pub struct Chat {
     /// device clears the badge everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// Host-stamped run cost: how full the model's context is and how fast the
+    /// last reply came out. One write per turn, display only — see
+    /// [`crate::view::context_gauge`] and [`crate::view::tokens_per_sec`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ChatUsage>,
 }
 
 impl Chat {
@@ -135,6 +140,22 @@ impl Chat {
             (None, _) => false,
         }
     }
+}
+
+/// What a chat's last turn cost. Host-stamped onto the chat row once per turn
+/// (small, LWW, one write) so every viewport — local or relayed — reads the
+/// same numbers as the host's own footer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatUsage {
+    /// What the next request will carry, cache included.
+    pub context_tokens: u64,
+    /// The model's context window. 0 = unknown, and the gauge stays hidden:
+    /// a fullness bar with no denominator is a decoration, not a reading.
+    pub context_window: u64,
+    /// Output tokens of the last completed reply, and how long it streamed.
+    pub last_turn_tokens: u64,
+    pub last_turn_ms: u64,
 }
 
 /// Display status for a chat row/tab: the four user-facing states plus a

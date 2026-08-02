@@ -1140,6 +1140,7 @@ mod tests {
             harness_session_cwd: None,
             project_id: None,
             last_seen_at: None,
+            usage: None,
         }
     }
 

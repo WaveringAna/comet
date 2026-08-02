@@ -50,6 +50,7 @@ fn chat(id: &str, title: &str) -> Chat {
         harness_session_cwd: None,
         project_id: Some("s1".into()),
         last_seen_at: Some(Utc::now()),
+        usage: None,
     }
 }
 
@@ -2061,4 +2062,58 @@ fn a_project_that_is_not_a_checkout_has_no_footer_at_all() {
     app.apply(Update::Projects(vec![plain]));
     app.activate_project("s1".into());
     assert!(app.composer_footer().is_none());
+}
+
+#[test]
+fn context_gauge_bar_covers_all_five_levels() {
+    use comet_proto::view::ContextGauge;
+    use ratatui::style::Color;
+
+    let cases = [
+        (5, "[#####]", Color::Green),
+        (4, "[####·]", Color::LightGreen),
+        (3, "[###··]", Color::Yellow),
+        (2, "[##···]", Color::Rgb(255, 140, 0)),
+        (1, "[#····]", Color::Red),
+    ];
+
+    for (level, expected_bar, expected_color) in cases {
+        let gauge = ContextGauge {
+            fraction: 0.0,
+            level,
+        };
+        let (bar, color) = render::context_gauge_bar(gauge);
+        assert_eq!(bar, expected_bar, "bar for level {level}");
+        assert_eq!(color, expected_color, "color for level {level}");
+    }
+}
+
+#[test]
+fn the_working_strip_reports_turn_rate_and_context_gauge() {
+    use comet_proto::ChatUsage;
+
+    let mut app = populated();
+    if let Some(chat) = app.chats.iter_mut().find(|c| c.id == "c1") {
+        chat.usage = Some(ChatUsage {
+            last_turn_tokens: 470,
+            last_turn_ms: 10000,
+            context_tokens: 1000,
+            context_window: 200000,
+        });
+    }
+    app.apply(Update::Sessions(vec![Session {
+        chat_id: "c1".into(),
+        device_id: "dev".into(),
+        status: SessionStatus::Working,
+        started_at: Some(Utc::now() - chrono::Duration::seconds(11)),
+        updated_at: Utc::now(),
+    }]));
+
+    let screen = joined(&snapshot(&mut app, 100, 24));
+    assert!(screen.contains("Working"), "{screen}");
+    assert!(screen.contains("47 tok/s"), "rate missing:\n{screen}");
+    assert!(
+        screen.contains("[#####]"),
+        "context gauge missing:\n{screen}"
+    );
 }

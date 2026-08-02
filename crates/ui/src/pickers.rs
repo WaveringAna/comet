@@ -22,7 +22,8 @@ use gpui::{
 
 use comet_engine::registry::HarnessDescriptor;
 use comet_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel,
+    ChatConfig, ChatUsage, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel,
+    view,
 };
 use comet_rpc::methods;
 
@@ -1642,17 +1643,40 @@ impl Pickers {
         let ref_side =
             attach_overlay_end(ref_chip, &mut overlay, PickerKind::Branch, "branch-popover");
 
+        // Left: where the work happens — the checkout, then the ref it sits
+        // on, read as one phrase across a separator. Right: what the last
+        // turn of that work cost.
+        let cost = run_cost(
+            session.as_ref().and_then(|chat| chat.usage).as_ref(),
+            &theme,
+        );
         if let Some(chat) = &session {
             // The checkout KIND is fixed at creation (harness resume is
-            // cwd-scoped — the session never moves folders): label only.
+            // cwd-scoped — the session never moves folders), so this is a
+            // label, not a control. It sits next to one though, so it says
+            // WHERE it is on hover instead of leaving you to click a thing
+            // that can never answer.
             let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != project.path);
             let (icon_path, label) = if is_worktree {
                 (crate::icons::FOLDER_WITH_FILES, "Worktree")
             } else {
                 (crate::icons::FOLDER, "Local checkout")
             };
-            let left = Self::footer_label(icon_path, SharedString::from(label), &theme);
-            return Some(row.child(left).child(ref_side).into_any_element());
+            let path = chat.cwd.clone().unwrap_or_else(|| project.path.clone());
+            let checkout = Self::footer_label(icon_path, SharedString::from(label), &theme)
+                .id("footer-checkout-label")
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| crate::transcript::RunTooltip {
+                        lines: vec![path.clone()],
+                        mono: true,
+                    })
+                    .into()
+                });
+            return Some(
+                row.child(footer_group(checkout, ref_side, &theme))
+                    .children(cost)
+                    .into_any_element(),
+            );
         }
 
         let kind_icon = match (self.config.checkout, self.selected_ref_worktree().is_some()) {
@@ -1667,15 +1691,16 @@ impl Pickers {
             &theme,
             cx,
         );
+        let checkout = attach_overlay(
+            kind_chip,
+            &mut overlay,
+            PickerKind::Checkout,
+            "checkout-popover",
+        );
         Some(
-            row.child(attach_overlay(
-                kind_chip,
-                &mut overlay,
-                PickerKind::Checkout,
-                "checkout-popover",
-            ))
-            .child(ref_side)
-            .into_any_element(),
+            row.child(footer_group(checkout, ref_side, &theme))
+                .children(cost)
+                .into_any_element(),
         )
     }
 
@@ -2486,6 +2511,31 @@ fn attach_overlay_end(
     chip
 }
 
+/// The footer's left phrase: checkout · ref. Two controls, one statement about
+/// where the work lands — the dot is what keeps them from reading as unrelated
+/// buttons that happen to sit next to each other.
+fn footer_group(
+    checkout: impl IntoElement,
+    reference: impl IntoElement,
+    theme: &Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .min_w_0()
+        .child(checkout)
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(11.0))
+                .text_color(theme.text_faint.opacity(0.7))
+                .child(SharedString::from("·")),
+        )
+        .child(reference)
+}
+
 impl Render for Pickers {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -2636,6 +2686,112 @@ impl Render for Pickers {
             .child(left)
             .child(right)
     }
+}
+
+/// The composer footer's right end: what the last reply cost. It sits opposite
+/// the checkout phrase because it is the same kind of fact — the standing
+/// state of this conversation, not of a run in flight. Empty until a turn has
+/// been measured: the host stamps [`comet_proto::ChatUsage`] once per turn,
+/// and a viewport that has not seen one shows nothing rather than zeros.
+fn run_cost(usage: Option<&ChatUsage>, theme: &Theme) -> Option<AnyElement> {
+    let usage = usage?;
+    let mut parts: Vec<AnyElement> = Vec::new();
+    if let Some(rate) = view::tokens_per_sec(usage) {
+        parts.push(
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                // Digits in mono so the number stops jittering as it changes,
+                // unit in the text face at the SAME size — one mono string
+                // would carry the mono space between them, and a smaller unit
+                // reads as a second, unrelated label.
+                .gap(px(2.0))
+                .text_size(px(10.5))
+                .text_color(theme.text_faint)
+                .child(
+                    div()
+                        .font_family(theme.font_mono.clone())
+                        .child(SharedString::from(view::format_rate_value(rate))),
+                )
+                .child(SharedString::from("tok/s"))
+                .into_any_element(),
+        );
+    }
+    if let Some(gauge) = view::context_gauge(usage) {
+        parts.push(context_battery(gauge, view::format_context(usage)));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .gap(px(Theme::SPACE_SM))
+            .children(parts)
+            .into_any_element(),
+    )
+}
+
+/// The context gauge: a battery, five cells, draining green → red as the
+/// conversation fills the model's window. Discrete cells rather than a
+/// continuous bar because the number that matters is "how much room is left"
+/// at a glance, and five states read faster than a length does. The exact
+/// figures ride the hover tooltip — the strip is a glance, not a report.
+fn context_battery(gauge: view::ContextGauge, detail: String) -> AnyElement {
+    let lit = crate::theme::context_ramp(gauge.level);
+    let cells = (0..5).map(|ix| {
+        div()
+            .flex_1()
+            .h_full()
+            .rounded(px(1.0))
+            .bg(if ix < gauge.level {
+                lit
+            } else {
+                crate::theme::wash(0.10)
+            })
+    });
+    div()
+        .id("context-battery")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(1.5))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| crate::transcript::RunTooltip {
+                lines: vec![format!("Context {detail}")],
+                mono: false,
+            })
+            .into()
+        })
+        .child(
+            div()
+                .w(px(30.0))
+                .h(px(12.0))
+                .rounded(px(3.0))
+                .border_1()
+                // The shell tints with the reading: an all-grey case around a
+                // red cell reads as a broken widget, not a warning.
+                .border_color(lit.opacity(0.45))
+                .p(px(1.5))
+                .flex()
+                .flex_row()
+                .gap(px(1.0))
+                .children(cells),
+        )
+        // The terminal nub — what makes it read as a battery and not a
+        // progress bar at 12px tall.
+        .child(
+            div()
+                .w(px(2.0))
+                .h(px(5.0))
+                .rounded_r(px(1.0))
+                .bg(lit.opacity(0.45)),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]

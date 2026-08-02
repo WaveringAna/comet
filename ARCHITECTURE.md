@@ -7,7 +7,8 @@ A ground-up native rewrite of [comet](../comet) — a multi-device controller fo
 - Sync is Loro CRDT docs (loro-mirror model) through Cloudflare Durable Objects.
 - Durable Objects stay **TypeScript** (decision + evidence: `docs/research/durable-objects-language.md`).
   Everything device-side is Rust.
-- Feature parity with comet **except token-usage display** (poor fit for CRDTs; excluded).
+- Feature parity with comet **except token-usage history** (per-message columns, lifetime stats,
+  heatmaps — poor fit for CRDTs; excluded). The live readings a footer needs are kept, see §4.
 - Frontend is **gpui** (pinned Zed rev). Virtualization + markdown techniques ported from
   **mugen + pretext** (`docs/research/mugen-pretext.md`).
 - One binary, **headed or headless**. Smooth transitions/animations matching the original
@@ -206,6 +207,15 @@ feature spec `docs/research/feature-inventory.md` §1.
   images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance) replacing the composer while input
   is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
   toggle) as gpui popovers with `menu-in` scale/fade.
+- **Run cost**: the composer's under-pill toolbar reads `checkout · ref` on the left and, on the
+  right, what the last turn cost — the reply's `tok/s` and a five-cell **context battery** that
+  drains green → lime → amber → orange → red as the conversation fills the model's window, exact
+  figures on its tooltip. Both are measured, not estimated: pi reports `contextWindow` in
+  `get_state` and per-message `usage` on `message_end`, the adapter times the stream, and the
+  host stamps `ChatUsage` on the workspace chat row once per turn (small, LWW — a per-frame
+  number would be CRDT churn). Derivations live in `comet_proto::view` (`tokens_per_sec`,
+  `context_gauge`), so the TUI's own status line reads the same numbers and the same five
+  states. The strip above the composer stays what it was: the working indicator alone.
 - **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
   engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height
   drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
@@ -288,9 +298,10 @@ per `docs/research/durable-objects-language.md`.
 
 ## 7. Parity exclusions & deliberate changes
 
-- **Excluded**: token-usage display (profile heatmap, lifetime stats, per-message token columns,
-  `WatchUsage`). Rate-limit meters on agent accounts are *kept* (separate concern; probed from
-  CLIs, not CRDT-synced).
+- **Excluded**: token-usage HISTORY (profile heatmap, lifetime stats, per-message token columns,
+  `WatchUsage`). The two live readings are kept and stamped per turn on the chat row — the last
+  reply's tok/s and the context battery (§4) — as is the rate-limit meter on agent accounts
+  (separate concern; probed from CLIs, not CRDT-synced).
 - **Changed**: Postgres entity sync/server → workspace doc + edge; Electron/React/mugen → gpui with
   ported techniques; Node harness SDKs → subprocess protocols; WebRTC → device-room relay (comet
   had already made this move); mobile app → out of scope for this repo.

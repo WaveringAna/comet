@@ -3127,7 +3127,8 @@ impl Shell {
 
     /// Working indicator strip: gradient spinner + rotating flavour word (7s,
     /// seeded per chat) + elapsed, staleness-gated via [`Indicator`]; falls back
-    /// to a "Sending…" bridge and then the engine mode line.
+    /// to a "Sending…" bridge and then the engine mode line. (The run's cost
+    /// reads under the composer, next to the checkout it belongs to.)
     fn render_status_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
@@ -3158,43 +3159,43 @@ impl Shell {
             .unwrap_or(0);
         let sending = self.composer.read(cx).is_sending();
 
-        match indicator {
+        let status: Vec<AnyElement> = match indicator {
             Indicator::Working => {
                 let word =
                     transcript::flavour_word(transcript::flavour_seed(&chat_id), elapsed_secs);
-                strip
-                    .child(loaders::gradient_spinner("working-indicator", &theme, 2.5))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(format!("{word}…"))),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(transcript::format_elapsed(elapsed_secs))),
-                    )
-                    .into_any_element()
-            }
-            // No label: the QuestionPanel right below IS the awaiting-input
-            // surface — a strip caption above it was redundant (user request).
-            Indicator::AwaitingInput => strip.into_any_element(),
-            Indicator::Errored => strip
-                .text_color(theme.danger)
-                .child(SharedString::from("Run failed"))
-                .into_any_element(),
-            Indicator::None if sending => strip
-                .child(loaders::gradient_spinner("sending-indicator", &theme, 2.5))
-                .child(
+                vec![
+                    loaders::gradient_spinner("working-indicator", &theme, 2.5).into_any_element(),
                     div()
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from("Sending…")),
-                )
-                .into_any_element(),
-            Indicator::None => strip.into_any_element(),
-        }
+                        .child(SharedString::from(format!("{word}…")))
+                        .into_any_element(),
+                    div()
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(transcript::format_elapsed(elapsed_secs)))
+                        .into_any_element(),
+                ]
+            }
+            // No label: the QuestionPanel right below IS the awaiting-input
+            // surface — a strip caption above it was redundant (user request).
+            Indicator::AwaitingInput => Vec::new(),
+            Indicator::Errored => vec![
+                div()
+                    .text_color(theme.danger)
+                    .child(SharedString::from("Run failed"))
+                    .into_any_element(),
+            ],
+            Indicator::None if sending => vec![
+                loaders::gradient_spinner("sending-indicator", &theme, 2.5).into_any_element(),
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from("Sending…"))
+                    .into_any_element(),
+            ],
+            Indicator::None => Vec::new(),
+        };
+        strip.children(status).into_any_element()
     }
 
     fn render_right_panel_launcher_button(
