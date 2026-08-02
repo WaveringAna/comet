@@ -328,6 +328,70 @@ async fn queued_run_command_executes_end_to_end() {
 }
 
 #[tokio::test]
+async fn harness_patches_are_lazily_readable_but_never_journaled() {
+    let dir = tempfile::tempdir().unwrap();
+    let patch = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@\n-old\n+new\n";
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: vec![
+                AgentEvent::ToolCall {
+                    id: "edit-1".into(),
+                    call: ToolCall::EditFile {
+                        path: "src/lib.rs".into(),
+                        old_string: None,
+                        new_string: None,
+                    },
+                },
+                AgentEvent::EphemeralToolDiff {
+                    tool_id: "edit-1".into(),
+                    path: "src/lib.rs".into(),
+                    diff: patch.into(),
+                },
+                AgentEvent::ToolResult {
+                    id: "edit-1".into(),
+                    is_error: false,
+                    output: None,
+                    output_truncated: false,
+                },
+                done(DoneStatus::Completed),
+            ],
+        }),
+    );
+
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("edit it"), None)
+        .await
+        .unwrap();
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "patch run to settle",
+    )
+    .await;
+
+    let preview = core.sessions.journal_tool_diff(CHAT, "edit-1").unwrap();
+    assert!(preview.found);
+    assert_eq!(preview.path.as_deref(), Some("src/lib.rs"));
+    assert_eq!(preview.diff.as_deref(), Some(patch));
+    assert!(
+        !core
+            .sessions
+            .subscribe(CHAT, 0)
+            .unwrap()
+            .0
+            .iter()
+            .any(|event| matches!(event.event, AgentEvent::EphemeralToolDiff { .. })),
+        "raw patches must not enter the replay journal"
+    );
+
+    core.shutdown().await;
+    assert!(
+        !dir.path().join("ephemeral-diffs").exists(),
+        "graceful shutdown clears the private preview cache"
+    );
+}
+
+#[tokio::test]
 async fn session_status_transitions_idle_working_idle() {
     let dir = tempfile::tempdir().unwrap();
     let core = assemble(

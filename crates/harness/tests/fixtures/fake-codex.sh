@@ -71,6 +71,7 @@ case "$turnline" in
   emit '{"method":"item/started","params":{"item":{"id":"c1","type":"commandExecution","command":"ls -la"}}}'
   emit '{"method":"item/completed","params":{"item":{"id":"c1","type":"commandExecution","command":"ls -la","status":"completed","exitCode":1}}}'
   emit '{"method":"item/started","params":{"item":{"id":"f1","type":"fileChange","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
+  emit '{"method":"item/fileChange/patchUpdated","params":{"itemId":"f1","threadId":"th-1","turnId":"t-1","changes":[{"path":"/tmp/new.rs","kind":{"type":"add"},"diff":"--- /dev/null\n+++ b/tmp/new.rs\n@@ -0,0 +1 @@\n+fn main() {}\n"}]}}'
   emit '{"method":"item/completed","params":{"item":{"id":"f1","type":"fileChange","status":"completed","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
   emit '{"method":"item/started","params":{"item":{"id":"mcp1","type":"mcpToolCall","server":"linear","tool":"search","arguments":{"q":"bug"}}}}'
   emit '{"method":"item/completed","params":{"item":{"id":"mcp1","type":"mcpToolCall","server":"linear","tool":"search","status":"failed"}}}'

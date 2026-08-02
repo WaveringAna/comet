@@ -35,6 +35,7 @@ use comet_proto::{
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
+use crate::ephemeral_diffs::EphemeralDiffStore;
 use crate::registry::HarnessRegistry;
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
@@ -83,6 +84,7 @@ struct RunHandle {
 struct Inner {
     device_id: String,
     journal: Arc<RunJournal>,
+    ephemeral_diffs: Arc<EphemeralDiffStore>,
     registry: Arc<HarnessRegistry>,
     doc_host: OnceLock<DocHost>,
     /// chat_id → live run.
@@ -117,12 +119,14 @@ impl SessionsEngine {
         device_id: String,
         journal: Arc<RunJournal>,
         registry: Arc<HarnessRegistry>,
+        ephemeral_diffs: Arc<EphemeralDiffStore>,
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
         Self {
             inner: Arc::new(Inner {
                 device_id,
                 journal,
+                ephemeral_diffs,
                 registry,
                 doc_host: OnceLock::new(),
                 runs: Mutex::new(HashMap::new()),
@@ -238,60 +242,15 @@ impl SessionsEngine {
         })
     }
 
-    /// Host-local ephemeral diff lookup for a write/edit tool. Full tool inputs
-    /// remain in the run journal only; the diff is derived per request and is
-    /// never copied into the synced document or retained in an engine cache.
+    /// Host-local, process-lifetime diff lookup for a write/edit tool. The diff
+    /// was captured at tool execution and lives only in the ephemeral disk store;
+    /// it is never copied into the synced document or run journal.
     pub fn journal_tool_diff(
         &self,
         chat_id: &str,
         tool_id: &str,
     ) -> Result<comet_proto::ToolDiffReply, EngineError> {
-        let events = self.inner.journal.replay(chat_id, 0)?;
-        let mut call = None;
-        for (_, event) in events.iter().rev() {
-            if let AgentEvent::ToolCall {
-                id,
-                call: candidate,
-            } = event
-                && id == tool_id
-            {
-                call = Some(candidate);
-                break;
-            }
-        }
-        let Some(call) = call else {
-            return Ok(comet_proto::ToolDiffReply {
-                found: false,
-                path: None,
-                diff: None,
-            });
-        };
-        let (path, old, new) = match call {
-            ToolCall::WriteFile { path, content } => {
-                (path, String::new(), content.clone().unwrap_or_default())
-            }
-            ToolCall::EditFile {
-                path,
-                old_string,
-                new_string,
-            } => (
-                path,
-                old_string.clone().unwrap_or_default(),
-                new_string.clone().unwrap_or_default(),
-            ),
-            _ => {
-                return Ok(comet_proto::ToolDiffReply {
-                    found: false,
-                    path: None,
-                    diff: None,
-                });
-            }
-        };
-        Ok(comet_proto::ToolDiffReply {
-            found: true,
-            path: Some(path.clone()),
-            diff: Some(ephemeral_diff(&path, &old, &new)),
-        })
+        Ok(self.inner.ephemeral_diffs.load(chat_id, tool_id)?)
     }
 
     /// Start (or route) a run for `chat_id`.
@@ -684,41 +643,6 @@ impl SessionsEngine {
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
     }
-}
-
-/// Compact, host-local presentation diff. This deliberately favors bounded
-/// storage and a readable tool preview over a full Myers diff: edits show the
-/// replaced block, while writes show the new file as additions.
-fn ephemeral_diff(path: &str, old: &str, new: &str) -> String {
-    const MAX_DIFF_BYTES: usize = 48 * 1024;
-    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
-    let truncated = if old.is_empty() {
-        append_diff_lines(&mut out, "+ ", new, MAX_DIFF_BYTES)
-    } else {
-        let old_truncated = append_diff_lines(&mut out, "- ", old, MAX_DIFF_BYTES);
-        if old_truncated {
-            true
-        } else {
-            append_diff_lines(&mut out, "+ ", new, MAX_DIFF_BYTES)
-        }
-    };
-    if truncated {
-        out.push_str("… diff truncated …\n");
-    }
-    out
-}
-
-fn append_diff_lines(out: &mut String, prefix: &str, source: &str, max_bytes: usize) -> bool {
-    for line in source.lines() {
-        let needed = prefix.len() + line.len() + 1;
-        if out.len() + needed > max_bytes {
-            return true;
-        }
-        out.push_str(prefix);
-        out.push_str(line);
-        out.push('\n');
-    }
-    false
 }
 
 impl Inner {
@@ -1204,6 +1128,34 @@ async fn drive_run(
         // per long turn observed) — the touch above already did their job.
         if matches!(&event, AgentEvent::ReasoningDelta { text } if text.is_empty()) {
             continue;
+        }
+
+        // This carries a harness-provided unified patch. Handle it before the
+        // normal publish/fold path so sensitive source never enters the run
+        // journal or synced transcript document.
+        if let AgentEvent::EphemeralToolDiff {
+            tool_id,
+            path,
+            diff,
+        } = &event
+        {
+            inner
+                .ephemeral_diffs
+                .save_rendered(&chat_id, tool_id, path, diff);
+            continue;
+        }
+
+        // Preserve full file-change evidence outside the journal before the
+        // sanitized transcript fold sees this event. Codex only gives us paths,
+        // so start snapshots and completed results form the rendered preview.
+        match &event {
+            AgentEvent::ToolCall { id, call } => {
+                inner.ephemeral_diffs.begin(&chat_id, id, call, &run_cwd);
+            }
+            AgentEvent::ToolResult { id, is_error, .. } => {
+                inner.ephemeral_diffs.finish(&chat_id, id, *is_error);
+            }
+            _ => {}
         }
 
         // Failed-resume fallback: an engine-injected `--resume` naming a session

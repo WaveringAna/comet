@@ -50,7 +50,8 @@ use comet_proto::{
 use crate::{Harness, HarnessError, RunControls};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
 use normalize::{
-    Phase, delta_text, item_id, item_type, map_item, turn_error_message, turn_id, usage_event,
+    Phase, delta_text, file_change_diff, item_id, item_type, map_item, turn_error_message, turn_id,
+    usage_event,
 };
 use rpc::{Incoming, RpcClient};
 
@@ -594,6 +595,14 @@ async fn run_session(session: Session) {
                     "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
                         if let Some(text) = delta_text(&params)
                             && !send(&event_tx, AgentEvent::ReasoningDelta { text }).await
+                        {
+                            break 'main;
+                        }
+                    }
+
+                    "item/fileChange/patchUpdated" | "item/file_change/patch_updated" => {
+                        if let Some(diff) = file_change_diff(&params)
+                            && !send(&event_tx, diff).await
                         {
                             break 'main;
                         }

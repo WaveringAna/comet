@@ -246,6 +246,15 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         output_truncated: bool,
     },
+    /// A complete file-change patch supplied by a harness. The engine consumes
+    /// this directly into its process-local preview cache and deliberately does
+    /// not journal, sync, or fold it into transcript parts.
+    #[serde(rename_all = "camelCase")]
+    EphemeralToolDiff {
+        tool_id: String,
+        path: String,
+        diff: String,
+    },
     /// A finished assistant turn's cost, as the harness measured it: what the
     /// reply spent, how full the model's context now is, and how long the
     /// stream took. Never persisted to docs — the host stamps the chat row

@@ -16,6 +16,7 @@ pub mod agent_accounts;
 pub mod auth;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod ephemeral_diffs;
 pub mod instance_lock;
 pub mod projects;
 pub mod registry;
@@ -32,6 +33,7 @@ pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use diff_sync::{CheckoutDiffSync, DiffSidecar, DiffSnapshot, capture_diff};
 pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
+pub use ephemeral_diffs::EphemeralDiffStore;
 pub use instance_lock::InstanceLock;
 pub use projects::ProjectsSync;
 pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
@@ -100,6 +102,8 @@ pub struct EngineCore {
     pub repos: Repos,
     pub terminals: Terminals,
     pub diff_sync: CheckoutDiffSync,
+    /// Private, process-lifetime tool previews. Never journaled or synced.
+    pub ephemeral_diffs: Arc<EphemeralDiffStore>,
     pub projects_sync: ProjectsSync,
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
@@ -154,7 +158,13 @@ impl EngineCore {
             .join(sanitize_path_id(user_id));
         let store = Arc::new(DocsStore::open(&org_dir)?);
         let journal = Arc::new(RunJournal::open(org_dir.join("journals"))?);
-        let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        let ephemeral_diffs = Arc::new(EphemeralDiffStore::open(data_dir)?);
+        let sessions = SessionsEngine::new(
+            device_id.clone(),
+            journal,
+            registry.clone(),
+            ephemeral_diffs.clone(),
+        );
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
@@ -201,6 +211,7 @@ impl EngineCore {
             repos,
             terminals,
             diff_sync,
+            ephemeral_diffs,
             projects_sync,
             uploads,
             agent_accounts,
@@ -334,6 +345,7 @@ impl EngineCore {
         self.sessions.shutdown().await;
         self.terminals.shutdown();
         self.agent_accounts.shutdown();
+        self.ephemeral_diffs.clear();
         self.doc_host.flush_all();
         self.workspace.shutdown();
     }

@@ -171,6 +171,11 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         output: None,
         output_truncated: false,
     }));
+    assert!(events.contains(&AgentEvent::EphemeralToolDiff {
+        tool_id: "f1".into(),
+        path: "/tmp/new.rs".into(),
+        diff: "--- /dev/null\n+++ b/tmp/new.rs\n@@ -0,0 +1 @@\n+fn main() {}\n".into(),
+    }));
 
     // mcpToolCall with failed status.
     assert!(events.contains(&AgentEvent::ToolCall {

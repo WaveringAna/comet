@@ -77,6 +77,43 @@ pub(crate) fn usage_event(params: &Value) -> Option<AgentEvent> {
     })
 }
 
+/// Codex v2 sends complete unified patches in both file-change items and the
+/// `item/fileChange/patchUpdated` notification. Keep them out of the normal
+/// transcript event payload: the engine writes this marker only to its
+/// process-local ephemeral diff cache.
+pub(crate) fn file_change_diff(params: &Value) -> Option<AgentEvent> {
+    let tool_id = str_field(params, &["itemId", "item_id", "id"]);
+    if tool_id.is_empty() {
+        return None;
+    }
+    let changes = params.get("changes")?.as_array()?;
+    let mut paths = Vec::new();
+    let mut diffs = Vec::new();
+    for change in changes {
+        let path = str_field(change, &["path"]);
+        if !path.is_empty() {
+            paths.push(path);
+        }
+        if let Some(diff) = change.get("diff").and_then(Value::as_str)
+            && !diff.is_empty()
+        {
+            diffs.push(diff);
+        }
+    }
+    if diffs.is_empty() {
+        return None;
+    }
+    Some(AgentEvent::EphemeralToolDiff {
+        tool_id,
+        path: if paths.len() == 1 {
+            paths.pop().unwrap_or_default()
+        } else {
+            "multiple files".into()
+        },
+        diff: diffs.join("\n"),
+    })
+}
+
 /// Tool-shaped Codex items must always close the lifecycle they open: started
 /// opens the ToolCall, completed refreshes its metadata and resolves the same
 /// stable id (port of codex.ts `toolLifecycle`).
@@ -166,12 +203,14 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     (str_field(c, &["path"]), kind.to_owned())
                 })
                 .collect();
-            tool_lifecycle(
+            let mut events: Vec<AgentEvent> = file_change_diff(item).into_iter().collect();
+            events.extend(tool_lifecycle(
                 phase,
                 id,
                 file_change_call(&changes),
                 status == "failed" || status == "declined",
-            )
+            ));
+            events
         }
         "mcpToolCall" | "mcp_tool_call" => match phase {
             Phase::Started => {
@@ -316,6 +355,26 @@ mod tests {
                 id: "f3".into(),
                 call: ToolCall::ApplyPatch { path: None },
             }]
+        );
+    }
+
+    #[test]
+    fn file_change_patch_is_kept_as_an_ephemeral_event() {
+        let event = file_change_diff(&json!({
+            "itemId": "f1",
+            "changes": [{
+                "path": "src/lib.rs",
+                "kind": {"type": "update"},
+                "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@\n-old\n+new\n"
+            }]
+        }));
+        assert_eq!(
+            event,
+            Some(AgentEvent::EphemeralToolDiff {
+                tool_id: "f1".into(),
+                path: "src/lib.rs".into(),
+                diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@\n-old\n+new\n".into(),
+            })
         );
     }
 
