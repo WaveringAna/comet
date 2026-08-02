@@ -7,7 +7,7 @@
 //! - `commands`: LoroList of LoroMap {
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
 //!
-//! Part maps: { id, kind: "text"|"tool"|"input"|"error", text?: LoroText, call?: json,
+//! Part maps: { id, kind: "text"|"reasoning"|"tool"|"input"|"error", text?: LoroText, call?: json,
 //! isError?, questions?: json, resolved?, message? }. Text bodies are **LoroText** so streaming
 //! appends RLE-merge (1.03x oplog overhead vs 125x for whole-value rewrites).
 
@@ -82,6 +82,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             text: Some(text.clone()),
             ..Default::default()
         },
+        MessagePart::Reasoning { id, text } => DocPartJson {
+            id: id.clone(),
+            kind: "reasoning".into(),
+            text: Some(text.clone()),
+            ..Default::default()
+        },
         MessagePart::Tool {
             id,
             call,
@@ -131,6 +137,10 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 id: p.id,
                 text: String::new(),
             },
+        },
+        "reasoning" => MessagePart::Reasoning {
+            id: p.id,
+            text: p.text.unwrap_or_default(),
         },
         "input" => MessagePart::Input {
             id: p.id.clone(),
@@ -666,6 +676,29 @@ impl<'a> SegmentWriter<'a> {
                                 dirty = true;
                             }
                         }
+                        (
+                            MessagePart::Reasoning { text: old, .. },
+                            MessagePart::Reasoning { text: new, .. },
+                        ) if new.starts_with(old.as_str()) => {
+                            let delta = &new[old.len()..];
+                            if !delta.is_empty() {
+                                let part_map = part_map_at(&parts, i)?;
+                                match part_map.get("text") {
+                                    Some(loro::ValueOrContainer::Container(
+                                        loro::Container::Text(t),
+                                    )) => {
+                                        let len = t.len_unicode();
+                                        t.insert(len, delta)?;
+                                    }
+                                    _ => {
+                                        return Err(DocError::Schema(
+                                            "reasoning part missing LoroText".into(),
+                                        ));
+                                    }
+                                }
+                                dirty = true;
+                            }
+                        }
                         _ => {
                             // Field-level update (tool refresh/resolve, input resolve, or a
                             // non-append text rewrite, which the fold shouldn't produce —
@@ -804,6 +837,34 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn round_trips_reasoning_parts_and_streams_deltas() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 1).unwrap();
+        let mut folded = fold_event_into_parts(
+            &[],
+            &AgentEvent::ReasoningDelta {
+                text: "first".into(),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        folded = fold_event_into_parts(
+            &folded,
+            &AgentEvent::ReasoningDelta {
+                text: " second".into(),
+            },
+        );
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+
+        assert_eq!(
+            doc.read_entries().unwrap()[0].parts,
+            vec![MessagePart::Reasoning {
+                id: "r0".into(),
+                text: "first second".into(),
+            }]
+        );
     }
 
     #[test]

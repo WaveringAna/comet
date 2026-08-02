@@ -25,6 +25,12 @@ pub enum MessagePart {
         id: String,
         text: String,
     },
+    /// The model's reasoning stream, shown as a quiet inline transcript row.
+    /// It is kept separate from answer text so the UI can distinguish thinking from the reply.
+    Reasoning {
+        id: String,
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
     Tool {
         id: String,
@@ -53,6 +59,7 @@ impl MessagePart {
     pub fn id(&self) -> &str {
         match self {
             MessagePart::Text { id, .. }
+            | MessagePart::Reasoning { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. } => id,
@@ -61,7 +68,7 @@ impl MessagePart {
 
     pub fn byte_len(&self) -> usize {
         match self {
-            MessagePart::Text { text, .. } => text.len(),
+            MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => text.len(),
             MessagePart::Tool { call, .. } => serde_json::to_vec(call).map_or(0, |v| v.len()),
             MessagePart::Input { questions, .. } => {
                 serde_json::to_vec(questions).map_or(0, |v| v.len())
@@ -77,6 +84,7 @@ impl MessagePart {
 /// - `SessionStarted` / `Steered` reset the accumulator (turn boundary — makes replay safe).
 /// - `TextDelta` appends to the trailing text part, or starts a new one if the trail is not text
 ///   (a tool call in between breaks the text block).
+/// - `ReasoningDelta` appends to the trailing reasoning part, or starts a new reasoning part.
 /// - `ToolCall` appends, or refreshes in place when the id already exists (SDK retry idempotence).
 /// - `ToolResult` marks the matching tool part resolved / errored in place.
 /// - `InputRequested` appends an input part; `InputResolved` marks it resolved.
@@ -98,8 +106,19 @@ pub fn fold_event_into_parts(parts: &[MessagePart], event: &AgentEvent) -> Vec<M
                 });
             }
         }
-        AgentEvent::ReasoningDelta { .. } => {
-            // Reasoning is not rendered as a transcript part (matches comet).
+        AgentEvent::ReasoningDelta { text } => {
+            if text.is_empty() {
+                return out;
+            }
+            if let Some(MessagePart::Reasoning { text: tail, .. }) = out.last_mut() {
+                tail.push_str(text);
+            } else {
+                let id = format!("r{}", out.len());
+                out.push(MessagePart::Reasoning {
+                    id,
+                    text: text.clone(),
+                });
+            }
         }
         AgentEvent::ToolCall { id, call } => {
             if let Some(existing) = out.iter_mut().find_map(|p| match p {
@@ -242,7 +261,9 @@ pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
 
     for part in parts {
         match part {
-            MessagePart::Text { id, text } if text.len() > MSG_INLINE_MAX => {
+            MessagePart::Text { id, text } | MessagePart::Reasoning { id, text }
+                if text.len() > MSG_INLINE_MAX =>
+            {
                 // Chunk oversized text at char boundaries.
                 let mut start = 0usize;
                 let mut piece = 0usize;
@@ -255,13 +276,24 @@ pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
                     if end <= start {
                         end = text.len();
                     }
-                    let sub = MessagePart::Text {
-                        id: if piece == 0 {
-                            id.clone()
-                        } else {
-                            format!("{id}~{piece}")
+                    let sub = match part {
+                        MessagePart::Text { .. } => MessagePart::Text {
+                            id: if piece == 0 {
+                                id.clone()
+                            } else {
+                                format!("{id}~{piece}")
+                            },
+                            text: text[start..end].to_string(),
                         },
-                        text: text[start..end].to_string(),
+                        MessagePart::Reasoning { .. } => MessagePart::Reasoning {
+                            id: if piece == 0 {
+                                id.clone()
+                            } else {
+                                format!("{id}~{piece}")
+                            },
+                            text: text[start..end].to_string(),
+                        },
+                        _ => unreachable!(),
                     };
                     push_part(&mut chunks, &mut current_bytes, sub);
                     start = end;
@@ -308,6 +340,35 @@ mod tests {
             MessagePart::Text { text, .. } => assert_eq!(text, "after"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn reasoning_deltas_merge_and_stay_separate_from_answer() {
+        let mut parts = Vec::new();
+        parts = fold_event_into_parts(
+            &parts,
+            &AgentEvent::ReasoningDelta {
+                text: "Inspecting the workspace".into(),
+            },
+        );
+        parts = fold_event_into_parts(
+            &parts,
+            &AgentEvent::ReasoningDelta {
+                text: " before answering.".into(),
+            },
+        );
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Reasoning { text, .. } if text == "Inspecting the workspace before answering."
+        ));
+
+        parts = fold_event_into_parts(
+            &parts,
+            &AgentEvent::TextDelta {
+                text: "Done.".into(),
+            },
+        );
+        assert!(matches!(&parts[1], MessagePart::Text { text, .. } if text == "Done."));
     }
 
     #[test]

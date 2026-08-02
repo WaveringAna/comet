@@ -237,6 +237,12 @@ pub enum RowKind {
         tree: Arc<BlockTree>,
         block_ix: usize,
     },
+    /// A model thinking stream, kept visually subordinate to the answer while
+    /// remaining readable during a live turn.
+    Reasoning {
+        text: SharedString,
+        streaming: bool,
+    },
     ToolGroup {
         tools: Arc<Vec<ToolItem>>,
     },
@@ -432,6 +438,22 @@ pub fn rows_for_entry(
                                 },
                             });
                         }
+                    }
+                    MessagePart::Reasoning { id: part_id, text } => {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: (fnv1a(text.as_bytes()) << 1) | streaming as u64,
+                            turn_start: false,
+                            kind: RowKind::Reasoning {
+                                text: text.clone().into(),
+                                streaming,
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                        });
                     }
                     MessagePart::Input {
                         id: part_id,
@@ -1719,6 +1741,9 @@ impl Transcript {
                         .map(|v| v.as_slice()),
                 )
             }
+            RowKind::Reasoning { text, streaming } => {
+                Self::reasoning_row(&row.id, text.clone(), *streaming, &theme)
+            }
             RowKind::LiveMarkdown { tree, block_ix } => {
                 // Per-appended-chunk fade veil (opacity only — layout commits
                 // instantly). Reduced motion renders with no veil at all.
@@ -1934,6 +1959,58 @@ impl Transcript {
             }
         }
         out
+    }
+
+    /// Render the model's thinking without making it compete with the answer.
+    /// The label and restrained indigo mark make the state scannable; the body
+    /// remains plain text so long reasoning never becomes another loud card.
+    fn reasoning_row(
+        row_id: &SharedString,
+        text: SharedString,
+        streaming: bool,
+        theme: &Theme,
+    ) -> AnyElement {
+        let mut marker = div()
+            .flex_none()
+            .size(px(14.0))
+            .flex()
+            .items_center()
+            .justify_center();
+        marker = if streaming {
+            marker.child(crate::loaders::mini_gradient_spinner(
+                SharedString::from(format!("{row_id}-thinking")),
+                2.0,
+            ))
+        } else {
+            marker.child(
+                crate::icons::icon(crate::icons::TUNING)
+                    .size(px(13.0))
+                    .text_color(theme.text_faint),
+            )
+        };
+
+        div()
+            .id(SharedString::from(format!("{row_id}-thinking-row")))
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(8.0))
+            .py(px(3.0))
+            .text_size(px(13.0))
+            .line_height(px(19.0))
+            .text_color(theme.text_muted)
+            .child(marker)
+            .child(
+                div()
+                    .flex_none()
+                    .pt(px(1.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.accent.opacity(0.85))
+                    .child(SharedString::from("Thinking")),
+            )
+            .child(div().min_w_0().flex_1().whitespace_normal().child(text))
+            .into_any_element()
     }
 
     /// A tool group is ONE summary line, collapsed: "Ran cargo, git · edited
@@ -2848,6 +2925,13 @@ mod tests {
         }
     }
 
+    fn reasoning_part(id: &str, text: &str) -> MessagePart {
+        MessagePart::Reasoning {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
     fn tool_part(id: &str, command: &str) -> MessagePart {
         MessagePart::Tool {
             id: id.into(),
@@ -2860,6 +2944,33 @@ mod tests {
     }
 
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";
+
+    #[test]
+    fn reasoning_rows_are_visible_and_keep_streaming_identity() {
+        let live = assistant(
+            "m-thinking",
+            MessageStatus::Streaming,
+            vec![reasoning_part("r0", "Checking the request")],
+        );
+        let rows = rows_for_entry(&live, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            &rows[0].kind,
+            RowKind::Reasoning {
+                text,
+                streaming: true
+            } if text == "Checking the request"
+        ));
+
+        let complete = assistant(
+            "m-thinking",
+            MessageStatus::Complete,
+            vec![reasoning_part("r0", "Checking the request")],
+        );
+        let settled = rows_for_entry(&complete, false, &mut parse);
+        assert_eq!(rows[0].id, settled[0].id);
+        assert_ne!(rows[0].version, settled[0].version);
+    }
 
     #[test]
     fn live_entry_splits_per_block_with_id_continuity() {

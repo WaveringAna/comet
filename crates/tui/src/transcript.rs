@@ -272,6 +272,10 @@ fn fingerprint(entry: &SessionMessageEntry, is_last: bool) -> u64 {
                 0u8.hash(&mut hasher);
                 hash_text(text, &mut hasher);
             }
+            MessagePart::Reasoning { text, .. } => {
+                4u8.hash(&mut hasher);
+                hash_text(text, &mut hasher);
+            }
             MessagePart::Tool {
                 call,
                 is_error,
@@ -440,6 +444,9 @@ fn render_entry(
                     }
                     _ => render_markdown(text, width, theme, &mut lines),
                 },
+                MessagePart::Reasoning { text, .. } => {
+                    render_reasoning(text, width, theme, &mut lines)
+                }
                 MessagePart::Input {
                     questions,
                     resolved,
@@ -749,6 +756,25 @@ fn render_questions(
                 ),
             ]));
         }
+    }
+}
+
+/// Render the model's thinking as a subdued, explicitly labelled transcript.
+fn render_reasoning(text: &str, width: usize, theme: &Theme, out: &mut Vec<Line<'static>>) {
+    let prefix = "Thinking  ";
+    for (ix, row) in wrap::wrap(
+        &wrap::sanitize(text),
+        width.saturating_sub(prefix.len()),
+        "",
+    )
+    .into_iter()
+    .enumerate()
+    {
+        let label = if ix == 0 { prefix } else { "          " };
+        out.push(indented(vec![
+            Span::styled(label.to_string(), theme.label()),
+            Span::styled(row, theme.subtle()),
+        ]));
     }
 }
 
