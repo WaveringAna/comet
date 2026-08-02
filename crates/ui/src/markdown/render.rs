@@ -26,11 +26,14 @@ use super::highlight::{Token, TokenClass};
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
 use super::veil::{RowVeil, apply_veil, slice_spans};
 
-/// Gap between markdown blocks inside one message (comet mdBlockGap).
-pub const MD_BLOCK_GAP: f32 = 12.0;
-/// Body text size / line height (comet: 14px / 22px).
+/// Gap between markdown blocks inside one message. Tighter than comet's 12:
+/// a reply is one voice, and paragraph-wide air made short answers read as
+/// unrelated fragments stacked in a column.
+pub const MD_BLOCK_GAP: f32 = 8.0;
+/// Body text size / line height (comet: 14px / 22px — the leading is pulled in
+/// a step, since the blocks around it no longer float apart).
 pub const MD_TEXT_SIZE: f32 = 14.0;
-pub const MD_LINE_HEIGHT: f32 = 22.0;
+pub const MD_LINE_HEIGHT: f32 = 20.0;
 /// Code block metrics — height is `lines × CODE_LINE_HEIGHT + padding + header`.
 pub const CODE_TEXT_SIZE: f32 = 12.5;
 pub const CODE_LINE_HEIGHT: f32 = 18.0;

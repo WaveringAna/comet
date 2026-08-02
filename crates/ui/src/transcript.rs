@@ -67,10 +67,12 @@ pub const GAP_TOOLS: f32 = 14.0;
 /// Transcript column max width (comet 46rem).
 pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 /// One tool line: plain text, no card — the summary and each call under it
-/// are single truncated lines of this height, stacked with no gap. (Cards
-/// and pills made every reply look interrupted by a panel; the terminal
-/// viewport reached the same conclusion, see `comet_tui`.)
-pub const TOOL_LINE_HEIGHT: f32 = 24.0;
+/// are single truncated lines of this height, stacked with no gap, so this IS
+/// the spacing of a run. Snug: consecutive calls are one thought, and at body
+/// leading they read as separate paragraphs. (Cards and pills made every reply
+/// look interrupted by a panel; the terminal viewport reached the same
+/// conclusion, see `comet_tui`.)
+pub const TOOL_LINE_HEIGHT: f32 = 20.0;
 /// The summary sits in the reply's own flow, so it reads at body size; the
 /// call lines under it step down once, and no further — they are quiet, not
 /// fine print. Nothing in a group is brighter than the summary.
