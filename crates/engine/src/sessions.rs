@@ -1102,6 +1102,15 @@ async fn drive_run(
     const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     let mut idle_since: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
+    // Whole-turn usage, not last-message: pi reports per-message usage on each
+    // assistant `message_end`, and a tool loop spans several. Summing the
+    // output and the per-message stream time across the run and stamping once
+    // at `Done` gives the turn's average generation speed — the last burst's
+    // instant rate reads ~10x the turn's because reasoning happened in earlier
+    // segments and the final text just streams out at model speed.
+    let mut run_output_tokens = 0u64;
+    let mut run_stream_ms = 0u64;
+    let mut run_context: Option<(u64, u64)> = None; // (context_tokens, context_window)
 
     let final_status = loop {
         let event: AgentEvent = tokio::select! {
@@ -1322,20 +1331,10 @@ async fn drive_run(
                 duration_ms,
                 ..
             } => {
-                if *context_tokens > 0
-                    || *context_window > 0
-                    || *output_tokens > 0
-                    || *duration_ms > 0
-                {
-                    inner.note_usage(
-                        &chat_id,
-                        ChatUsage {
-                            context_tokens: *context_tokens,
-                            context_window: *context_window,
-                            last_turn_tokens: *output_tokens,
-                            last_turn_ms: *duration_ms,
-                        },
-                    );
+                run_output_tokens += *output_tokens;
+                run_stream_ms += *duration_ms;
+                if *context_tokens > 0 || *context_window > 0 {
+                    run_context = Some((*context_tokens, *context_window));
                 }
             }
             _ => {}
@@ -1381,6 +1380,26 @@ async fn drive_run(
                     tracing::warn!(chat = %chat_id, error = %err, "final segment finish failed");
                 }
                 inner.note_message(&chat_id, &folded_text(&folded));
+            }
+            // Stamp the turn's whole-run average once. Runs for every status
+            // and for the parked-steerable path (which `continue`s back into
+            // this loop), so reset after so the next routed dispatch in a
+            // parked session starts its own turn fresh instead of double-
+            // counting.
+            if run_output_tokens > 0 || run_stream_ms > 0 {
+                let (context_tokens, context_window) = run_context.unwrap_or((0, 0));
+                inner.note_usage(
+                    &chat_id,
+                    ChatUsage {
+                        context_tokens,
+                        context_window,
+                        last_turn_tokens: run_output_tokens,
+                        last_turn_ms: run_stream_ms,
+                    },
+                );
+                run_output_tokens = 0;
+                run_stream_ms = 0;
+                run_context = None;
             }
             if *status == DoneStatus::Completed {
                 // A cleanly completed turn resets the auto-resume revival

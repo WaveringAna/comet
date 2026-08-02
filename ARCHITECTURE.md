@@ -208,11 +208,13 @@ feature spec `docs/research/feature-inventory.md` §1.
   is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
   toggle) as gpui popovers with `menu-in` scale/fade.
 - **Run cost**: the composer's under-pill toolbar reads `checkout · ref` on the left and, on the
-  right, what the last turn cost — the reply's `tok/s` and a five-cell **context battery** that
-  drains green → lime → amber → orange → red as the conversation fills the model's window, exact
-  figures on its tooltip. Both are measured, not estimated: pi reports `contextWindow` in
-  `get_state` and per-message `usage` on `message_end`, the adapter times the stream, and the
-  host stamps `ChatUsage` on the workspace chat row once per turn (small, LWW — a per-frame
+  right, what the last turn cost — its average generation speed (`tok/s`, summed across every
+  model call in the turn so a tool loop reads as one number, not the final burst's ~10x instant
+  rate) and a five-cell **context battery** that drains green → lime → amber → orange → red as
+  the conversation fills the model's window, exact figures on its tooltip. Both are measured,
+  not estimated: pi reports `contextWindow` in `get_state` and per-message `usage` on
+  `message_end`, the adapter times each message's stream, and the host sums a turn's messages
+  and stamps `ChatUsage` on the workspace chat row once (small, LWW — a per-frame
   number would be CRDT churn). Derivations live in `comet_proto::view` (`tokens_per_sec`,
   `context_gauge`), so the TUI's own status line reads the same numbers and the same five
   states. The strip above the composer stays what it was: the working indicator alone.
