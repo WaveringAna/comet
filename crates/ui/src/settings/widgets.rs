@@ -190,9 +190,11 @@ pub fn ghost_action(theme: &Theme) -> gpui::Div {
 }
 
 /// The default ghost-action hover wash (`hover:bg-white/[0.06]
-/// hover:text-foreground`).
+/// hover:text-foreground`). No `&Theme` here — the paint primitives read the
+/// installed scheme's mirror.
 pub fn ghost_hover(s: gpui::StyleRefinement) -> gpui::StyleRefinement {
-    s.bg(white_alpha(0.06)).text_color(Theme::dark().text)
+    s.bg(white_alpha(0.06))
+        .text_color(crate::theme::current_text())
 }
 
 /// The dismissible red error strip (`flex items-start gap-2 rounded-xl border

@@ -238,10 +238,13 @@ pub enum RowKind {
         block_ix: usize,
     },
     ToolGroup {
+        /// The original event order for the chain. Keeping this sequence is
+        /// important: reasoning is a step between tool calls, not a preamble
+        /// that should be rendered ahead of the whole run.
+        items: Arc<Vec<ChainItem>>,
+        /// Tool calls and reasoning are also kept as indexes for summaries,
+        /// collapsed state, and deep-links.
         tools: Arc<Vec<ToolItem>>,
-        /// Reasoning that ran within this chain, in order. Thinking is not a
-        /// row of its own: it folds into the group so a working stretch reads
-        /// as ONE chain, and prior thinking stays reachable by opening it.
         thinking: Arc<Vec<SharedString>>,
     },
     InputChip {
@@ -256,6 +259,13 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
+}
+
+/// One ordered item in a tool/reasoning chain.
+#[derive(Clone)]
+pub enum ChainItem {
+    Thinking(SharedString),
+    Tool(ToolItem),
 }
 
 /// A transcript row: stable id + content version (diff key) + block payload.
@@ -359,18 +369,21 @@ pub fn rows_for_entry(
     // Assistant/system: split parts into block rows, folding consecutive tools.
     let mut group_ix = 0usize;
     let mut pending_group: Vec<ToolItem> = Vec::new();
+    let mut pending_chain: Vec<ChainItem> = Vec::new();
     // Thinking folds into the group it belongs to rather than splitting it, so
     // reasoning between two calls does not cut one chain into three rows.
     let mut pending_thinking: Vec<SharedString> = Vec::new();
 
     let flush_group = |rows: &mut Vec<Row>,
                        group: &mut Vec<ToolItem>,
+                       chain: &mut Vec<ChainItem>,
                        thinking: &mut Vec<SharedString>,
                        group_ix: &mut usize| {
         if group.is_empty() && thinking.is_empty() {
             return;
         }
         let tools = std::mem::take(group);
+        let items = std::mem::take(chain);
         let thoughts = std::mem::take(thinking);
         // Thinking contributes its SHAPE, never its bytes. Reasoning streams
         // by appending to the trailing part, so hashing the text would change
@@ -388,6 +401,7 @@ pub fn rows_for_entry(
             version,
             turn_start: false,
             kind: RowKind::ToolGroup {
+                items: Arc::new(items),
                 tools: Arc::new(tools),
                 thinking: Arc::new(thoughts),
             },
@@ -405,23 +419,29 @@ pub fn rows_for_entry(
                 is_error,
                 resolved,
             } => {
-                pending_group.push(ToolItem {
+                let tool = ToolItem {
                     id: id.as_str().into(),
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
-                });
+                };
+                pending_group.push(tool.clone());
+                pending_chain.push(ChainItem::Tool(tool));
             }
-            // Reasoning joins the current chain instead of breaking it.
+            // Reasoning joins the current chain instead of breaking it, while
+            // retaining its exact position between the calls it informed.
             MessagePart::Reasoning { text, .. } => {
                 if !text.trim().is_empty() {
-                    pending_thinking.push(text.clone().into());
+                    let thought: SharedString = text.clone().into();
+                    pending_thinking.push(thought.clone());
+                    pending_chain.push(ChainItem::Thinking(thought));
                 }
             }
             other => {
                 flush_group(
                     &mut rows,
                     &mut pending_group,
+                    &mut pending_chain,
                     &mut pending_thinking,
                     &mut group_ix,
                 );
@@ -520,6 +540,7 @@ pub fn rows_for_entry(
     flush_group(
         &mut rows,
         &mut pending_group,
+        &mut pending_chain,
         &mut pending_thinking,
         &mut group_ix,
     );
@@ -1982,9 +2003,11 @@ impl Transcript {
                 }
                 el
             }
-            RowKind::ToolGroup { tools, thinking } => {
-                self.render_tool_group(&row.id, tools, thinking, &theme, cx)
-            }
+            RowKind::ToolGroup {
+                items,
+                tools,
+                thinking,
+            } => self.render_tool_group(&row.id, items, tools, thinking, &theme, cx),
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
@@ -2151,6 +2174,7 @@ impl Transcript {
     fn render_tool_group(
         &mut self,
         row_id: &SharedString,
+        items: &Arc<Vec<ChainItem>>,
         tools: &Arc<Vec<ToolItem>>,
         thinking: &Arc<Vec<SharedString>>,
         theme: &Theme,
@@ -2219,37 +2243,44 @@ impl Transcript {
             );
         let running_id = latest_running(tools).map(|t| t.id.clone());
         if expanded {
-            // Thinking leads the opened chain: it is what the agent was
-            // working out before and between these calls.
-            for (ix, thought) in thinking.iter().enumerate() {
-                column = column.child(thinking_line(ix, thought, theme));
-            }
-            let runs = consolidate_runs(tools);
-            let mut ix = 0usize;
-            for run in &runs {
-                if run.is_exec {
-                    // Commands stay verbatim, one line each, deep-linked to
-                    // their own place in the agent terminal's feed.
-                    for item in &run.items {
-                        let live = running_id.as_ref() == Some(&item.id);
-                        let key = format!("cmd{ix}");
-                        column = column.child(command_line(row_id, &key, item, live, theme, cx));
-                        ix += 1;
-                    }
-                } else {
-                    let live = run.items.iter().any(|i| running_id.as_ref() == Some(&i.id));
-                    column = column.child(run_line(row_id, ix, run, live, theme, cx));
-                    if matches!(run.label, "write" | "edit" | "patch") {
-                        for item in &run.items {
-                            if let Some(diff) = self.tool_diffs.get(item.id.as_ref()) {
-                                column = column.child(tool_diff_preview(diff, theme));
-                            } else if self.tool_diff_loads.contains(item.id.as_ref()) {
-                                column = column.child(tool_diff_loading(theme));
-                            }
+            // Preserve the event sequence: the model's second thought belongs
+            // between the calls it came between, not above the whole tool run.
+            // Consecutive calls still consolidate, but a thought flushes that
+            // run so the transcript remains a faithful working trace.
+            let mut tool_segment = Vec::new();
+            let mut thought_ix = 0usize;
+            let mut line_ix = 0usize;
+            for item in items.iter() {
+                match item {
+                    ChainItem::Thinking(thought) => {
+                        if !tool_segment.is_empty() {
+                            let rendered = self.render_tool_segment(
+                                row_id,
+                                &tool_segment,
+                                &mut line_ix,
+                                running_id.as_ref(),
+                                theme,
+                                cx,
+                            );
+                            column = column.children(rendered);
+                            tool_segment.clear();
                         }
+                        column = column.child(thinking_line(thought_ix, thought, theme));
+                        thought_ix += 1;
                     }
-                    ix += 1;
+                    ChainItem::Tool(tool) => tool_segment.push(tool.clone()),
                 }
+            }
+            if !tool_segment.is_empty() {
+                let rendered = self.render_tool_segment(
+                    row_id,
+                    &tool_segment,
+                    &mut line_ix,
+                    running_id.as_ref(),
+                    theme,
+                    cx,
+                );
+                column = column.children(rendered);
             }
         } else if let Some(running) = latest_running(tools) {
             // Collapsed and still working: the one line worth showing is what
@@ -2281,6 +2312,48 @@ impl Transcript {
             });
         }
         column.into_any_element()
+    }
+
+    /// Render one consecutive run of tool calls. A reasoning item splits the
+    /// chain before this helper is called, so consolidation never hides the
+    /// order in which the agent thought and acted.
+    fn render_tool_segment(
+        &mut self,
+        row_id: &SharedString,
+        tools: &[ToolItem],
+        line_ix: &mut usize,
+        running_id: Option<&SharedString>,
+        theme: &Theme,
+        cx: &mut Context<Transcript>,
+    ) -> Vec<AnyElement> {
+        let mut rendered = Vec::new();
+        let runs = consolidate_runs(tools);
+        for run in &runs {
+            if run.is_exec {
+                // Commands stay verbatim, one line each, deep-linked to their
+                // own place in the agent terminal's feed.
+                for item in &run.items {
+                    let live = running_id == Some(&item.id);
+                    let key = format!("cmd{}", *line_ix);
+                    rendered.push(command_line(row_id, &key, item, live, theme, cx));
+                    *line_ix += 1;
+                }
+            } else {
+                let live = run.items.iter().any(|i| running_id == Some(&i.id));
+                rendered.push(run_line(row_id, *line_ix, run, live, theme, cx));
+                if matches!(run.label, "write" | "edit" | "patch") {
+                    for item in &run.items {
+                        if let Some(diff) = self.tool_diffs.get(item.id.as_ref()) {
+                            rendered.push(tool_diff_preview(diff, theme));
+                        } else if self.tool_diff_loads.contains(item.id.as_ref()) {
+                            rendered.push(tool_diff_loading(theme));
+                        }
+                    }
+                }
+                *line_ix += 1;
+            }
+        }
+        rendered
     }
 
     /// Toggle an ephemeral write/edit preview. The engine derives it from its
@@ -3312,10 +3385,27 @@ mod tests {
         );
         let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1, "one chain, not a row per thought");
-        let RowKind::ToolGroup { tools, thinking } = &rows[0].kind else {
+        let RowKind::ToolGroup {
+            items,
+            tools,
+            thinking,
+        } = &rows[0].kind
+        else {
             panic!("expected a tool group");
         };
         assert_eq!(tools.len(), 2);
+        assert!(matches!(
+            items.as_slice(),
+            [
+                ChainItem::Thinking(first),
+                ChainItem::Tool(ToolItem { id, .. }),
+                ChainItem::Thinking(second),
+                ChainItem::Tool(ToolItem { id: second_id, .. }),
+            ] if first == "Checking the request"
+                && id == "c0"
+                && second == "Now reading it"
+                && second_id == "c1"
+        ));
         assert_eq!(
             thinking.as_slice(),
             &[
@@ -3335,10 +3425,18 @@ mod tests {
         );
         let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
-        let RowKind::ToolGroup { tools, thinking } = &rows[0].kind else {
+        let RowKind::ToolGroup {
+            items,
+            tools,
+            thinking,
+        } = &rows[0].kind
+        else {
             panic!("expected a tool group");
         };
         assert!(tools.is_empty());
+        assert!(
+            matches!(items.as_slice(), [ChainItem::Thinking(thought)] if thought == "Checking the request")
+        );
         assert_eq!(thinking.len(), 1);
         // With no calls to name, the line is just the word.
         assert_eq!(chain_summary(tools, thinking), "Thinking");

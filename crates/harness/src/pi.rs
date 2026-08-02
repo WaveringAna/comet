@@ -6,6 +6,7 @@
 //! translates only the stable RPC events the frontend needs; pi remains the
 //! owner of model context, tools, compaction, and session persistence.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use comet_proto::{
     TOOL_OUTPUT_MAX_BYTES, ToolCall, UserInputQuestion,
 };
 
-use crate::{Harness, HarnessError, RunControls};
+use crate::{Harness, HarnessError, RunControls, SteerMessage};
 
 fn resolve_pi_executable() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PI_EXECUTABLE").filter(|p| !p.is_empty()) {
@@ -272,6 +273,28 @@ async fn send_event(
     tx.send(Ok(event)).await.is_ok()
 }
 
+/// Pi acknowledges a steer when it queues it, but the semantic turn boundary
+/// is later: the queued user message is emitted on stdout immediately before
+/// the next LLM call. Split there, after every prior-turn event has drained
+/// from the same ordered JSONL stream.
+fn boundary_for_user_message(
+    initial_user_seen: &mut bool,
+    pending_steers: &mut VecDeque<SteerMessage>,
+    assistant_message_id: &mut String,
+) -> Option<AgentEvent> {
+    if !*initial_user_seen {
+        *initial_user_seen = true;
+        return None;
+    }
+    pending_steers.pop_front()?;
+    let next = uuid::Uuid::new_v4().to_string();
+    let previous = std::mem::replace(assistant_message_id, next.clone());
+    Some(AgentEvent::Steered {
+        assistant_message_id: Some(previous),
+        next_assistant_message_id: Some(next),
+    })
+}
+
 async fn run_session(session: PiSession) {
     let PiSession {
         mut child,
@@ -310,6 +333,11 @@ async fn run_session(session: PiSession) {
     // `message_end`. remember whether the current assistant message already
     // produced a delta so the completion frame cannot append it a second time.
     let mut assistant_text_emitted = false;
+    // The first user message belongs to the initial Run request. Later user
+    // message starts are Pi delivering queued steers at their actual step
+    // boundary; keeping the mailbox queue lets us split the transcript there.
+    let mut initial_user_seen = false;
+    let mut pending_steers: VecDeque<SteerMessage> = VecDeque::new();
     // pi reports the model's context window once, in the `get_state` reply;
     // per-turn token counts arrive on `message_end`. the stream's wall time is
     // ours to measure - nothing in the protocol carries it.
@@ -404,10 +432,27 @@ async fn run_session(session: PiSession) {
                             break 'main;
                         }
                         "message_start" => {
-                            if value.get("message").and_then(|m| m.get("role")).and_then(Value::as_str) == Some("assistant") {
-                                assistant_message_id = value.get("message").and_then(|m| m.get("id")).and_then(Value::as_str).unwrap_or(&assistant_message_id).to_owned();
-                                assistant_text_emitted = false;
-                                assistant_started = Some(std::time::Instant::now());
+                            let message = value.get("message").unwrap_or(&Value::Null);
+                            match message.get("role").and_then(Value::as_str) {
+                                Some("assistant") => {
+                                    assistant_message_id = message
+                                        .get("id")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or(&assistant_message_id)
+                                        .to_owned();
+                                    assistant_text_emitted = false;
+                                    assistant_started = Some(std::time::Instant::now());
+                                }
+                                Some("user") => {
+                                    if let Some(boundary) = boundary_for_user_message(
+                                        &mut initial_user_seen,
+                                        &mut pending_steers,
+                                        &mut assistant_message_id,
+                                    ) && !send_event(&event_tx, boundary).await {
+                                        break 'main;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         "message_update" => {
@@ -476,6 +521,7 @@ async fn run_session(session: PiSession) {
                 Some(message) => {
                     let command_type = if streaming { "steer" } else { "prompt" };
                     if write_command(&mut stdin, json!({ "type": command_type, "message": prompt_text_from_str(&message.prompt), "streamingBehavior": "steer" })).await.is_err() { break 'main; }
+                    pending_steers.push_back(message);
                 }
                 None => break 'main,
             },
@@ -859,6 +905,46 @@ async fn handle_extension_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_steer_splits_when_pi_delivers_its_user_message() {
+        let mut initial_user_seen = false;
+        let mut pending = VecDeque::from([SteerMessage {
+            prompt: "second turn".into(),
+            message_id: Some("user-2".into()),
+        }]);
+        let mut assistant_id = "assistant-1".to_string();
+
+        assert!(
+            boundary_for_user_message(&mut initial_user_seen, &mut pending, &mut assistant_id,)
+                .is_none(),
+            "the run's initial user message is not a steer boundary"
+        );
+        assert_eq!(pending.len(), 1);
+
+        let boundary =
+            boundary_for_user_message(&mut initial_user_seen, &mut pending, &mut assistant_id)
+                .expect("queued steer is delivered by the next user message");
+        let AgentEvent::Steered {
+            assistant_message_id,
+            next_assistant_message_id,
+        } = boundary
+        else {
+            panic!("expected steer boundary");
+        };
+        assert_eq!(assistant_message_id.as_deref(), Some("assistant-1"));
+        assert_eq!(
+            next_assistant_message_id.as_deref(),
+            Some(assistant_id.as_str())
+        );
+        assert!(pending.is_empty());
+
+        assert!(
+            boundary_for_user_message(&mut initial_user_seen, &mut pending, &mut assistant_id,)
+                .is_none(),
+            "unrelated user events cannot manufacture a split"
+        );
+    }
 
     #[test]
     fn tool_result_output_extracts_text_blocks() {

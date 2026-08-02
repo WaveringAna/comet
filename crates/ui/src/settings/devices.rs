@@ -302,7 +302,7 @@ impl Render for DevicesPage {
                             theme.text_muted.opacity(0.5)
                         })
                         .cursor_pointer()
-                        .hover(|s| s.text_color(Theme::dark().text_muted))
+                        .hover(|s| s.text_color(theme.text_muted))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.copy_id(copy_id.clone(), cx);
                         }))
@@ -338,7 +338,7 @@ impl Render for DevicesPage {
                             .hover(|s| {
                                 s.opacity(1.0)
                                     .bg(crate::theme::white_alpha(0.06))
-                                    .text_color(Theme::dark().text)
+                                    .text_color(theme.text)
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_rename(rename_id.clone(), rename_name.clone(), cx);

@@ -1414,7 +1414,12 @@ impl gpui::Element for ComposerTextElement {
         let input = self.input.read(cx);
         let scroll = px(input.scroll_top);
         let origin = point(bounds.left(), bounds.top() - scroll);
-        let selection_color = gpui::hsla(0.66, 0.6, 0.55, 0.35);
+        let theme = Theme::of(cx);
+        let selection_color =
+            theme
+                .accent
+                .opacity(if theme.scheme.is_dark() { 0.35 } else { 0.24 });
+        let caret_color = theme.accent;
 
         let mut selection_quads = Vec::new();
         let mut cursor = None;
@@ -1425,12 +1430,12 @@ impl gpui::Element for ComposerTextElement {
                         point(origin.x + p.x, origin.y + p.y),
                         size(px(2.0), input.line_height),
                     ),
-                    gpui::hsla(0.66, 0.7, 0.7, 1.0),
+                    caret_color,
                 ));
             } else if input.display_is_placeholder {
                 cursor = Some(fill(
                     Bounds::new(origin, size(px(2.0), input.line_height)),
-                    gpui::hsla(0.66, 0.7, 0.7, 1.0),
+                    caret_color,
                 ));
             }
         } else if let (Some(start), Some(end)) = (
@@ -3028,11 +3033,11 @@ impl Render for Composer {
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
 
-        // The pill chrome (comet composer.tsx): `rounded-[26px] border
-        // border-white/[0.08] bg-white/[0.03] shadow-xl` — a floating pill with
-        // a hairline over a faint wash, never a solid grey box. Picker chips,
-        // attach, and the send circle all live INSIDE the pill.
-        let pill_bg = crate::theme::white_alpha(0.03);
+        // The pill chrome (comet composer.tsx): dark uses the original faint
+        // white lift; light uses an opaque plate. A translucent light fill lets
+        // gpui's shadow plate show through the whole interior, producing the
+        // muddy grey slab from the regression screenshot.
+        let pill_bg = theme.input_bg();
         let pill = div()
             .rounded(px(26.0))
             .bg(pill_bg)

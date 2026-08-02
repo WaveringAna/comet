@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::motion::{self, AnimationExt as _, COMET_PULSE};
-use crate::theme::{Theme, grey, white_alpha};
+use crate::theme::{Theme, white_alpha};
 
 // ---------------------------------------------------------------------------
 // Loadable — async slot state shared by pickers/settings pages
@@ -156,9 +156,9 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
     if Theme::GLASS_ALPHA < 1.0 {
         // Translucent tint — the backdrop blur beneath it comes from the
         // [`crate::frost::frosted`] wrapper at the mount helpers below.
-        card.bg(grey(0x16).opacity(0.65))
+        card.bg(theme.glass_card())
     } else {
-        card.bg(grey(0x16))
+        card.bg(theme.glass_card())
     }
 }
 
@@ -325,7 +325,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
             .text_color(motion::hover_blend(
                 &fade_key,
                 theme.text.opacity(0.9),
-                Theme::dark().text,
+                theme.text,
             ))
             .bg(motion::hover_blend(
                 &fade_key,
@@ -542,9 +542,9 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
         .w(px(360.0))
         .p(px(20.0))
         .rounded(px(16.0))
-        .bg(grey(0x10))
+        .bg(theme.glass_card())
         .border_1()
-        .border_color(white_alpha(0.10))
+        .border_color(theme.border)
         .shadow_lg()
         .flex()
         .flex_col()
@@ -594,11 +594,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
         .py(px(6.0))
         .rounded(px(8.0))
         .text_size(px(13.0))
-        .text_color(motion::hover_blend(
-            &fade_key,
-            theme.text_muted,
-            Theme::dark().text,
-        ))
+        .text_color(motion::hover_blend(&fade_key, theme.text_muted, theme.text))
         .bg(motion::hover_blend(
             &fade_key,
             crate::theme::wash(0.0),
@@ -620,7 +616,7 @@ pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
         .bg(theme.text)
         .text_size(px(13.0))
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(grey(0x0e))
+        .text_color(theme.bg)
         .cursor_pointer()
         .hover(|s| s.opacity(0.9))
         .child(SharedString::from(label.to_string()))

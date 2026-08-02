@@ -1488,7 +1488,7 @@ impl Pickers {
                 } else {
                     theme.text_muted
                 },
-                Theme::dark().text,
+                theme.text,
             ))
             .bg(if open {
                 theme.element_hover
@@ -2474,7 +2474,7 @@ fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
                 .size(px(14.0))
                 .rounded_full()
                 .bg(if on {
-                    crate::theme::grey(0x0e)
+                    theme.bg
                 } else {
                     crate::theme::white_alpha(0.7)
                 }),

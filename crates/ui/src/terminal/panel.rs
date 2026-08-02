@@ -1934,7 +1934,7 @@ impl Render for TerminalPanel {
         let Some(chat) = self.selected_chat(cx) else {
             return div()
                 .size_full()
-                .bg(terminal_bg())
+                .bg(terminal_bg(&theme))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1994,7 +1994,7 @@ impl Render for TerminalPanel {
             .size_full()
             .flex()
             .flex_col()
-            .bg(terminal_bg())
+            .bg(terminal_bg(&theme))
             .child(self.render_tab_bar(&chat, cx))
             .child(body)
             .into_any_element()

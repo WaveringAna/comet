@@ -104,6 +104,63 @@ async fn spawns_one_pi_process_in_the_session_folder_and_maps_rpc_events() {
 }
 
 #[tokio::test]
+async fn delivered_steer_emits_a_boundary_before_second_turn_output() {
+    let folder = tempfile::tempdir().unwrap();
+    let (controls, steer, interrupt) = controls();
+    let harness = PiHarness::new().with_executable(fixture_path());
+    let mut run = request(folder.path().display().to_string());
+    run.model = Some("steer-model".into());
+    let mut stream = harness.run(run, controls).await.unwrap();
+
+    let mut events = Vec::new();
+    let mut steer_sent = false;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("fake pi should emit promptly")
+            .expect("the session should emit a done event")
+            .expect("rpc events should normalize");
+        if matches!(&event, AgentEvent::TextDelta { text } if text == "first turn output")
+            && !steer_sent
+        {
+            steer
+                .send(SteerMessage {
+                    prompt: "second turn".into(),
+                    message_id: Some("user-2".into()),
+                })
+                .await
+                .unwrap();
+            steer_sent = true;
+        }
+        let done = matches!(event, AgentEvent::Done { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+
+    let first = events
+        .iter()
+        .position(
+            |event| matches!(event, AgentEvent::TextDelta { text } if text == "first turn output"),
+        )
+        .unwrap();
+    let boundary = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::Steered { assistant_message_id: Some(id), .. } if id == "m1"))
+        .unwrap();
+    let second = events
+        .iter()
+        .position(
+            |event| matches!(event, AgentEvent::TextDelta { text } if text == "second turn output"),
+        )
+        .unwrap();
+    assert!(first < boundary && boundary < second);
+
+    interrupt.cancel();
+}
+
+#[tokio::test]
 async fn assistant_message_errors_are_not_reported_as_empty_successes() {
     let folder = tempfile::tempdir().unwrap();
     let (controls, _steer, interrupt) = controls();

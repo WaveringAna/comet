@@ -331,12 +331,12 @@ impl Shell {
                     .text_color(motion::hover_blend(
                         "add-project-ghost",
                         theme.text_muted,
-                        Theme::dark().text,
+                        theme.text,
                     ))
                     .bg(motion::hover_blend(
                         "add-project-ghost",
                         crate::theme::wash(0.0),
-                        Theme::dark().element_hover,
+                        theme.element_hover,
                     ))
                     .on_hover(motion::hover_listener("add-project-ghost"))
                     .cursor_pointer()
@@ -1043,7 +1043,7 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(2.0))
-                        .text_color(crate::theme::grey(0x0e).opacity(0.72))
+                        .text_color(theme.bg.opacity(0.72))
                         .child(icon(icons::COMMAND).size(px(11.0)))
                         .child(SharedString::from("enter")),
                 )
@@ -1136,7 +1136,7 @@ impl Shell {
                             crumb
                                 .text_color(theme.text_muted.opacity(0.55))
                                 .cursor_pointer()
-                                .hover(|s| s.text_color(Theme::dark().text))
+                                .hover(|s| s.text_color(theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(flow) = this.add_project.as_mut() {
                                         flow.browser_repo = false;
@@ -1174,7 +1174,7 @@ impl Shell {
                                     } else {
                                         crumb
                                             .cursor_pointer()
-                                            .hover(|s| s.text_color(Theme::dark().text))
+                                            .hover(|s| s.text_color(theme.text))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if let Some(flow) = this.add_project.as_mut() {
                                                     flow.browser_repo = false;
@@ -1351,11 +1351,7 @@ impl Shell {
             // The popover_card glass recipe: a translucent tint over the
             // frosted backdrop blur (`popover::modal` wraps in `frosted`) —
             // an opaque fill here killed the vibrancy every other float has.
-            .bg(if Theme::GLASS_ALPHA < 1.0 {
-                crate::theme::grey(0x16).opacity(0.65)
-            } else {
-                crate::theme::grey(0x16)
-            })
+            .bg(theme.glass_card())
             .shadow_lg()
             .overflow_hidden()
             .flex()

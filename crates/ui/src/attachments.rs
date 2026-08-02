@@ -24,7 +24,6 @@ use gpui::{
 };
 
 use crate::state::EngineHandle;
-use crate::theme::white_alpha;
 use comet_rpc::methods;
 
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
@@ -582,7 +581,9 @@ pub fn lightbox(
                             .max_w(max_w)
                             .overflow_hidden()
                             .text_size(px(11.0))
-                            .text_color(white_alpha(0.45))
+                            // Over the always-dark lightbox scrim, NOT the app
+                            // surface — white stays white in both schemes.
+                            .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.45))
                             .child(preview.name.clone()),
                     ),
             ),

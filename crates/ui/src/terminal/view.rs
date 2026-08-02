@@ -37,14 +37,18 @@ pub const RESIZE_DEBOUNCE_MS: u64 = 80;
 // Palette
 // ---------------------------------------------------------------------------
 
-/// Terminal background — `#090909` (one step below the app's `#0a0a0a`).
-pub fn terminal_bg() -> Hsla {
-    rgb8(0x09, 0x09, 0x09)
+/// Terminal background follows the concrete theme role: near-black in dark,
+/// the configured app plane in light.
+pub fn terminal_bg(theme: &Theme) -> Hsla {
+    theme.terminal_bg()
 }
 
-/// The 16 ANSI colors tuned for the near-black background (indexes 0-7 normal,
-/// 8-15 bright).
-const ANSI16: [(u8, u8, u8); 16] = [
+pub fn terminal_fg(theme: &Theme) -> Hsla {
+    theme.text
+}
+
+/// ANSI colors tuned for the dark near-black terminal.
+const ANSI16_DARK: [(u8, u8, u8); 16] = [
     (0x24, 0x24, 0x24), // black — visible against #090909
     (0xf8, 0x71, 0x71), // red
     (0x4a, 0xde, 0x80), // green
@@ -63,6 +67,28 @@ const ANSI16: [(u8, u8, u8); 16] = [
     (0xfa, 0xfa, 0xfa), // bright white
 ];
 
+/// ANSI colors for a light terminal. Bright variants increase contrast by
+/// moving deeper, not lighter, so explicit `white`/`bright white` remain
+/// visible against a near-white terminal plane.
+const ANSI16_LIGHT: [(u8, u8, u8); 16] = [
+    (0x3f, 0x3f, 0x46), // black
+    (0xdc, 0x26, 0x26), // red-600
+    (0x15, 0x80, 0x3d), // green-700
+    (0xa1, 0x62, 0x07), // amber-700
+    (0x25, 0x63, 0xeb), // blue-600
+    (0x93, 0x33, 0xea), // purple-600
+    (0x0e, 0x74, 0x90), // cyan-700
+    (0x52, 0x52, 0x5b), // white → zinc-600 on a light field
+    (0x71, 0x71, 0x7a), // bright black
+    (0xb9, 0x1c, 0x1c), // bright red
+    (0x16, 0x65, 0x34), // bright green
+    (0x85, 0x4d, 0x0e), // bright yellow
+    (0x1d, 0x4e, 0xd8), // bright blue
+    (0x7e, 0x22, 0xce), // bright magenta
+    (0x15, 0x5e, 0x75), // bright cyan
+    (0x18, 0x18, 0x1b), // bright white → zinc-900
+];
+
 fn rgb8(r: u8, g: u8, b: u8) -> Hsla {
     let (h, s, l) = rgb_to_hsl(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
     gpui::hsla(h, s, l, 1.0)
@@ -74,7 +100,7 @@ const CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
 /// Resolve an indexed color (0-255) to RGB components.
 pub fn indexed_rgb(index: u8) -> (u8, u8, u8) {
     match index {
-        0..=15 => ANSI16[index as usize],
+        0..=15 => ANSI16_DARK[index as usize],
         16..=231 => {
             let n = index as usize - 16;
             (
@@ -90,13 +116,22 @@ pub fn indexed_rgb(index: u8) -> (u8, u8, u8) {
     }
 }
 
-/// Resolve a cell color to paint against the theme.
+fn indexed_rgb_for_theme(index: u8, theme: &Theme) -> (u8, u8, u8) {
+    if index <= 15 && !theme.scheme.is_dark() {
+        ANSI16_LIGHT[index as usize]
+    } else {
+        indexed_rgb(index)
+    }
+}
+
+/// Resolve a cell color against the terminal's concrete appearance. Explicit
+/// 24-bit colors remain author-controlled; the default and ANSI-16 roles adapt.
 pub fn resolve_color(color: CellColor, theme: &Theme) -> Hsla {
     match color {
-        CellColor::Foreground => theme.text,
-        CellColor::Background => terminal_bg(),
+        CellColor::Foreground => terminal_fg(theme),
+        CellColor::Background => terminal_bg(theme),
         CellColor::Indexed(ix) => {
-            let (r, g, b) = indexed_rgb(ix);
+            let (r, g, b) = indexed_rgb_for_theme(ix, theme);
             rgb8(r, g, b)
         }
         CellColor::Rgb(r, g, b) => rgb8(r, g, b),
@@ -408,11 +443,11 @@ impl gpui::Element for TerminalElement {
             );
             if self.focused {
                 // Translucent block: the glyph underneath stays legible.
-                fill(cursor_bounds, gpui::hsla(0.0, 0.0, 1.0, 0.35))
+                fill(cursor_bounds, theme.terminal_cursor())
             } else {
                 outline(
                     cursor_bounds,
-                    gpui::hsla(0.0, 0.0, 1.0, 0.35),
+                    theme.terminal_cursor(),
                     gpui::BorderStyle::Solid,
                 )
             }
@@ -717,14 +752,21 @@ mod tests {
         assert_eq!(indexed_rgb(232), (8, 8, 8));
         assert_eq!(indexed_rgb(255), (238, 238, 238));
         // ANSI range hits the palette table.
-        assert_eq!(indexed_rgb(1), ANSI16[1]);
+        assert_eq!(indexed_rgb(1), ANSI16_DARK[1]);
     }
 
     #[test]
-    fn terminal_bg_is_090909() {
-        let bg = terminal_bg();
-        assert_eq!(bg.s, 0.0);
-        assert!((bg.l - 9.0 / 255.0).abs() < 1e-4);
+    fn terminal_surface_and_ansi_roles_follow_the_theme() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        let dark_bg = terminal_bg(&dark);
+        assert_eq!(dark_bg.s, 0.0);
+        assert!((dark_bg.l - 9.0 / 255.0).abs() < 1e-4);
+        assert_eq!(terminal_bg(&light), light.bg);
+        assert_eq!(terminal_fg(&light), light.text);
+        assert_eq!(indexed_rgb_for_theme(1, &dark), ANSI16_DARK[1]);
+        assert_eq!(indexed_rgb_for_theme(1, &light), ANSI16_LIGHT[1]);
+        assert_ne!(ANSI16_LIGHT[7], (0xff, 0xff, 0xff));
     }
 
     #[test]

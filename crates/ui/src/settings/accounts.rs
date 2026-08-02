@@ -801,10 +801,7 @@ impl AccountsPage {
                         .text_color(theme.text_muted)
                         .cursor_pointer()
                         .when(is_busy, |el| el.opacity(0.5))
-                        .hover(|s| {
-                            s.bg(crate::theme::white_alpha(0.06))
-                                .text_color(Theme::dark().text)
-                        })
+                        .hover(|s| s.bg(crate::theme::white_alpha(0.06)).text_color(theme.text))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.account_action(methods::FORGET_AGENT_ACCOUNT, &forget_account, cx);
                         }))
@@ -933,7 +930,7 @@ impl AccountsPage {
                     .text_color(theme.text_muted.opacity(0.6))
                     .truncate()
                     .cursor_pointer()
-                    .hover(|s| s.text_color(Theme::dark().text))
+                    .hover(|s| s.text_color(theme.text))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.open_url(&open_url);
                     }))
@@ -1270,7 +1267,7 @@ impl Render for AccountsPage {
                             div()
                                 .mt(px(4.0))
                                 .text_size(px(11.5))
-                                .text_color(Theme::dark().text_muted)
+                                .text_color(theme.text_muted)
                                 .child(SharedString::from("Click to retry")),
                         )
                         .into_any_element(),

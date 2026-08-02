@@ -45,7 +45,7 @@ use crate::state::{
 use crate::terminal::panel::{
     TerminalPanel, TerminalPanelEvent, ToggleTerminal, clamp_terminal_height,
 };
-use crate::theme::Theme;
+use crate::theme::{ColorScheme, Theme, ThemeConfig};
 use crate::transcript::{self, Transcript, TranscriptEvent};
 
 mod projects;
@@ -95,6 +95,18 @@ pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
 pub fn cluster_clearance(is_macos: bool, fullscreen: bool, container_pad: f32) -> f32 {
     (cluster_buttons_start(is_macos, fullscreen) + CLUSTER_BUTTONS_WIDTH + 8.0 - container_pad)
         .max(0.0)
+}
+
+/// The OS appearance, read from the active window (Dark on headless runs —
+/// the first-render appearance observer corrects any guess).
+fn current_system_scheme(cx: &mut App) -> ColorScheme {
+    cx.active_window()
+        .and_then(|window| {
+            window
+                .update(cx, |_, window, _| ColorScheme::from(window.appearance()))
+                .ok()
+        })
+        .unwrap_or(ColorScheme::Dark)
 }
 
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
@@ -465,6 +477,9 @@ pub struct Shell {
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     appearance_sub: Option<Subscription>,
+    /// Window-appearance observer (System scheme following). Registered once on
+    /// the first render; rebuilds the theme from the [`ThemeConfig`] global.
+    appearance_observer: Option<Subscription>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     shortcuts_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
@@ -636,11 +651,15 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = UiSettings::load(&data_dir);
-        // Install persisted typography before the first shell frame so every
+        // Install the persisted theme before the first shell frame so every
         // surface, including the settings page itself, uses the saved roles.
-        cx.set_global(
-            Theme::dark().with_fonts(settings.ui_font.clone(), settings.code_font.clone()),
-        );
+        // The recipe rides a global so the window-appearance observer (which
+        // only sees `&mut Window, &mut App`) can rebuild when the OS scheme
+        // flips; the first-render observer also corrects any boot-scheme guess.
+        let theme_config = ThemeConfig::from(&settings);
+        let system_scheme = current_system_scheme(cx);
+        cx.set_global(theme_config.clone());
+        Theme::install(cx, theme_config.build(system_scheme));
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
         // Dev/testing knob: `COMET_OPEN_ROUTE=settings[/<section>]` boots
@@ -690,6 +709,7 @@ impl Shell {
             archived_page: None,
             appearance_page: None,
             appearance_sub: None,
+            appearance_observer: None,
             shortcuts_page: None,
             shortcuts_sub: None,
             chat_menu: None,
@@ -1265,25 +1285,34 @@ impl Shell {
         match section {
             SettingsSection::Appearance => {
                 if self.appearance_page.is_none() {
-                    let page = cx.new(|cx| {
-                        AppearancePage::new(
-                            self.settings.ui_font.clone(),
-                            self.settings.code_font.clone(),
-                            cx,
-                        )
-                    });
+                    let config = ThemeConfig::from(&self.settings);
+                    let page = cx.new(|cx| AppearancePage::new(&config, cx));
                     self.appearance_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &AppearanceEvent, cx| {
-                            let AppearanceEvent::Changed { ui_font, code_font } = event;
+                            let AppearanceEvent::Changed {
+                                ui_font,
+                                code_font,
+                                preference,
+                                bg_hex,
+                                fg_hex,
+                                contrast,
+                            } = event;
                             this.settings.ui_font = ui_font.clone();
                             this.settings.code_font = code_font.clone();
-                            this.transcript.update(cx, |transcript, cx| {
-                                transcript.invalidate_render_cache(cx);
+                            this.settings.theme_preference = *preference;
+                            this.settings.bg_hex = bg_hex.clone();
+                            this.settings.fg_hex = fg_hex.clone();
+                            this.settings.contrast_percent = *contrast;
+                            cx.set_global(ThemeConfig {
+                                preference: *preference,
+                                bg_hex: bg_hex.clone(),
+                                fg_hex: fg_hex.clone(),
+                                contrast: *contrast,
+                                ui_font: ui_font.clone(),
+                                code_font: code_font.clone(),
                             });
-                            cx.set_global(
-                                Theme::dark().with_fonts(ui_font.clone(), code_font.clone()),
-                            );
+                            this.reinstall_theme(cx);
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -1329,6 +1358,17 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// Rebuild and install the theme from the [`ThemeConfig`] global, resolving
+    /// the `System` preference against the last-known OS appearance. Also drops
+    /// the transcript's render cache, which caches themed colors.
+    fn reinstall_theme(&self, cx: &mut Context<Self>) {
+        let config = cx.global::<ThemeConfig>().clone();
+        let system = current_system_scheme(cx);
+        Theme::install(cx, config.build(system));
+        self.transcript
+            .update(cx, |transcript, cx| transcript.invalidate_render_cache(cx));
     }
 
     // ---- sidebar mutations ----
@@ -1786,11 +1826,7 @@ impl Shell {
     /// here. Same material as a popover (`popover::popover_card`) — this IS a
     /// floating surface, and the app only has the one.
     fn render_sidebar_peek(&self, column: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        let tint = if Theme::GLASS_ALPHA < 1.0 {
-            crate::theme::grey(0x16).opacity(0.65)
-        } else {
-            crate::theme::grey(0x16)
-        };
+        let tint = Theme::of(cx).glass_card();
         let card = div()
             .id("sidebar-peek")
             .absolute()
@@ -1891,10 +1927,7 @@ impl Shell {
                                     theme.text_muted
                                 })
                                 .cursor_pointer()
-                                .hover(|s| {
-                                    s.bg(crate::theme::wash(0.11))
-                                        .text_color(Theme::dark().text)
-                                })
+                                .hover(|s| s.bg(crate::theme::wash(0.11)).text_color(theme.text))
                                 .on_click(
                                     cx.listener(move |this, _, _, cx| this.open_settings(item, cx)),
                                 )
@@ -1922,10 +1955,7 @@ impl Shell {
                         .text_size(px(13.0))
                         .text_color(theme.text_muted)
                         .cursor_pointer()
-                        .hover(|s| {
-                            s.bg(crate::theme::wash(0.11))
-                                .text_color(Theme::dark().text)
-                        })
+                        .hover(|s| s.bg(crate::theme::wash(0.11)).text_color(theme.text))
                         .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
                         .child(
                             // AltArrowLeft chevron (comet settings-sidebar.tsx),
@@ -3477,7 +3507,7 @@ impl Shell {
                         .text_size(px(13.0))
                         .text_color(theme.text)
                         .cursor_pointer()
-                        .hover(|s| s.bg(Theme::dark().element_hover))
+                        .hover(|s| s.bg(theme.element_hover))
                         .on_click(cx.listener(|this, _, _, cx| this.retry_engine(cx)))
                         .child(SharedString::from("Retry")),
                 )
@@ -3491,7 +3521,7 @@ impl Shell {
                 .rounded(px(12.0))
                 .border_1()
                 .border_color(theme.border)
-                .bg(crate::theme::grey(0x0e))
+                .bg(theme.surface_raised)
                 .shadow_lg()
                 .flex()
                 .flex_col()
@@ -3534,7 +3564,7 @@ impl Shell {
                         .bg(theme.text)
                         .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(crate::theme::grey(0x0e))
+                        .text_color(theme.bg)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.9))
                         .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
@@ -3672,7 +3702,7 @@ impl Shell {
             .rounded(px(12.0))
             .border_1()
             .border_color(theme.border)
-            .bg(crate::theme::grey(0x0e))
+            .bg(theme.surface_raised)
             .shadow_lg()
             .flex()
             .flex_col()
@@ -3730,7 +3760,7 @@ impl Shell {
                             .bg(theme.text)
                             .text_size(px(14.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(crate::theme::grey(0x0e))
+                            .text_color(theme.bg)
                             .when(submitting, |el| el.opacity(0.5))
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.9))
@@ -3760,7 +3790,7 @@ impl Shell {
                         .text_size(px(12.0))
                         .text_color(theme.text_muted.opacity(0.6))
                         .cursor_pointer()
-                        .hover(|s| s.text_color(Theme::dark().text))
+                        .hover(|s| s.text_color(theme.text))
                         .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx)))
                         .child(SharedString::from("Use a different account")),
                 ),
@@ -3896,7 +3926,7 @@ fn window_control_button(
         .bg(motion::hover_blend(
             &fade_key,
             crate::theme::wash(0.0),
-            Theme::dark().element_hover,
+            theme.element_hover,
         ))
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
@@ -3990,7 +4020,26 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
+        // System-scheme following: register once, then rebuild the theme from
+        // the recipe global whenever the OS appearance flips. The observer
+        // fires IMMEDIATELY on registration (correcting the boot guess) and
+        // again on every change — so it must run before any `Theme::of`
+        // borrow below, since the callback replaces the theme global.
+        if self.appearance_observer.is_none() {
+            let transcript = self.transcript.clone();
+            self.appearance_observer = Some(window.observe_window_appearance(move |window, cx| {
+                let config = cx.global::<ThemeConfig>().clone();
+                Theme::install(cx, config.build(ColorScheme::from(window.appearance())));
+                transcript.update(cx, |transcript, cx| {
+                    transcript.invalidate_render_cache(cx);
+                });
+                window.refresh();
+            }));
+        }
+        // Clone — the observer above and the settings pages install themes via
+        // `set_global` mid-render, and a long-lived `&Theme` into the global
+        // map would dangle if that insert rehashes the map.
+        let theme = Theme::of(cx).clone();
         // The shell tone (comet `.frost`): the surface the sidebar sits on and
         // the main panel floats over as an inset rounded card. On macOS the
         // window background is the blurred desktop (lib.rs `Blurred`), so the

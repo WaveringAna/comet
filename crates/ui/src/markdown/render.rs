@@ -482,11 +482,17 @@ pub struct FlatText {
 /// Inline-code tint (round 9): the original is neutral (chat-view.tsx mdTheme
 /// `inlineCode: #f0f0f0 on white/8%`), but the user asked for "a nice purple"
 /// — violet-300 text over a violet-400 wash, readable on the #060606 panel.
-pub fn inline_code_text() -> Hsla {
-    crate::theme::oklch(0.811, 0.111, 293.571) // violet-300
+/// Light schemes use the violet-600 mirror so the tint stays legible on white.
+pub fn inline_code_text(theme: &Theme) -> Hsla {
+    if theme.scheme.is_dark() {
+        crate::theme::oklch(0.811, 0.111, 293.571) // violet-300
+    } else {
+        crate::theme::oklch(0.542, 0.244, 293.54) // violet-600
+    }
 }
 pub fn inline_code_wash() -> Hsla {
-    crate::theme::oklch(0.702, 0.183, 293.541).opacity(0.12) // violet-400/12
+    let dark = crate::theme::current_scheme().is_dark();
+    crate::theme::oklch(0.702, 0.183, 293.541).opacity(if dark { 0.12 } else { 0.14 }) // violet-400
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
 /// x extends 2px past the glyphs, y insets 2px from the 22px line box).
@@ -542,7 +548,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         // Inline code reads violet (see `inline_code_text`); everything else
         // stays the monochrome foreground.
         let color = if run.style.code {
-            inline_code_text()
+            inline_code_text(theme)
         } else {
             theme.text
         };
@@ -1093,10 +1099,29 @@ fn render_code_block(
 /// original's mdTheme code blocks are monochrome `#e7e7e7`, but the user
 /// asked for color; these are the diff pane's hues, now shared by both).
 pub fn token_color(class: TokenClass, theme: &Theme) -> Hsla {
+    let dark = theme.scheme.is_dark();
     match class {
-        TokenClass::Keyword => crate::theme::oklch(0.709, 0.129, 20.0), // soft rose
-        TokenClass::StringLit => crate::theme::oklch(0.77, 0.11, 168.0), // soft green
-        TokenClass::Number => crate::theme::oklch(0.78, 0.12, 80.0),    // soft amber
+        TokenClass::Keyword => {
+            if dark {
+                crate::theme::oklch(0.709, 0.129, 20.0)
+            } else {
+                crate::theme::oklch(0.55, 0.15, 20.0)
+            } // soft rose (dark) / muted rose (light)
+        }
+        TokenClass::StringLit => {
+            if dark {
+                crate::theme::oklch(0.77, 0.11, 168.0)
+            } else {
+                crate::theme::oklch(0.46, 0.12, 168.0)
+            } // soft green / muted green
+        }
+        TokenClass::Number => {
+            if dark {
+                crate::theme::oklch(0.78, 0.12, 80.0)
+            } else {
+                crate::theme::oklch(0.52, 0.13, 80.0)
+            } // soft amber / muted olive
+        }
         TokenClass::Comment => theme.text_faint,
     }
 }
@@ -1210,7 +1235,7 @@ mod tests {
         assert_eq!(flat.code_ranges, vec![4..9, 14..17]);
         // Code text is the violet tint; the square run background is gone
         // (the rounded wash is painted by the canvas underlay instead).
-        assert_eq!(flat.runs[1].color, inline_code_text());
+        assert_eq!(flat.runs[1].color, inline_code_text(&theme));
         assert_eq!(flat.runs[1].background_color, None);
         assert_eq!(flat.runs[0].color, theme.text);
     }

@@ -1,19 +1,150 @@
-//! Always-dark monochrome theme — concrete values, no indirection.
+//! Monochrome theme engine — light/dark schemes derived from a background +
+//! foreground hex pair and a contrast percentage.
 //!
-//! Colors are precomputed from an oklch-derived neutral scale (perceptually even
-//! lightness steps; the same scale comet's Tailwind theme used) into gpui [`Hsla`].
-//! Hairlines are white at low alpha so they read on any surface. **Numbers drive
-//! layout, colors are paint**: layout constants live here as plain numbers and never
-//! depend on which color is painted.
+//! The default dark theme's tones are precomputed from an oklch-derived neutral
+//! scale (perceptually even lightness steps; the same scale comet's Tailwind
+//! theme used) into gpui [`Hsla`]. User themes are built by [`Theme::custom`]:
+//! the background/foreground hexes anchor the ramp and every intermediate role
+//! (panel surfaces, muted/faint text, hairlines, washes) is a fixed fraction of
+//! the distance between them, scaled by the contrast percentage. Hairlines are
+//! the scheme's text pole at low alpha so they read on any surface. **Numbers
+//! drive layout, colors are paint**: layout constants live here as plain numbers
+//! and never depend on which color is painted.
 //!
-//! Installed as a gpui [`Global`] at boot (`cx.set_global(Theme::dark())`); read with
-//! [`Theme::of`].
+//! Installed as a gpui [`Global`] at boot via [`Theme::install`]; read with
+//! [`Theme::of`]. The scheme mirror that flips the [`wash`]/[`white_alpha`]
+//! paint primitives is kept in a thread-local so element builders without a
+//! `&Theme` still paint the active scheme.
 
-use gpui::{App, Global, Hsla, SharedString, hsla};
+use std::cell::Cell;
 
-/// The app theme. One concrete instance — comet is always-dark by design.
+use gpui::{App, Global, Hsla, Rgba, SharedString, hsla};
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Scheme / preference
+// ---------------------------------------------------------------------------
+
+/// The persisted theme preference (Settings → Appearance). `System` follows
+/// the OS appearance live — switching the system theme re-paints the app
+/// without a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemePreference {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// Resolve the preference against the OS appearance into a concrete scheme.
+    pub fn resolved(self, system: ColorScheme) -> ColorScheme {
+        match self {
+            Self::System => system,
+            Self::Light => ColorScheme::Light,
+            Self::Dark => ColorScheme::Dark,
+        }
+    }
+}
+
+/// A concrete paint scheme — the direction of the neutral ramp (light surfaces
+/// with dark text vs dark surfaces with light text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorScheme {
+    Light,
+    #[default]
+    Dark,
+}
+
+impl ColorScheme {
+    pub fn is_dark(self) -> bool {
+        self == Self::Dark
+    }
+}
+
+impl From<gpui::WindowAppearance> for ColorScheme {
+    fn from(appearance: gpui::WindowAppearance) -> Self {
+        match appearance {
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => Self::Dark,
+            gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => Self::Light,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Defaults + derivation constants
+// ---------------------------------------------------------------------------
+
+/// Default dark background — sampled #060606 from the reference screenshots
+/// (main panel).
+pub const DEFAULT_BG_DARK: &str = "#060606";
+/// Default dark foreground — the pre-2.0 text tone `neutral(0.922)` → #e5e5e5.
+pub const DEFAULT_FG_DARK: &str = "#e5e5e5";
+/// Default light background — a near-white panel.
+pub const DEFAULT_BG_LIGHT: &str = "#fafafa";
+/// Default light foreground — a near-black text tone.
+pub const DEFAULT_FG_LIGHT: &str = "#161616";
+/// Default contrast percentage (full tonal spread).
+pub const DEFAULT_CONTRAST: f32 = 100.0;
+
+pub fn default_bg_hex(scheme: ColorScheme) -> &'static str {
+    match scheme {
+        ColorScheme::Light => DEFAULT_BG_LIGHT,
+        ColorScheme::Dark => DEFAULT_BG_DARK,
+    }
+}
+
+pub fn default_fg_hex(scheme: ColorScheme) -> &'static str {
+    match scheme {
+        ColorScheme::Light => DEFAULT_FG_LIGHT,
+        ColorScheme::Dark => DEFAULT_FG_DARK,
+    }
+}
+
+/// Fraction of the bg→fg ramp the panel surface lifts off `bg` (dark default
+/// `#060606` → `#0d0d0d`).
+const SURFACE_LIFT: f32 = 0.0314;
+/// Raised-surface fraction (dark default → `#1e1e1e`).
+const RAISED_LIFT: f32 = 0.1076;
+/// Fraction of the fg→bg ramp muted text sinks toward `bg` (dark default
+/// `#e5e5e5` → `#a1a1a1`).
+const MUTED_SINK: f32 = 0.3049;
+/// Faint-text fraction (dark default → `#737373`).
+const FAINT_SINK: f32 = 0.5112;
+
+// Mirror of the scheme currently installed as the theme global. Paint
+// primitives ([`wash`], [`white_alpha`]) flip white↔black with the scheme so
+// the ~130 call sites that pass a hardcoded white wash (hairlines, hovers,
+// skeleton rows) keep painting the active scheme without threading `&Theme`
+// through every element builder. Element builders all run on the UI thread;
+// tests default to Dark and set the mirror explicitly when they need Light.
+thread_local! {
+    static CURRENT_SCHEME: Cell<ColorScheme> = const { Cell::new(ColorScheme::Dark) };
+    /// The active theme's primary text color — for element builders that have
+    /// no `&Theme` in scope (shared hover closures like [`ghost_hover`]).
+    static CURRENT_TEXT: Cell<Hsla> = Cell::new(hsla(0.0, 0.0, 0.898, 1.0));
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_scheme(scheme: ColorScheme) {
+    CURRENT_SCHEME.with(|cell| cell.set(scheme));
+}
+
+/// The app theme. One concrete instance per scheme; rebuilt when the user
+/// changes appearance settings or the system scheme flips.
 #[derive(Debug, Clone)]
 pub struct Theme {
+    /// The scheme this theme was built for — the direction of its neutral ramp.
+    pub scheme: ColorScheme,
     // ---- paint: neutral surfaces (oklch chroma 0) ----
     /// App background — oklch(0.145 0 0) ≡ `#0a0a0a`.
     pub bg: Hsla,
@@ -94,14 +225,130 @@ impl Theme {
     pub const SPACE_LG: f32 = 16.0;
 
     /// The frost tint painted over the blurred window background (macOS
-    /// glass). Darker than `surface` — matched to the reference dark
-    /// vibrancy scrim: `hsl(0 0% 3%)` (#080808) at [`Self::GLASS_ALPHA`].
-    /// On opaque platforms this IS the surface tone (no tint swap).
+    /// glass). Dark keeps the reference near-black vibrancy scrim. Light is
+    /// deliberately opaque: a pale translucent tint lets the wallpaper bleed
+    /// through and turns otherwise predictable chrome into muddy grey.
     pub fn glass(&self) -> Hsla {
-        if Self::GLASS_ALPHA < 1.0 {
-            grey(8).opacity(Self::GLASS_ALPHA)
-        } else {
-            self.surface
+        match self.scheme {
+            ColorScheme::Dark if Self::GLASS_ALPHA < 1.0 => grey(8).opacity(Self::GLASS_ALPHA),
+            ColorScheme::Dark | ColorScheme::Light => self.surface,
+        }
+    }
+
+    /// The floating-card tint over the frosted backdrop (popovers, dialogs,
+    /// sidebar peek). Dark keeps its translucent glass; light elevates with an
+    /// opaque plate plus border/shadow instead of lightness-through-wallpaper.
+    pub fn glass_card(&self) -> Hsla {
+        match self.scheme {
+            ColorScheme::Dark if Self::GLASS_ALPHA < 1.0 => grey(0x16).opacity(0.65),
+            ColorScheme::Dark => grey(0x16),
+            ColorScheme::Light => self.bg,
+        }
+    }
+
+    /// The composer and text-input plate. A faint white wash raises a dark
+    /// surface; mirroring that to black in light mode makes the control look
+    /// recessed and lets its drop-shadow plate show through. Light therefore
+    /// uses an opaque background and lets border/shadow carry elevation.
+    pub fn input_bg(&self) -> Hsla {
+        match self.scheme {
+            ColorScheme::Dark => hsla(0.0, 0.0, 1.0, 0.03),
+            ColorScheme::Light => self.bg,
+        }
+    }
+
+    /// Terminal surface. Unlike the previous always-dark island, light mode
+    /// follows the app plane and pairs it with a dedicated dark ANSI palette.
+    pub fn terminal_bg(&self) -> Hsla {
+        match self.scheme {
+            ColorScheme::Dark => grey(0x09),
+            ColorScheme::Light => self.bg,
+        }
+    }
+
+    pub fn terminal_cursor(&self) -> Hsla {
+        self.text
+            .opacity(if self.scheme.is_dark() { 0.35 } else { 0.55 })
+    }
+
+    /// Scheme-aware translucent wash (soft-white in dark, soft-black in light)
+    /// — the theme-backed form of the [`wash`] primitive.
+    pub fn wash(&self, alpha: f32) -> Hsla {
+        crate::theme::wash(alpha)
+    }
+
+    /// Build a theme from the persisted recipe: the two anchor hexes and the
+    /// contrast percentage. Every intermediate role is a fixed fraction of the
+    /// distance between `bg` and `fg`, scaled by `contrast / 100` — so the
+    /// defaults reproduce the pre-theming dark theme pixel-for-pixel, and a
+    /// light theme is its exact mirror. Invalid hexes fall back to the
+    /// scheme's defaults; accents are brand hues and stay fixed.
+    pub fn custom(scheme: ColorScheme, bg_hex: &str, fg_hex: &str, contrast: f32) -> Self {
+        let spread = (contrast / DEFAULT_CONTRAST).clamp(0.0, 1.0);
+        let default_bg = default_bg_hex(scheme);
+        let default_fg = default_fg_hex(scheme);
+        let bg = parse_hex(bg_hex)
+            .or_else(|| parse_hex(default_bg))
+            .unwrap_or_else(|| {
+                // Unreachable — the default hexes are valid; keep the app alive on
+                // a broken constant.
+                hsla(0.0, 0.0, 0.0, 1.0)
+            });
+        let fg = parse_hex(fg_hex)
+            .or_else(|| parse_hex(default_fg))
+            .unwrap_or_else(|| hsla(0.0, 0.0, 1.0, 1.0));
+        // Wash/hairline poles: the scheme's light pole (white in dark, black in
+        // light) so translucent overlays read on any surface.
+        let wash_l = if scheme.is_dark() { 0.92 } else { 0.10 };
+        let hairline_l = if scheme.is_dark() { 1.0 } else { 0.0 };
+        // A one-pixel line needs more ink on white, while fill alphas carry
+        // over unchanged. This is the useful role split from upstream's light
+        // palette without giving up our custom color anchors.
+        let hairline_scale = if scheme.is_dark() { 1.0 } else { 1.35 };
+        let (accent, accent_strong, danger, warning) = match scheme {
+            ColorScheme::Dark => (
+                oklch(0.673, 0.182, 276.935), // indigo-400
+                oklch(0.585, 0.233, 277.117), // indigo-500
+                oklch(0.704, 0.191, 22.216),  // red-400
+                oklch(0.828, 0.189, 84.429),  // amber-400
+            ),
+            ColorScheme::Light => (
+                oklch(0.511, 0.262, 276.966), // indigo-600
+                oklch(0.511, 0.262, 276.966), // indigo-600
+                oklch(0.577, 0.245, 27.325),  // red-600
+                oklch(0.555, 0.163, 48.998),  // amber-700
+            ),
+        };
+        Self {
+            scheme,
+            bg,
+            surface: mix(bg, fg, SURFACE_LIFT * spread),
+            surface_raised: mix(bg, fg, RAISED_LIFT * spread),
+            element_hover: hsla(0.0, 0.0, wash_l, 0.14 * spread),
+            element_active: hsla(0.0, 0.0, wash_l, 0.16 * spread),
+            border: hsla(
+                0.0,
+                0.0,
+                hairline_l,
+                (0.08 * spread * hairline_scale).min(0.5),
+            ),
+            border_strong: hsla(
+                0.0,
+                0.0,
+                hairline_l,
+                (0.14 * spread * hairline_scale).min(0.5),
+            ),
+            text: fg,
+            text_muted: mix(fg, bg, MUTED_SINK * spread),
+            text_faint: mix(fg, bg, FAINT_SINK * spread),
+            accent,
+            accent_strong,
+            danger,
+            warning,
+            font_sans: "Geist".into(),
+            font_mono: "Geist Mono".into(),
+            font_sans_fallback: system_sans().into(),
+            font_mono_fallback: system_mono().into(),
         }
     }
 
@@ -109,26 +356,12 @@ impl Theme {
     /// reference screenshots of the original app (docs/reference): main panel
     /// `#060606`, shell/sidebar `#0d0d0d`.
     pub fn dark() -> Self {
-        Self {
-            bg: grey(6),       // main panel — sampled #060606
-            surface: grey(13), // shell / sidebar — sampled #0d0d0d
-            surface_raised: neutral(0.235),
-            element_hover: wash(0.14),
-            element_active: wash(0.16),
-            border: white_alpha(0.08),
-            border_strong: white_alpha(0.14),
-            text: neutral(0.922),                        // ~neutral-200
-            text_muted: neutral(0.708),                  // ~neutral-400
-            text_faint: neutral(0.556),                  // ~neutral-500
-            accent: oklch(0.673, 0.182, 276.935),        // indigo-400
-            accent_strong: oklch(0.585, 0.233, 277.117), // indigo-500
-            danger: oklch(0.704, 0.191, 22.216),         // red-400
-            warning: oklch(0.828, 0.189, 84.429),        // amber-400
-            font_sans: "Geist".into(),
-            font_mono: "Geist Mono".into(),
-            font_sans_fallback: system_sans().into(),
-            font_mono_fallback: system_mono().into(),
-        }
+        Self::custom(ColorScheme::Dark, "", "", DEFAULT_CONTRAST)
+    }
+
+    /// The light mirror: near-white surfaces, near-black text, dark hairlines.
+    pub fn light() -> Self {
+        Self::custom(ColorScheme::Light, "", "", DEFAULT_CONTRAST)
     }
 
     /// Keep the paint system fixed while replacing only the two text roles.
@@ -148,6 +381,16 @@ impl Theme {
     pub fn of(cx: &App) -> &Theme {
         cx.global::<Theme>()
     }
+
+    /// Install the theme as the gpui [`Global`] and sync the scheme mirror
+    /// that drives [`wash`]/[`white_alpha`] and [`current_text`]. Always
+    /// install through this — a bare `cx.set_global` leaves the mirror on the
+    /// previous scheme.
+    pub fn install(cx: &mut App, theme: Theme) {
+        CURRENT_SCHEME.with(|cell| cell.set(theme.scheme));
+        CURRENT_TEXT.with(|cell| cell.set(theme.text));
+        cx.set_global(theme);
+    }
 }
 
 impl Default for Theme {
@@ -157,6 +400,56 @@ impl Default for Theme {
 }
 
 impl Global for Theme {}
+
+// ---------------------------------------------------------------------------
+// Theme recipe (persisted appearance settings)
+// ---------------------------------------------------------------------------
+
+/// The persisted theme recipe — preference, custom color anchors, and the
+/// two text roles. The shell keeps one as a global so the window-appearance
+/// observer (which runs with only `&mut Window, &mut App` and cannot reach
+/// the shell entity) can rebuild the theme when the OS scheme flips.
+#[derive(Debug, Clone)]
+pub struct ThemeConfig {
+    pub preference: ThemePreference,
+    /// Custom background hex; `None` uses the active scheme's default.
+    pub bg_hex: Option<String>,
+    /// Custom foreground hex; `None` uses the active scheme's default.
+    pub fg_hex: Option<String>,
+    /// Contrast percentage (0..100) — the tonal spread between the anchor hexes
+    /// and the derived roles (surfaces, muted/faint text, hairlines, washes).
+    pub contrast: f32,
+    pub ui_font: String,
+    pub code_font: String,
+}
+
+impl ThemeConfig {
+    pub fn build(&self, system: ColorScheme) -> Theme {
+        Theme::custom(
+            self.preference.resolved(system),
+            self.bg_hex.as_deref().unwrap_or_default(),
+            self.fg_hex.as_deref().unwrap_or_default(),
+            self.contrast,
+        )
+        .with_fonts(self.ui_font.clone(), self.code_font.clone())
+    }
+
+    /// The hex shown in settings for the background: the custom value, or the
+    /// active scheme's default while untouched.
+    pub fn effective_bg_hex(&self, scheme: ColorScheme) -> String {
+        self.bg_hex
+            .clone()
+            .unwrap_or_else(|| default_bg_hex(scheme).to_string())
+    }
+
+    pub fn effective_fg_hex(&self, scheme: ColorScheme) -> String {
+        self.fg_hex
+            .clone()
+            .unwrap_or_else(|| default_fg_hex(scheme).to_string())
+    }
+}
+
+impl Global for ThemeConfig {}
 
 fn system_sans() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -192,13 +485,61 @@ pub fn neutral(lightness: f32) -> Hsla {
 /// opaque washes killed the glass and flashed dark mid-fade (user reports);
 /// hover fades must rest on `wash(0.0)`, never transparent BLACK, so the
 /// interpolation stays white-toned.
+///
+/// Scheme-aware: in a light theme the wash is the soft-BLACK mirror (l 0.10)
+/// so hover states keep painting on light surfaces.
 pub fn wash(alpha: f32) -> Hsla {
-    hsla(0.0, 0.0, 0.92, alpha)
+    let l = CURRENT_SCHEME.with(|s| if s.get().is_dark() { 0.92 } else { 0.10 });
+    hsla(0.0, 0.0, l, alpha)
 }
 
-/// White at the given alpha — the hairline/wash primitive.
+/// The scheme's hairline/wash pole at the given alpha — white in dark themes,
+/// black in light (so hairlines and translucent fills read on any surface).
 pub fn white_alpha(alpha: f32) -> Hsla {
-    hsla(0.0, 0.0, 1.0, alpha)
+    let l = CURRENT_SCHEME.with(|s| if s.get().is_dark() { 1.0 } else { 0.0 });
+    hsla(0.0, 0.0, l, alpha)
+}
+
+/// The active theme's primary text color — for builders without a `&Theme`.
+pub fn current_text() -> Hsla {
+    CURRENT_TEXT.with(|cell| cell.get())
+}
+
+/// The active theme's scheme — for paint primitives without a `&Theme`.
+pub fn current_scheme() -> ColorScheme {
+    CURRENT_SCHEME.with(|cell| cell.get())
+}
+
+/// Parse a `#RRGGBB` hex (leading `#` optional, case-insensitive).
+pub fn parse_hex(text: &str) -> Option<Hsla> {
+    let hex = text.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let mut channels = [0u8; 3];
+    for (i, byte) in hex.bytes().enumerate() {
+        let nibble = (byte as char).to_digit(16)?;
+        channels[i / 2] = (channels[i / 2] << 4) | nibble as u8;
+    }
+    let [r, g, b] = channels;
+    Some(Hsla::from(Rgba {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
+        a: 1.0,
+    }))
+}
+
+/// The hex string (`#rrggbb`) for an opaque color — the display form for the
+/// appearance settings.
+pub fn hex_of(color: Hsla) -> String {
+    let rgba = Rgba::from(color);
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (rgba.r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (rgba.g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (rgba.b * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
 }
 
 /// Selected-state glass treatment (tabs, session rows, space rows): a
@@ -435,5 +776,147 @@ mod tests {
         assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
         assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
         assert_eq!(Theme::BUBBLE_RADIUS, 16.0);
+    }
+
+    #[test]
+    fn custom_defaults_reproduce_the_dark_theme() {
+        let built = Theme::custom(ColorScheme::Dark, "#060606", "#e5e5e5", 100.0);
+        let reference = Theme::dark();
+        assert_eq!(built.scheme, ColorScheme::Dark);
+        // Anchor hexes land exactly.
+        assert!((built.bg.l - reference.bg.l).abs() < 1e-3);
+        assert!((built.text.l - reference.text.l).abs() < 1e-3);
+        // Derived roles reproduce the pre-theming tones (srgb 13/30/161/115).
+        for (name, got, want) in [
+            ("surface", built.surface.l, reference.surface.l),
+            (
+                "surface_raised",
+                built.surface_raised.l,
+                reference.surface_raised.l,
+            ),
+            ("text_muted", built.text_muted.l, reference.text_muted.l),
+            ("text_faint", built.text_faint.l, reference.text_faint.l),
+        ] {
+            assert!((got - want).abs() < 1e-3, "{name}: {got} vs {want}");
+        }
+        // Hairlines stay white-pole, washes soft-white-pole in dark.
+        assert_eq!(built.border.l, 1.0);
+        assert_eq!(built.element_hover.l, 0.92);
+    }
+
+    #[test]
+    fn light_scheme_mirrors_the_ramp() {
+        let t = Theme::light();
+        assert_eq!(t.scheme, ColorScheme::Light);
+        // Light ramp: text darker than bg, surfaces between the two and
+        // raised surfaces pushed further toward the text pole.
+        assert!(t.text.l < t.bg.l, "dark text on light bg");
+        assert!(t.text.l < t.surface.l && t.surface.l < t.bg.l);
+        assert!(
+            t.surface_raised.l < t.surface.l,
+            "raised is darker in light"
+        );
+        // Muted/faint sit between text and bg, each closer to bg than the
+        // brighter role (in light they're LIGHTER than text, in dark darker).
+        let toward_bg = |c: Hsla| (c.l - t.bg.l).abs();
+        assert!(
+            toward_bg(t.text_muted) < toward_bg(t.text),
+            "muted is dimmer"
+        );
+        assert!(toward_bg(t.text_faint) < toward_bg(t.text_muted));
+        assert!(toward_bg(t.text_muted) > 0.0 && toward_bg(t.text_faint) > 0.0);
+        // Hairlines/washes flip to the dark pole.
+        assert_eq!(t.border.l, 0.0);
+        assert_eq!(t.element_hover.l, 0.10);
+    }
+
+    #[test]
+    fn contrast_zero_flattens_the_ramp() {
+        let flat = Theme::custom(ColorScheme::Dark, "#060606", "#e5e5e5", 0.0);
+        // No tonal spread: surfaces collapse to bg, secondary text to fg,
+        // hairline washes to fully transparent.
+        assert!((flat.surface.l - flat.bg.l).abs() < 1e-6);
+        assert!((flat.surface_raised.l - flat.bg.l).abs() < 1e-6);
+        assert!((flat.text_muted.l - flat.text.l).abs() < 1e-6);
+        assert!((flat.text_faint.l - flat.text.l).abs() < 1e-6);
+        assert_eq!(flat.border.a, 0.0);
+        assert_eq!(flat.element_hover.a, 0.0);
+    }
+
+    #[test]
+    fn hex_parsing_and_display_round_trip() {
+        for hex in ["#a1b2c3", "#000000", "#ffffff", "#0d0d0d", "#ABCDEF"] {
+            let color = parse_hex(hex).unwrap_or_else(|| panic!("parse {hex}"));
+            assert_eq!(
+                hex_of(color).to_lowercase(),
+                hex.to_lowercase(),
+                "round-trip"
+            );
+        }
+        assert!(parse_hex("abc").is_none());
+        assert!(parse_hex("#12345g").is_none());
+        assert!(parse_hex("").is_none());
+        assert!(parse_hex("#ffffff00").is_none(), "no 8-digit hex");
+        // Scheme defaults parse.
+        assert!(parse_hex(default_bg_hex(ColorScheme::Dark)).is_some());
+        assert!(parse_hex(default_fg_hex(ColorScheme::Light)).is_some());
+    }
+
+    #[test]
+    fn invalid_custom_hexes_fall_back_to_scheme_defaults() {
+        let t = Theme::custom(ColorScheme::Dark, "not-a-hex", "#zzzzzz", 100.0);
+        assert!((t.bg.l - parse_hex(DEFAULT_BG_DARK).unwrap().l).abs() < 1e-6);
+        assert!((t.text.l - parse_hex(DEFAULT_FG_DARK).unwrap().l).abs() < 1e-6);
+    }
+
+    #[test]
+    fn preference_resolves_system() {
+        let light = ColorScheme::Light;
+        let dark = ColorScheme::Dark;
+        assert_eq!(ThemePreference::System.resolved(light), light);
+        assert_eq!(ThemePreference::System.resolved(dark), dark);
+        assert_eq!(ThemePreference::Light.resolved(dark), light);
+        assert_eq!(ThemePreference::Dark.resolved(light), dark);
+        assert_eq!(ThemePreference::System.label(), "System");
+    }
+
+    #[test]
+    fn paint_primitives_flip_with_the_scheme_mirror() {
+        // Default (Dark) mirrors the pre-theming white washes.
+        assert_eq!(white_alpha(0.1).l, 1.0);
+        assert_eq!(wash(0.1).l, 0.92);
+        set_test_scheme(ColorScheme::Light);
+        assert_eq!(white_alpha(0.1).l, 0.0, "black hairline in light");
+        assert_eq!(wash(0.1).l, 0.10, "soft-black wash in light");
+        set_test_scheme(ColorScheme::Dark);
+    }
+
+    #[test]
+    fn glass_card_mirrors_the_scheme() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        // Dark card tone ~#161616; light card is an opaque near-white plate.
+        let (dl, light_card) = (dark.glass_card().l, light.glass_card());
+        assert!((dl - 0x16 as f32 / 255.0).abs() < 1e-3, "dark {dl}");
+        assert!(light_card.l > 0.9, "light {}", light_card.l);
+        assert_eq!(light_card.a, 1.0);
+        assert_eq!(
+            light.glass().a,
+            1.0,
+            "light chrome does not sample wallpaper"
+        );
+    }
+
+    #[test]
+    fn light_inputs_are_opaque_raised_plates() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        assert!(dark.input_bg().a < 1.0, "dark keeps its translucent lift");
+        assert_eq!(light.input_bg(), light.bg);
+        assert_eq!(
+            light.input_bg().a,
+            1.0,
+            "shadow cannot bleed through the plate"
+        );
     }
 }

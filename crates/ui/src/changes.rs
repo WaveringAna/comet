@@ -879,7 +879,7 @@ impl Changes {
                     .truncate()
                     .font_family(theme.font_mono.clone())
                     .text_size(px(12.0))
-                    .text_color(crate::theme::grey(0x98))
+                    .text_color(theme.text_muted)
                     .child(SharedString::from(file.path.clone())),
             )
             .when(file.binary, |el| {

@@ -134,7 +134,7 @@ pub fn run_app(config: UiConfig) {
         // NB: pinned-rev API — `gpui_tokio::init(cx)` free function (not `Tokio::init`).
         gpui_tokio::init(cx);
         register_fonts(cx);
-        cx.set_global(theme::Theme::dark());
+        theme::Theme::install(cx, theme::Theme::dark());
         composer::init(cx);
         terminal::panel::init(cx);
         app_menus::init(cx);

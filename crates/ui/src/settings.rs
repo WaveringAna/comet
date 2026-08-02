@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::theme::{DEFAULT_CONTRAST, ThemeConfig, ThemePreference};
+
 pub mod accounts;
 pub mod appearance;
 pub mod archived;
@@ -76,6 +78,16 @@ pub struct UiSettings {
     pub ui_font: String,
     /// Monospaced family used by code, terminal output, and key hints.
     pub code_font: String,
+    /// Theme scheme preference (System follows the OS appearance live).
+    pub theme_preference: ThemePreference,
+    /// Custom background hex; `None` uses the active scheme's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bg_hex: Option<String>,
+    /// Custom foreground hex; `None` uses the active scheme's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fg_hex: Option<String>,
+    /// Contrast percentage (0..100) — the tonal spread of the derived roles.
+    pub contrast_percent: f32,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
 }
@@ -95,6 +107,10 @@ impl Default for UiSettings {
             terminal_open: false,
             ui_font: DEFAULT_UI_FONT.to_string(),
             code_font: DEFAULT_CODE_FONT.to_string(),
+            theme_preference: ThemePreference::System,
+            bg_hex: None,
+            fg_hex: None,
+            contrast_percent: DEFAULT_CONTRAST,
             keymap: KeymapConfig::default(),
         }
     }
@@ -266,6 +282,19 @@ pub fn display_combo(combo: &str) -> String {
         .join("+")
 }
 
+impl From<&UiSettings> for ThemeConfig {
+    fn from(settings: &UiSettings) -> Self {
+        Self {
+            preference: settings.theme_preference,
+            bg_hex: settings.bg_hex.clone(),
+            fg_hex: settings.fg_hex.clone(),
+            contrast: settings.contrast_percent,
+            ui_font: settings.ui_font.clone(),
+            code_font: settings.code_font.clone(),
+        }
+    }
+}
+
 impl UiSettings {
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
     pub fn clamped(mut self) -> Self {
@@ -292,6 +321,27 @@ impl UiSettings {
         }
         if self.code_font.trim().is_empty() {
             self.code_font = DEFAULT_CODE_FONT.to_string();
+        }
+        if !self.contrast_percent.is_finite() {
+            self.contrast_percent = DEFAULT_CONTRAST;
+        } else {
+            self.contrast_percent = self.contrast_percent.clamp(0.0, 100.0);
+        }
+        // Heal hand-edited hexes: drop custom values that don't parse so the
+        // theme falls back to the scheme defaults instead of painting garbage.
+        if self
+            .bg_hex
+            .as_deref()
+            .is_some_and(|h| crate::theme::parse_hex(h).is_none())
+        {
+            self.bg_hex = None;
+        }
+        if self
+            .fg_hex
+            .as_deref()
+            .is_some_and(|h| crate::theme::parse_hex(h).is_none())
+        {
+            self.fg_hex = None;
         }
         self
     }
@@ -357,6 +407,10 @@ mod tests {
             terminal_open: true,
             ui_font: "Inter".into(),
             code_font: "Menlo".into(),
+            theme_preference: ThemePreference::Light,
+            bg_hex: Some("#111827".into()),
+            fg_hex: Some("#f9fafb".into()),
+            contrast_percent: 80.0,
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
@@ -406,6 +460,41 @@ mod tests {
         assert_eq!(d.ui_font, DEFAULT_UI_FONT);
         assert_eq!(d.code_font, DEFAULT_CODE_FONT);
         assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
+    }
+
+    #[test]
+    fn theme_defaults_and_clamping() {
+        let d = UiSettings::default();
+        assert_eq!(d.theme_preference, ThemePreference::System);
+        assert_eq!(d.bg_hex, None);
+        assert_eq!(d.fg_hex, None);
+        assert_eq!(d.contrast_percent, DEFAULT_CONTRAST);
+
+        // Clamping heals out-of-range and NaN contrast.
+        let healed = UiSettings {
+            contrast_percent: 250.0,
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!(healed.contrast_percent, 100.0);
+        let healed = UiSettings {
+            contrast_percent: f32::NAN,
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!(healed.contrast_percent, DEFAULT_CONTRAST);
+
+        // Hand-edited hexes that don't parse fall back to scheme defaults.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r##"{"bgHex": "#12zzzz", "fgHex": "not-a-color", "themePreference": "dark"}"##,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.theme_preference, ThemePreference::Dark);
+        assert_eq!(loaded.bg_hex, None);
+        assert_eq!(loaded.fg_hex, None);
     }
 
     #[test]

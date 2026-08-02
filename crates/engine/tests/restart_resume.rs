@@ -445,7 +445,7 @@ impl Harness for PersistentHarness {
     }
     async fn run(
         &self,
-        request: RunRequest,
+        _request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         *self.runs_started.lock().unwrap() += 1;
@@ -543,11 +543,14 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
     );
     let entries = entries_now(&core);
     assert_eq!(
-        entries
-            .iter()
-            .filter(|e| e.role == MessageRole::User)
-            .count(),
-        2
+        entries.iter().map(|entry| entry.role).collect::<Vec<_>>(),
+        vec![
+            MessageRole::User,
+            MessageRole::Assistant,
+            MessageRole::User,
+            MessageRole::Assistant,
+        ],
+        "each delivered steer opens a user turn before its assistant output"
     );
     core.shutdown().await;
 }
