@@ -237,14 +237,12 @@ pub enum RowKind {
         tree: Arc<BlockTree>,
         block_ix: usize,
     },
-    /// A model thinking stream, kept visually subordinate to the answer while
-    /// remaining readable during a live turn.
-    Reasoning {
-        text: SharedString,
-        streaming: bool,
-    },
     ToolGroup {
         tools: Arc<Vec<ToolItem>>,
+        /// Reasoning that ran within this chain, in order. Thinking is not a
+        /// row of its own: it folds into the group so a working stretch reads
+        /// as ONE chain, and prior thinking stays reachable by opening it.
+        thinking: Arc<Vec<SharedString>>,
     },
     InputChip {
         /// First question's header (chat-view.tsx `InputChip`: the resolved
@@ -361,18 +359,37 @@ pub fn rows_for_entry(
     // Assistant/system: split parts into block rows, folding consecutive tools.
     let mut group_ix = 0usize;
     let mut pending_group: Vec<ToolItem> = Vec::new();
+    // Thinking folds into the group it belongs to rather than splitting it, so
+    // reasoning between two calls does not cut one chain into three rows.
+    let mut pending_thinking: Vec<SharedString> = Vec::new();
 
-    let flush_group = |rows: &mut Vec<Row>, group: &mut Vec<ToolItem>, group_ix: &mut usize| {
-        if group.is_empty() {
+    let flush_group = |rows: &mut Vec<Row>,
+                       group: &mut Vec<ToolItem>,
+                       thinking: &mut Vec<SharedString>,
+                       group_ix: &mut usize| {
+        if group.is_empty() && thinking.is_empty() {
             return;
         }
         let tools = std::mem::take(group);
+        let thoughts = std::mem::take(thinking);
+        // Thinking contributes its SHAPE, never its bytes. Reasoning streams
+        // by appending to the trailing part, so hashing the text would change
+        // this row's version on every token — resplicing the chain each frame,
+        // dropping its measured height, and making stick-to-bottom jump. A
+        // collapsed chain's height does not depend on the prose, so its
+        // identity must not either; an open chain is respliced by the toggle
+        // that opened it, and its live thought is the tail row the spring is
+        // already tracking.
+        let version = tool_fingerprint(&tools)
+            .rotate_left(1)
+            .wrapping_add(thoughts.len() as u64);
         rows.push(Row {
             id: format!("{}#g{}", entry.id, group_ix).into(),
-            version: tool_fingerprint(&tools),
+            version,
             turn_start: false,
             kind: RowKind::ToolGroup {
                 tools: Arc::new(tools),
+                thinking: Arc::new(thoughts),
             },
             entry_id: entry.id.clone().into(),
             timestamp: None,
@@ -395,9 +412,22 @@ pub fn rows_for_entry(
                     resolved: *resolved,
                 });
             }
+            // Reasoning joins the current chain instead of breaking it.
+            MessagePart::Reasoning { text, .. } => {
+                if !text.trim().is_empty() {
+                    pending_thinking.push(text.clone().into());
+                }
+            }
             other => {
-                flush_group(&mut rows, &mut pending_group, &mut group_ix);
+                flush_group(
+                    &mut rows,
+                    &mut pending_group,
+                    &mut pending_thinking,
+                    &mut group_ix,
+                );
                 match other {
+                    // Folded above; never reaches this arm.
+                    MessagePart::Reasoning { .. } => {}
                     MessagePart::Text { id: part_id, text } => {
                         if text.trim().is_empty() {
                             continue;
@@ -438,22 +468,6 @@ pub fn rows_for_entry(
                                 },
                             });
                         }
-                    }
-                    MessagePart::Reasoning { id: part_id, text } => {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
-                        rows.push(Row {
-                            id: format!("{}#{}", entry.id, part_id).into(),
-                            version: (fnv1a(text.as_bytes()) << 1) | streaming as u64,
-                            turn_start: false,
-                            kind: RowKind::Reasoning {
-                                text: text.clone().into(),
-                                streaming,
-                            },
-                            entry_id: entry_id.clone(),
-                            timestamp: None,
-                        });
                     }
                     MessagePart::Input {
                         id: part_id,
@@ -503,7 +517,12 @@ pub fn rows_for_entry(
             }
         }
     }
-    flush_group(&mut rows, &mut pending_group, &mut group_ix);
+    flush_group(
+        &mut rows,
+        &mut pending_group,
+        &mut pending_thinking,
+        &mut group_ix,
+    );
 
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
@@ -678,6 +697,25 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
     Some((prefix..old.len() - suffix, new.len() - suffix - prefix))
 }
 
+/// Whether a row diff only changes the contents of rows that remain at the
+/// same indices. gpui must remeasure these rather than splice them: a splice
+/// replaces each item with a heightless one and resets an anchor inside it,
+/// while remeasurement preserves both the old height hint and absolute anchor.
+fn diff_keeps_row_identity(
+    old: &[Row],
+    new: &[Row],
+    old_range: &Range<usize>,
+    new_count: usize,
+) -> bool {
+    if old_range.len() != new_count || old_range.end > new.len() {
+        return false;
+    }
+    old[old_range.clone()]
+        .iter()
+        .zip(&new[old_range.clone()])
+        .all(|(old, new)| old.id == new.id)
+}
+
 /// One call inside a run: the deep-link anchor, its single-lined detail, and
 /// whether it failed.
 #[derive(Debug, Clone, PartialEq)]
@@ -798,7 +836,7 @@ pub fn group_summary(tools: &[ToolItem]) -> String {
 /// chat switch) is simply absent.
 pub fn group_row_for_tool(rows: &[Row], tool_id: &str) -> Option<usize> {
     rows.iter().position(|row| match &row.kind {
-        RowKind::ToolGroup { tools } => tools.iter().any(|t| t.id.as_ref() == tool_id),
+        RowKind::ToolGroup { tools, .. } => tools.iter().any(|t| t.id.as_ref() == tool_id),
         _ => false,
     })
 }
@@ -1008,6 +1046,10 @@ pub struct Transcript {
     revealed_group: Option<SharedString>,
     revealed_clear: Option<Task<()>>,
     show_jump_button: bool,
+    /// Distance from the bottom at the last USER scroll event. Separate from
+    /// [`Self::last_scroll_distance`] on purpose: the spring rewrites that one
+    /// every frame, so during a stream it cannot say which way the user moved.
+    last_user_distance: Option<f32>,
     /// Distance from the bottom at the last observation (wheel event or spring
     /// tick) — restick and escape are direction-aware
     /// (see [`Transcript::should_restick`]).
@@ -1016,6 +1058,9 @@ pub struct Transcript {
     /// re-engaged inside the 70px band, on own-send, and on the jump button.
     pinned: bool,
     spring: StickSpring,
+    /// Target observed at the previous spring tick, to spot the one-frame
+    /// collapse an unmeasured row causes (`None` = parked).
+    spring_target: Option<f32>,
     /// Wall-clock of the previous spring tick (`None` = parked).
     spring_last_tick: Option<Instant>,
     /// When the spring last landed on the bottom (settle-grace bookkeeping).
@@ -1094,9 +1139,11 @@ impl Transcript {
             revealed_group: None,
             revealed_clear: None,
             show_jump_button: false,
+            last_user_distance: None,
             last_scroll_distance: 0.0,
             pinned: true,
             spring: StickSpring::new(),
+            spring_target: None,
             spring_last_tick: None,
             spring_settled_at: None,
             spring_kick: false,
@@ -1172,33 +1219,94 @@ impl Transcript {
         distance <= STICK_THRESHOLD_PX && distance < previous_distance
     }
 
-    fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
+    /// The pin decision for one wheel/touch event. Pure so the streaming race
+    /// is testable.
+    ///
+    /// `is_scrolled` is the list's own answer captured synchronously inside
+    /// the wheel path. If a pinned view left the bottom, that input always
+    /// wins — even if the already-scheduled spring reaches the bottom before
+    /// the deferred geometry read runs.
+    ///
+    /// `previous` is the distance at the user's PREVIOUS wheel event (`None`
+    /// on the first one), never a spring-written value — that is the whole
+    /// point: during a stream the spring rewrites the shared distance every
+    /// frame, so a delta measured against it says nothing about which way the
+    /// user actually moved.
+    pub fn pin_after_scroll(
+        was_pinned: bool,
+        is_scrolled: bool,
+        distance: f32,
+        previous: Option<f32>,
+    ) -> bool {
+        if was_pinned && is_scrolled {
+            return false;
+        }
+        if !is_scrolled || distance <= AT_BOTTOM_PX {
+            // The list itself says we are glued to the end.
+            return true;
+        }
+        match previous {
+            // Off the bottom, and this notch moved toward it inside the stick
+            // band: re-engage. Any other user movement releases.
+            Some(previous) => Self::should_restick(distance, previous),
+            // First user scroll of a run, and it did not land at the bottom —
+            // that is a deliberate move away.
+            None => false,
+        }
+    }
+
+    fn handle_scroll(&mut self, event: &ListScrollEvent, cx: &mut Context<Self>) {
         // The list invokes this handler ONLY from its wheel/touch input path
-        // (programmatic scroll_by/scroll_to never re-enter it), while holding
-        // its internal RefCell borrow — reading the ListState back
-        // synchronously panics with "already mutably borrowed". Defer to the
-        // end of the effect cycle, after the list has released its borrow.
+        // (programmatic scroll_by/scroll_to never re-enter it), so simply
+        // being here means the USER moved the view.
+        //
+        // `is_scrolled` is the list's own answer to "are we still glued to the
+        // bottom": it is `logical_scroll_top.is_some()`, and the wheel path
+        // clears that anchor to `None` exactly when the scroll lands at the
+        // very bottom. Reading it here — synchronously, from the event — is
+        // what makes the release reliable.
+        //
+        // The distance delta this used to compare against could not do that
+        // job while a turn streamed. `last_scroll_distance` is also written by
+        // the spring on EVERY frame, and this handler's body is deferred (the
+        // list holds a RefCell borrow, so reading ListState back synchronously
+        // panics). So a wheel-up would land after a spring tick had already
+        // pulled the view down and rewritten `previous`: the delta then read
+        // as "moving toward the bottom", the pin never broke, and the next
+        // tick yanked you back. That is the fight — you only won it by
+        // out-scrolling the spring for a whole frame.
+        let is_scrolled = event.is_scrolled;
+        let was_pinned = self.pinned;
+        if was_pinned && is_scrolled {
+            // Interrupt synchronously. Waiting for the deferred distance read
+            // leaves one frame in which a scheduled spring can erase the
+            // user's movement and make the view appear to be at the bottom
+            // again. Dropping the task also stops a rail/jump animation from
+            // continuing after direct user input.
+            self.pinned = false;
+            self.scroll_anim = None;
+            self.spring.reset();
+            self.spring_last_tick = None;
+            self.spring_target = None;
+        }
         let this = cx.weak_entity();
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
                 let distance = this.distance_from_bottom();
-                let previous = this.last_scroll_distance;
+                let previous = this.last_user_distance.replace(distance);
                 this.last_scroll_distance = distance;
-                if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
-                    // User input moving away from the bottom breaks the pin.
-                    // Content growth never lands here — it doesn't fire the
-                    // scroll handler (mugen §1e: interrupt from input, not
-                    // scrollbar position).
+                let pin = Self::pin_after_scroll(was_pinned, is_scrolled, distance, previous);
+                if !pin {
+                    // User input away from the bottom breaks the pin. Content
+                    // growth never lands here — it does not fire this handler
+                    // (mugen §1e: interrupt from input, not scroll position).
                     this.pinned = false;
                     this.spring.reset();
                     this.spring_last_tick = None;
-                } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous) {
-                    // Returning toward the bottom inside the 70px band (or
-                    // arriving at it) re-engages the pin with a glide.
-                    if !this.pinned {
-                        this.pinned = true;
-                        this.wake_spring();
-                    }
+                    this.spring_target = None;
+                } else if !this.pinned {
+                    this.pinned = true;
+                    this.wake_spring();
                 }
                 let show = distance > SCROLL_BUTTON_THRESHOLD_PX && !this.pinned;
                 if show != this.show_jump_button {
@@ -1236,6 +1344,7 @@ impl Transcript {
     /// reduced motion snaps.
     fn engage_pin(&mut self, cx: &mut Context<Self>) {
         self.pinned = true;
+        self.last_user_distance = None;
         self.show_jump_button = false;
         if motion::reduced_motion(cx) {
             self.list.scroll_to_end();
@@ -1282,6 +1391,7 @@ impl Transcript {
         self.spring_kick = false;
         if !self.pinned {
             self.spring_last_tick = None;
+            self.spring_target = None;
             return;
         }
         let now = Instant::now();
@@ -1293,6 +1403,30 @@ impl Transcript {
         self.spring_last_tick = Some(now);
 
         let target = f32::from(self.list.max_offset_for_scrollbar().y);
+        // A just-spliced row is Unmeasured, and an unmeasured row contributes
+        // ZERO height to the list's summary — so this target (and every
+        // distance derived from it) collapses by that row's full height for
+        // one frame, then springs back once layout measures it. Chasing that
+        // phantom bottom is what made a streaming tail jump up and down on
+        // every commit.
+        //
+        // A shrinking target is the observable symptom, and it is the one we
+        // can act on without guessing: real content only grows while pinned to
+        // a streaming tail, so a drop means "not measured yet", not "the
+        // conversation got shorter". Hold position for that frame and let the
+        // measured one drive. (`is_scrolled_to_end() == None` reports unknown
+        // heights too, but it also returns None for a short/unscrollable list
+        // and before first layout — gating on it would disable the pin
+        // entirely in those states.)
+        let shrank = self.spring_target.is_some_and(|last| target < last - 1.0);
+        self.spring_target = Some(target);
+        if shrank {
+            // Stay warm: this is mid-stream, not a settle.
+            self.spring_settled_at = None;
+            cx.notify();
+            return;
+        }
+
         let mut distance = self.distance_from_bottom();
         // Long jumps (chat switch mid-history, huge pastes) teleport first.
         let viewport = f32::from(self.list.viewport_bounds().size.height);
@@ -1316,6 +1450,7 @@ impl Transcript {
                 // Park: stop scheduling frames until the next wake.
                 self.spring.reset();
                 self.spring_last_tick = None;
+                self.spring_target = None;
                 self.spring_settled_at = None;
                 return;
             }
@@ -1351,8 +1486,10 @@ impl Transcript {
             self.tool_diff_loads.clear();
             self.list.reset(0);
             self.pinned = true;
+            self.last_user_distance = None;
             self.spring.reset();
             self.spring_last_tick = None;
+            self.spring_target = None;
             self.spring_settled_at = None;
             self.spring_kick = false;
             self.show_jump_button = false;
@@ -1385,6 +1522,24 @@ impl Transcript {
                 .collect();
         }
 
+        // An OPEN chain is the one case whose height tracks the reasoning
+        // text, so only those rows fold the prose into their version. A
+        // collapsed chain (the default, and every chain the user has not
+        // touched) keeps a text-independent version, so a thinking stream no
+        // longer resplices it on every token.
+        for row in &mut new_rows {
+            if let RowKind::ToolGroup { thinking, .. } = &row.kind
+                && !thinking.is_empty()
+                && self.expanded_groups.contains(&row.id)
+            {
+                let mut v = row.version;
+                for thought in thinking.iter() {
+                    v = v.rotate_left(1) ^ fnv1a(thought.as_bytes());
+                }
+                row.version = v;
+            }
+        }
+
         // Veils live exactly as long as their live row — drop them on the
         // live→complete flip (any mid-fade chunk snaps to full, matching the
         // row's version splice).
@@ -1400,12 +1555,26 @@ impl Transcript {
         });
 
         let was_empty = self.rows.is_empty();
+        // A glued offset (`None` / anchored past the end) makes the upcoming
+        // layout hard-snap to the new end — the per-commit stutter. Break the
+        // glue with a pixel anchor a hair above the bottom so layout holds
+        // position and the spring glides the growth. Done before invalidating
+        // the row, while the geometry it seeks through is still measured.
+        let glued_before_splice = self.pinned && self.is_glued();
+        if glued_before_splice && !motion::reduced_motion(cx) && !was_empty {
+            self.list.scroll_by(px(-0.75));
+        }
+        // A structural splice can still cross the current anchor. Capture it
+        // for that case; same-identity content updates take gpui's dedicated
+        // remeasurement path below, which preserves the anchor itself.
+        let anchor_before = self.list.logical_scroll_top();
         match diff_rows(&self.rows, &new_rows) {
             None => {
                 self.rows = new_rows;
                 return;
             }
             Some((old_range, count)) => {
+                let remeasure = diff_keeps_row_identity(&self.rows, &new_rows, &old_range, count);
                 // Any replaced row's cached flatten results are stale — and
                 // because live replies splice only the rows whose content hash
                 // changed (the tail), this is O(changed rows) per commit, never
@@ -1413,7 +1582,26 @@ impl Transcript {
                 for row in &self.rows[old_range.clone()] {
                     self.render_cache.borrow_mut().invalidate_row(&row.id);
                 }
-                self.list.splice(old_range, count);
+                if remeasure {
+                    // Streaming text (especially a multi-viewport reasoning
+                    // chain) changes a row's height without changing its
+                    // identity. `remeasure_items` keeps the prior height as a
+                    // hint and restores an absolute offset inside the row, so
+                    // an appended newline cannot send the viewport to its top
+                    // or briefly collapse the list's reported bottom.
+                    self.list.remeasure_items(old_range);
+                } else {
+                    // Only when the anchor actually sat inside structurally
+                    // replaced rows with an offset to lose, and that row index
+                    // still exists after the splice.
+                    let restore = old_range.contains(&anchor_before.item_ix)
+                        && anchor_before.offset_in_item > px(0.0)
+                        && anchor_before.item_ix < new_rows.len();
+                    self.list.splice(old_range, count);
+                    if restore {
+                        self.list.scroll_to(anchor_before);
+                    }
+                }
             }
         }
         self.rows = new_rows;
@@ -1422,12 +1610,6 @@ impl Transcript {
                 // First fill (chat open) lands at the bottom instantly
                 // (mugen initialScroll:'bottom'); reduced motion always snaps.
                 self.list.scroll_to_end();
-            } else if self.is_glued() {
-                // A glued offset (`None` / anchored past the end) makes the
-                // upcoming layout hard-snap to the new end — the per-commit
-                // stutter. Materialize a pixel anchor a hair above the bottom
-                // so layout holds position and the spring glides the growth.
-                self.list.scroll_by(px(-0.75));
             }
             self.spring_kick = true;
         }
@@ -1741,9 +1923,6 @@ impl Transcript {
                         .map(|v| v.as_slice()),
                 )
             }
-            RowKind::Reasoning { text, streaming } => {
-                Self::reasoning_row(&row.id, text.clone(), *streaming, &theme)
-            }
             RowKind::LiveMarkdown { tree, block_ix } => {
                 // Per-appended-chunk fade veil (opacity only — layout commits
                 // instantly). Reduced motion renders with no veil at all.
@@ -1803,7 +1982,9 @@ impl Transcript {
                 }
                 el
             }
-            RowKind::ToolGroup { tools } => self.render_tool_group(&row.id, tools, &theme, cx),
+            RowKind::ToolGroup { tools, thinking } => {
+                self.render_tool_group(&row.id, tools, thinking, &theme, cx)
+            }
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
@@ -1961,58 +2142,6 @@ impl Transcript {
         out
     }
 
-    /// Render the model's thinking without making it compete with the answer.
-    /// The label and restrained indigo mark make the state scannable; the body
-    /// remains plain text so long reasoning never becomes another loud card.
-    fn reasoning_row(
-        row_id: &SharedString,
-        text: SharedString,
-        streaming: bool,
-        theme: &Theme,
-    ) -> AnyElement {
-        let mut marker = div()
-            .flex_none()
-            .size(px(14.0))
-            .flex()
-            .items_center()
-            .justify_center();
-        marker = if streaming {
-            marker.child(crate::loaders::mini_gradient_spinner(
-                SharedString::from(format!("{row_id}-thinking")),
-                2.0,
-            ))
-        } else {
-            marker.child(
-                crate::icons::icon(crate::icons::TUNING)
-                    .size(px(13.0))
-                    .text_color(theme.text_faint),
-            )
-        };
-
-        div()
-            .id(SharedString::from(format!("{row_id}-thinking-row")))
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_start()
-            .gap(px(8.0))
-            .py(px(3.0))
-            .text_size(px(13.0))
-            .line_height(px(19.0))
-            .text_color(theme.text_muted)
-            .child(marker)
-            .child(
-                div()
-                    .flex_none()
-                    .pt(px(1.0))
-                    .text_size(px(11.0))
-                    .text_color(theme.accent.opacity(0.85))
-                    .child(SharedString::from("Thinking")),
-            )
-            .child(div().min_w_0().flex_1().whitespace_normal().child(text))
-            .into_any_element()
-    }
-
     /// A tool group is ONE summary line, collapsed: "Ran cargo, git · edited
     /// 2 files" behind a chevron. Clicking it opens the call lines beneath —
     /// consolidated runs of same-kind calls ("Read a, b, c"), one `$ command`
@@ -2023,6 +2152,7 @@ impl Transcript {
         &mut self,
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
+        thinking: &Arc<Vec<SharedString>>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2073,7 +2203,7 @@ impl Transcript {
                         div()
                             .min_w_0()
                             .truncate()
-                            .child(SharedString::from(group_summary(tools))),
+                            .child(SharedString::from(chain_summary(tools, thinking))),
                     )
                     .child(
                         // gpui paints an svg with its OWN color — it does not
@@ -2089,6 +2219,11 @@ impl Transcript {
             );
         let running_id = latest_running(tools).map(|t| t.id.clone());
         if expanded {
+            // Thinking leads the opened chain: it is what the agent was
+            // working out before and between these calls.
+            for (ix, thought) in thinking.iter().enumerate() {
+                column = column.child(thinking_line(ix, thought, theme));
+            }
             let runs = consolidate_runs(tools);
             let mut ix = 0usize;
             for run in &runs {
@@ -2197,15 +2332,14 @@ impl Transcript {
         cx.notify();
     }
 
-    /// Open/close a group and re-splice its row: the list caches measured
-    /// heights, so a row that changed height must be replaced, not just
-    /// repainted.
+    /// Open/close a group and remeasure its row: the identity is unchanged,
+    /// but the list's cached height is not.
     fn toggle_group(&mut self, row_id: &SharedString, cx: &mut Context<Self>) {
         if !self.expanded_groups.remove(row_id) {
             self.expanded_groups.insert(row_id.clone());
         }
         if let Some(ix) = self.rows.iter().position(|r| &r.id == row_id) {
-            self.list.splice(ix..ix + 1, 1);
+            self.list.remeasure_items(ix..ix + 1);
         }
         cx.notify();
     }
@@ -2221,7 +2355,7 @@ impl Transcript {
         let row_id = self.rows[ix].id.clone();
         if self.expanded_groups.insert(row_id.clone()) {
             // Height changed — the list caches measurements per row.
-            self.list.splice(ix..ix + 1, 1);
+            self.list.remeasure_items(ix..ix + 1);
         }
         self.revealed_group = Some(row_id);
         self.revealed_clear = Some(cx.spawn(async move |this, cx| {
@@ -2421,6 +2555,40 @@ impl Render for RunTooltip {
 ///
 /// The row owns the color and children only dim against it; a child that
 /// painted its own color would ignore the row's hover.
+/// One thought inside an opened chain. Reasoning is prose, not a call, so it
+/// wears the reply's own face rather than the mono of a command line — but it
+/// keeps the call lines' indent so the chain reads as one column.
+fn thinking_line(ix: usize, text: &SharedString, theme: &Theme) -> AnyElement {
+    div()
+        .pl(px(TOOL_ROW_PAD))
+        .when(ix > 0, |el| el.pt(px(6.0)))
+        .pb(px(2.0))
+        .min_w_0()
+        .whitespace_normal()
+        .font_family(theme.font_sans.clone())
+        .text_size(px(13.0))
+        .line_height(px(19.0))
+        .text_color(theme.text_muted)
+        .child(text.clone())
+        .into_any_element()
+}
+
+/// The collapsed chain's one line. Thinking is named but never previewed —
+/// "Thinking" alone when the chain is only reasoning, otherwise appended to
+/// the run summary — so a settled turn stays quiet and the thoughts are there
+/// when you open it.
+pub fn chain_summary(tools: &[ToolItem], thinking: &[SharedString]) -> String {
+    if tools.is_empty() {
+        return "Thinking".to_string();
+    }
+    let summary = group_summary(tools);
+    if thinking.is_empty() {
+        summary
+    } else {
+        format!("{summary} · thought")
+    }
+}
+
 fn tool_row(
     row_id: &SharedString,
     key: &str,
@@ -2805,6 +2973,189 @@ mod tests {
         assert!(spring.is_idle(), "no residual motion at rest");
     }
 
+    /// Model of `ListState::splice`'s anchor rewrite (gpui `list.rs`): when the
+    /// scroll anchor sits inside the replaced range it is reset to the range's
+    /// start with a ZERO offset, discarding how far into that row we were.
+    fn splice_anchor(anchor: (usize, f32), old_range: Range<usize>, count: usize) -> (usize, f32) {
+        let (ix, off) = anchor;
+        if old_range.contains(&ix) {
+            (old_range.start, 0.0)
+        } else if old_range.end <= ix {
+            (ix - (old_range.end - old_range.start) + count, off)
+        } else {
+            (ix, off)
+        }
+    }
+
+    #[test]
+    fn scrolling_up_mid_stream_releases_the_pin_on_the_first_notch() {
+        // THE BUG: the old rule compared against `last_scroll_distance`, which
+        // the SPRING rewrites every frame, and this handler's body is deferred
+        // (the list holds a RefCell borrow during the callback). Mid-stream a
+        // wheel-up therefore landed after a spring tick had already pulled the
+        // view back down and reset that baseline, so the delta read as "moving
+        // toward the bottom" and the pin never broke.
+        //
+        // Concretely: the user is 240px up, but the spring wrote 8.0 the frame
+        // before. The old rule saw 240 > 8 + 1 and did release here — but on
+        // the NEXT notch the spring had dragged distance back to ~30 while its
+        // own write said 45, which lands inside the stick band moving "toward"
+        // the bottom, so it RE-STUCK and undid the scroll. That alternation is
+        // the fight.
+        assert!(
+            Transcript::should_restick(30.0, 45.0),
+            "the old spring-polluted baseline re-sticks here"
+        );
+
+        // The fix tracks the user's OWN previous position, so a wheel-up is
+        // measured against where the user last was, never against the spring.
+        // First notch of a run: nothing to compare, and it did not land at the
+        // bottom, so it releases immediately.
+        assert!(
+            !Transcript::pin_after_scroll(true, true, 240.0, None),
+            "the first wheel-up away from the bottom must release"
+        );
+        // Continuing upward keeps it released.
+        assert!(
+            !Transcript::pin_after_scroll(false, true, 400.0, Some(240.0)),
+            "scrolling further up stays released"
+        );
+        // Even a small upward notch inside the stick band releases, because it
+        // is measured against the user's own last position.
+        assert!(
+            !Transcript::pin_after_scroll(false, true, 45.0, Some(30.0)),
+            "a small wheel-up inside the band still releases"
+        );
+    }
+
+    #[test]
+    fn a_spring_cannot_erase_the_scroll_that_released_the_pin() {
+        // The wheel path saw the pinned view leave the bottom, but before its
+        // deferred geometry read ran the already-scheduled spring reached 0.
+        // The synchronous event fact must win over that stale later geometry.
+        assert!(
+            !Transcript::pin_after_scroll(true, true, 0.0, None),
+            "a wheel-up must release the pin even if the spring lands first"
+        );
+    }
+
+    #[test]
+    fn the_pin_still_re_engages_when_you_come_back() {
+        // Landing exactly at the bottom: the list clears its anchor, so
+        // `is_scrolled` is false and we re-pin no matter the delta.
+        assert!(Transcript::pin_after_scroll(false, false, 0.0, Some(500.0)));
+        // Gliding back inside the stick band re-engages.
+        assert!(Transcript::pin_after_scroll(false, true, 40.0, Some(90.0)));
+        // Drifting further away inside the band does NOT re-engage.
+        assert!(!Transcript::pin_after_scroll(false, true, 60.0, Some(40.0)));
+        // Parked far up with no movement stays released.
+        assert!(!Transcript::pin_after_scroll(
+            false,
+            true,
+            900.0,
+            Some(900.0)
+        ));
+    }
+
+    #[test]
+    fn a_growing_row_is_remeasured_instead_of_spliced() {
+        // The old streaming path respliced the very row the view was anchored into.
+        // gpui's splice drops `offset_in_item` in that case, which snaps the
+        // view to that row's TOP — a jump equal to however far into the row we
+        // were. Harmless when the row is short; violent once one reasoning
+        // block is taller than the viewport, which is when the jitter starts.
+        let anchor = (2usize, 420.0f32);
+        let dropped = splice_anchor(anchor, 2..3, 1);
+        assert_eq!(
+            dropped,
+            (2, 0.0),
+            "gpui discards the offset — this is the behaviour we compensate for"
+        );
+
+        let before = assistant(
+            "m-long",
+            MessageStatus::Streaming,
+            vec![reasoning_part("r0", "first line")],
+        );
+        let after = assistant(
+            "m-long",
+            MessageStatus::Streaming,
+            vec![reasoning_part("r0", "first line\nsecond line")],
+        );
+        let old_rows = rows_for_entry(&before, false, &mut parse);
+        let mut new_rows = rows_for_entry(&after, false, &mut parse);
+        // Expanded reasoning includes its text in the row version, so the
+        // newline produces a diff while the row identity remains stable.
+        new_rows[0].version ^= fnv1a(b"first line\nsecond line");
+        let (range, count) = diff_rows(&old_rows, &new_rows).expect("the row content changed");
+        assert!(
+            diff_keeps_row_identity(&old_rows, &new_rows, &range, count),
+            "the streaming row must use anchor-preserving remeasurement"
+        );
+
+        // Structural replacements still capture and restore their anchor.
+        let restored = if (2..3).contains(&anchor.0) && anchor.1 > 0.0 {
+            anchor
+        } else {
+            dropped
+        };
+        assert_eq!(restored, anchor, "the view must not move on a resplice");
+
+        // Rows before the anchor still shift it, and that shift must survive.
+        assert_eq!(splice_anchor((5, 12.0), 1..2, 3), (7, 12.0));
+        // An anchor above the splice is untouched.
+        assert_eq!(splice_anchor((0, 8.0), 3..4, 1), (0, 8.0));
+    }
+
+    #[test]
+    fn an_unmeasured_row_must_not_drag_the_pin_backwards() {
+        // A freshly spliced row is Unmeasured and contributes ZERO height, so
+        // the list's reported bottom collapses for one frame and returns when
+        // layout measures it. Replays that sawtooth the way a streaming tail
+        // produces it, and asserts the guard the driver applies (skip a
+        // shrinking target) keeps the chased position monotone. Without the
+        // guard the spring retargets to the phantom bottom and the view jumps
+        // up, then down, on every commit.
+        let mut spring = StickSpring::new();
+        let mut pos = 0.0;
+        let mut last_target: Option<f32> = None;
+        let mut chased: Vec<f32> = Vec::new();
+
+        let mut real = 1000.0f32;
+        for commit in 0..40 {
+            // Frame A: the tail row was just spliced — it measures as 0px, so
+            // the reported bottom drops by a row's height.
+            // Frame B: layout measured it; the bottom is real again and grew.
+            real += 24.0;
+            for target in [real - 180.0, real] {
+                let shrank = last_target.is_some_and(|l| target < l - 1.0);
+                last_target = Some(target);
+                if shrank {
+                    continue; // the driver's guard: hold, wait for measurement
+                }
+                pos = spring.step(pos, target, 1.0);
+                chased.push(pos);
+            }
+            assert!(
+                pos <= real,
+                "commit {commit}: chased past the real bottom ({pos} > {real})"
+            );
+        }
+
+        for pair in chased.windows(2) {
+            assert!(
+                pair[1] >= pair[0] - 1e-3,
+                "the pin moved backwards: {} -> {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(
+            chased.last().copied().unwrap_or(0.0) > 900.0,
+            "the pin should still be tracking the tail"
+        );
+    }
+
     #[test]
     fn spring_never_overshoots_or_oscillates() {
         let mut spring = StickSpring::new();
@@ -2946,30 +3297,129 @@ mod tests {
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";
 
     #[test]
-    fn reasoning_rows_are_visible_and_keep_streaming_identity() {
-        let live = assistant(
-            "m-thinking",
-            MessageStatus::Streaming,
-            vec![reasoning_part("r0", "Checking the request")],
+    fn reasoning_folds_into_the_tool_chain_instead_of_its_own_row() {
+        // Thinking between two calls must NOT cut the chain into three rows:
+        // one group carries the calls and the reasoning behind them.
+        let entry = assistant(
+            "m-chain",
+            MessageStatus::Complete,
+            vec![
+                reasoning_part("r0", "Checking the request"),
+                tool_part("c0", "ls"),
+                reasoning_part("r1", "Now reading it"),
+                tool_part("c1", "cat x"),
+            ],
         );
-        let rows = rows_for_entry(&live, false, &mut parse);
-        assert_eq!(rows.len(), 1);
-        assert!(matches!(
-            &rows[0].kind,
-            RowKind::Reasoning {
-                text,
-                streaming: true
-            } if text == "Checking the request"
-        ));
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1, "one chain, not a row per thought");
+        let RowKind::ToolGroup { tools, thinking } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(tools.len(), 2);
+        assert_eq!(
+            thinking.as_slice(),
+            &[
+                SharedString::from("Checking the request"),
+                SharedString::from("Now reading it"),
+            ],
+            "prior thinking stays reachable in the chain"
+        );
+    }
 
-        let complete = assistant(
+    #[test]
+    fn thinking_only_entry_is_still_one_openable_chain() {
+        let entry = assistant(
             "m-thinking",
             MessageStatus::Complete,
             vec![reasoning_part("r0", "Checking the request")],
         );
-        let settled = rows_for_entry(&complete, false, &mut parse);
-        assert_eq!(rows[0].id, settled[0].id);
-        assert_ne!(rows[0].version, settled[0].version);
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        let RowKind::ToolGroup { tools, thinking } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert!(tools.is_empty());
+        assert_eq!(thinking.len(), 1);
+        // With no calls to name, the line is just the word.
+        assert_eq!(chain_summary(tools, thinking), "Thinking");
+    }
+
+    #[test]
+    fn streaming_thought_text_does_not_churn_a_collapsed_chain() {
+        // Reasoning streams by appending to the trailing part. If that text fed
+        // the row version, the chain would resplice every token, lose its
+        // measured height, and make stick-to-bottom jump up and down.
+        let short = assistant(
+            "m-live",
+            MessageStatus::Streaming,
+            vec![tool_part("c0", "ls"), reasoning_part("r0", "Chec")],
+        );
+        let grown = assistant(
+            "m-live",
+            MessageStatus::Streaming,
+            vec![
+                tool_part("c0", "ls"),
+                reasoning_part("r0", "Checking the request in detail"),
+            ],
+        );
+        let a = rows_for_entry(&short, false, &mut parse);
+        let b = rows_for_entry(&grown, false, &mut parse);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].id, b[0].id);
+        assert_eq!(
+            a[0].version, b[0].version,
+            "a growing thought must not resplice the collapsed chain"
+        );
+        // The text itself still reaches the row, ready for when it is opened.
+        let RowKind::ToolGroup { thinking, .. } = &b[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(thinking[0].as_ref(), "Checking the request in detail");
+    }
+
+    #[test]
+    fn chain_version_tracks_growing_thinking() {
+        // Opening a chain must resplice when its thinking grew, not only when
+        // a call landed — the list caches measured heights per row version.
+        let one = assistant(
+            "m-v",
+            MessageStatus::Streaming,
+            vec![tool_part("c0", "ls"), reasoning_part("r0", "first")],
+        );
+        let two = assistant(
+            "m-v",
+            MessageStatus::Streaming,
+            vec![
+                tool_part("c0", "ls"),
+                reasoning_part("r0", "first"),
+                reasoning_part("r1", "second"),
+            ],
+        );
+        let a = rows_for_entry(&one, false, &mut parse);
+        let b = rows_for_entry(&two, false, &mut parse);
+        assert_eq!(a[0].id, b[0].id, "same chain identity");
+        assert_ne!(a[0].version, b[0].version, "new thought changes version");
+    }
+
+    #[test]
+    fn collapsed_chain_names_thinking_without_previewing_it() {
+        let tools = vec![ToolItem {
+            id: "c0".into(),
+            call: ToolCall::Exec {
+                command: "ls".into(),
+            },
+            is_error: false,
+            resolved: true,
+        }];
+        let thinking = vec![SharedString::from("**Planning the fix**")];
+        let summary = chain_summary(&tools, &thinking);
+        assert!(
+            !summary.contains("Planning"),
+            "reasoning text must never leak into the collapsed line: {summary}"
+        );
+        assert!(summary.ends_with("· thought"), "{summary}");
+        // Without thinking the summary is untouched.
+        assert_eq!(chain_summary(&tools, &[]), group_summary(&tools));
     }
 
     #[test]

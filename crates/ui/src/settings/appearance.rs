@@ -14,6 +14,7 @@ use gpui::{
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover;
+use crate::settings::{DEFAULT_CODE_FONT, DEFAULT_UI_FONT};
 use crate::theme::Theme;
 
 /// Always available in this app because Geist is bundled with the UI.
@@ -147,6 +148,16 @@ impl AppearancePage {
     fn dismiss_menu(&mut self, cx: &mut Context<Self>) {
         self.open_menu = None;
         self.menu_dismissed_at = Some(Instant::now());
+        cx.notify();
+    }
+
+    fn restore_defaults(&mut self, cx: &mut Context<Self>) {
+        self.ui_input
+            .update(cx, |input, cx| input.set_text(DEFAULT_UI_FONT, cx));
+        self.code_input
+            .update(cx, |input, cx| input.set_text(DEFAULT_CODE_FONT, cx));
+        self.open_menu = None;
+        self.menu_dismissed_at = None;
         cx.notify();
     }
 
@@ -365,34 +376,64 @@ impl Render for AppearancePage {
             .size_full()
             .overflow_y_scroll()
             .child(
-                crate::settings::widgets::page_column()
-                    .child(crate::settings::widgets::page_header(
-                        &theme,
-                        "Appearance",
-                        None,
-                    ))
-                    .child(crate::settings::widgets::page_subtitle(
-                        &theme,
-                        "Choose the typefaces Comet uses for interface text and code.",
-                    ))
-                    .child(
-                        crate::settings::widgets::section_card(&theme)
-                            .child(self.render_font_row(
-                                FontKind::Ui,
-                                "UI font",
-                                "Navigation, controls, messages, and other interface text.",
-                                &theme,
-                                cx,
-                            ))
-                            .child(self.render_font_row(
-                                FontKind::Code,
-                                "Code font",
-                                "Code blocks, terminal output, and keyboard shortcuts.",
-                                &theme,
-                                cx,
-                            )),
-                    ),
-            )
+            crate::settings::widgets::page_column()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .justify_between()
+                        .gap(px(24.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(crate::settings::widgets::page_header(
+                                    &theme,
+                                    "Appearance",
+                                    None,
+                                ))
+                                .child(crate::settings::widgets::page_subtitle(
+                                    &theme,
+                                    "Choose the typefaces Comet uses for interface text and code.",
+                                )),
+                        )
+                        .child(
+                            crate::settings::widgets::ghost_action(&theme)
+                                .id("appearance-restore-defaults")
+                                .flex_none()
+                                .hover(|s| {
+                                    s.bg(crate::theme::white_alpha(0.04)).text_color(theme.text)
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.restore_defaults(cx);
+                                }))
+                                .child(
+                                    crate::icons::icon(crate::icons::RESTART)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Restore defaults")),
+                        ),
+                )
+                .child(
+                    crate::settings::widgets::section_card(&theme)
+                        .child(self.render_font_row(
+                            FontKind::Ui,
+                            "UI font",
+                            "Navigation, controls, messages, and other interface text.",
+                            &theme,
+                            cx,
+                        ))
+                        .child(self.render_font_row(
+                            FontKind::Code,
+                            "Code font",
+                            "Code blocks, terminal output, and keyboard shortcuts.",
+                            &theme,
+                            cx,
+                        )),
+                ),
+        )
     }
 }
 
