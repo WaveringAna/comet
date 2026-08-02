@@ -354,6 +354,16 @@ const SIDEBAR_LIST_GAP: f32 = 2.0;
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
 const SIDEBAR_GLASS_FADE_BAND: f32 = 32.0;
 
+/// The window gutter — the card's inset from the window edge.
+const WINDOW_GUTTER: f32 = 8.0;
+
+/// Width of the collapsed sidebar's hover strip. Wider than the gutter so the
+/// edge is easy to hit without aiming, but only just: hitboxes are paint-order
+/// in gpui, so every pixel past the gutter is a pixel of card whose own hover
+/// the strip suppresses. Past the gutter it only covers the card's border and
+/// padding, never a row.
+const SIDEBAR_PEEK_STRIP: f32 = 20.0;
+
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
 /// Drag marker for the right-pane resize handle.
@@ -523,6 +533,13 @@ pub struct Shell {
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
     sidebar_tween: Option<WidthTween>,
+    /// Edge peek: with the column collapsed, the window's left edge is a hot
+    /// strip — hovering it floats the sidebar OVER the card instead of pushing
+    /// the card aside. Two hover sources, because the strip and the panel are
+    /// adjacent, not nested: the peek is out while EITHER holds it, so the
+    /// pointer crossing the seam between them never drops it.
+    sidebar_peek_edge: bool,
+    sidebar_peek_panel: bool,
     right_tween: Option<WidthTween>,
     terminal_tween: Option<WidthTween>,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
@@ -695,6 +712,8 @@ impl Shell {
             debug_dialog,
             debug_gate,
             sidebar_tween: None,
+            sidebar_peek_edge: false,
+            sidebar_peek_panel: false,
             right_tween: None,
             terminal_tween: None,
             fullscreen: None,
@@ -832,6 +851,37 @@ impl Shell {
         }
     }
 
+    /// Is the floating sidebar out? While a hover source holds it, and only
+    /// while the column is collapsed — pinned, the same content is already on
+    /// screen. Instant, no tween: this is a pointer-tracking reveal, and a
+    /// slide would lag the hand that asked for it.
+    fn sidebar_peeked(&self) -> bool {
+        (self.sidebar_peek_edge || self.sidebar_peek_panel) && self.settings.sidebar_collapsed
+    }
+
+    /// A peek hover source changed.
+    fn set_sidebar_peek(
+        &mut self,
+        edge: Option<bool>,
+        panel: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let was = self.sidebar_peeked();
+        self.sidebar_peek_edge = edge.unwrap_or(self.sidebar_peek_edge);
+        self.sidebar_peek_panel = panel.unwrap_or(self.sidebar_peek_panel);
+        if self.sidebar_peeked() != was {
+            cx.notify();
+        }
+    }
+
+    /// Drop the peek: the pinned column is arriving (or leaving) on its own
+    /// tween, and a floating copy over it would be two sidebars answering one
+    /// gesture.
+    fn clear_sidebar_peek(&mut self) {
+        self.sidebar_peek_edge = false;
+        self.sidebar_peek_panel = false;
+    }
+
     /// Does the selected project's folder have git? Owner-stamped and synced —
     /// gates the Changes pane, its toggle, and Cmd-B with zero RPCs.
     fn project_git_detected(&self, cx: &App) -> bool {
@@ -904,6 +954,7 @@ impl Shell {
         let from = self.sidebar_target();
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
         self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
+        self.clear_sidebar_peek();
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1094,6 +1145,7 @@ impl Shell {
         self.settings.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         self.settings.sidebar_collapsed = false;
         self.sidebar_tween = None; // live drag tracks the pointer directly
+        self.clear_sidebar_peek();
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1664,20 +1716,69 @@ impl Shell {
             .into_any_element()
     }
 
-    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// The sidebar column itself — a fixed [`UiSettings::sidebar_width`] column
+    /// of whatever the route wants. Built once per frame and mounted in exactly
+    /// ONE place: the pinned slot in the layout row, or the floating edge peek.
+    fn render_sidebar_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let inner: AnyElement = match self.route {
+        match self.route {
             Route::Settings(section) => self.render_settings_nav(section, &theme, cx),
             Route::Chat => self.render_chat_sidebar(&theme, cx),
+        }
+    }
+
+    /// The floating column, over the card while the edge hover holds it. It
+    /// appears at full size the instant the pointer arrives — no reveal
+    /// animation: the peek tracks the pointer, and a slide would lag the hand
+    /// that asked for it.
+    ///
+    /// It is a card of its own because it is a float: the pinned column is
+    /// transparent over the shell's sidebar tone, which is not underneath it
+    /// here. Same material as a popover (`popover::popover_card`) — this IS a
+    /// floating surface, and the app only has the one.
+    fn render_sidebar_peek(&self, column: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let tint = if Theme::GLASS_ALPHA < 1.0 {
+            crate::theme::grey(0x16).opacity(0.65)
+        } else {
+            crate::theme::grey(0x16)
         };
-        let target = self.sidebar_target();
-        // Transparent — the sidebar sits directly on the frost shell; the main
-        // card's own border provides the separation.
-        self.pane_container(
-            self.sidebar_tween,
-            target,
-            div().h_full().child(inner).into_any_element(),
-        )
+        let card = div()
+            .id("sidebar-peek")
+            .absolute()
+            .left(px(WINDOW_GUTTER))
+            .w(px(self.settings.sidebar_width))
+            .top_0()
+            .bottom(px(WINDOW_GUTTER))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(crate::theme::white_alpha(0.10))
+            .shadow_lg()
+            .overflow_hidden()
+            .bg(tint)
+            // Paint order is hit order in gpui: without this, clicks on the
+            // floating rows would ALSO land on the transcript underneath.
+            .occlude()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.set_sidebar_peek(None, Some(*hovered), cx)
+            }))
+            .child(column);
+        crate::frost::frosted(12.0, 16.0, card).into_any_element()
+    }
+
+    /// The hot strip at the window's left edge, live only while the column is
+    /// collapsed. Hover-only, so it never eats a click.
+    fn render_sidebar_peek_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("sidebar-peek-strip")
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(SIDEBAR_PEEK_STRIP))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.set_sidebar_peek(Some(*hovered), None, cx)
+            }))
+            .into_any_element()
     }
 
     /// Settings-mode sidebar (comet settings-sidebar.tsx): window-control
@@ -3960,13 +4061,34 @@ impl Render for Shell {
                     t.set_rail_enabled(rail::rail_visible(main_width), cx)
                 });
 
-                let sidebar = self.render_sidebar(cx);
-                let sidebar_handle = self.resize_handle(
-                    "sidebar-resize",
-                    || SidebarResize,
-                    |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
-                    cx,
-                );
+                // The column goes in exactly one of two slots. Pinned: the
+                // layout row, clipped by the collapse tween. Peeked: floating
+                // over the card, the row's slot left empty (it is zero-wide
+                // anyway — the peek only exists while collapsed).
+                let column = self.render_sidebar_column(cx);
+                let (peek, sidebar_slot): (Option<AnyElement>, AnyElement) =
+                    if self.sidebar_peeked() {
+                        (
+                            Some(self.render_sidebar_peek(column, cx)),
+                            Empty.into_any_element(),
+                        )
+                    } else {
+                        (None, div().h_full().child(column).into_any_element())
+                    };
+                let sidebar =
+                    self.pane_container(self.sidebar_tween, self.sidebar_target(), sidebar_slot);
+                // The resize grabber and the hover strip both want the window's
+                // left edge; collapsed, the edge belongs to the peek (dragging
+                // a zero-wide column's seam to pull it back out is the gesture
+                // the peek replaces — ⌘S still pins it).
+                let sidebar_handle = (!self.settings.sidebar_collapsed).then(|| {
+                    self.resize_handle(
+                        "sidebar-resize",
+                        || SidebarResize,
+                        |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
+                        cx,
+                    )
+                });
                 let main = self.render_main(cx);
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (comet __root.tsx `!isSettings && activeChat`
@@ -4029,12 +4151,9 @@ impl Render for Shell {
                 // (zero layout width, same idiom as the changes-pane grabber)
                 // so the sidebar's right gutter stays exactly as wide as its
                 // left one — a 5px flex child here read as lopsided spacing.
-                let sidebar_seam = div()
-                    .w(px(0.0))
-                    .h_full()
-                    .flex_none()
-                    .relative()
-                    .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
+                let sidebar_seam = div().w(px(0.0)).h_full().flex_none().relative().children(
+                    sidebar_handle.map(|h| h.absolute().top_0().bottom_0().left(px(-2.0))),
+                );
                 let title_bar = self.render_title_bar(cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar,
                 // spanning the FULL window height (under the traffic lights,
@@ -4056,6 +4175,7 @@ impl Render for Shell {
                     .child(title_bar)
                     .child(
                         div()
+                            .relative()
                             .flex_1()
                             .min_h_0()
                             .flex()
@@ -4063,7 +4183,13 @@ impl Render for Shell {
                             .child(sidebar)
                             .child(sidebar_seam)
                             .child(card)
-                            .child(right),
+                            .child(right)
+                            // Last children: paint order is z-order, and the
+                            // peek floats over the card by construction.
+                            .when(self.settings.sidebar_collapsed, |el| {
+                                el.child(self.render_sidebar_peek_strip(cx))
+                            })
+                            .children(peek),
                     )
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);

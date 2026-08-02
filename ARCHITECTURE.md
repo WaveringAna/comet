@@ -174,6 +174,13 @@ feature spec `docs/research/feature-inventory.md` §1.
 
 - **Deps**: `gpui` + `gpui_platform` pinned to one Zed rev (Apache-2.0). **We do not use Zed's
   GPL crates** (`markdown`, `ui`, `theme`, `editor`) — markdown, components, and theme are ours.
+- **Sidebar**: collapsible drag-resizable column (208–400px, 200ms ease-out width transition),
+  transparent over a full-height tone so the collapse melts rather than blinks. Collapsed, the
+  window's left edge is a 20px hover strip and the column comes back as an **overlay** — a
+  popover-material card floated over the conversation, no layout push, no reveal animation (the
+  peek tracks the pointer; a slide would lag the hand). It is held out while either the strip or
+  the panel is hovered — adjacent, not nested, so crossing the seam never drops it — and it
+  occludes, so its rows take the clicks instead of the transcript beneath. ⌘S pins it back.
 - **Transcript**: gpui `list()` + `ListState::new(n, ListAlignment::Bottom, overdraw)` (sum-tree
   offsets, follow-tail). On top of it, port the mugen behaviors that gpui doesn't give us:
   - stick-to-bottom **spring** with feed-forward tracking of streaming growth; interrupt from
