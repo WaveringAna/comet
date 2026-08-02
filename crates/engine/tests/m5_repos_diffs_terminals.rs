@@ -160,9 +160,13 @@ async fn repos_round_trip_add_branches_worktrees() {
         by_name("main").current,
         "main is the main checkout: {refs:?}"
     );
+    let listed_worktree_path = by_name(&worktree.branch)
+        .worktree_path
+        .as_deref()
+        .expect("worktree branch maps to a path");
     assert_eq!(
-        by_name(&worktree.branch).worktree_path.as_deref(),
-        Some(worktree.path.as_str()),
+        std::fs::canonicalize(listed_worktree_path).expect("listed worktree path exists"),
+        std::fs::canonicalize(&worktree.path).expect("created worktree path exists"),
         "worktree branch maps to its path: {refs:?}"
     );
     let plain_ref = by_name("feature/x");
