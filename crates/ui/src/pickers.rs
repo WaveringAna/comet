@@ -364,6 +364,7 @@ pub struct Pickers {
     mutate_task: Option<Task<()>>,
     _search_events: Subscription,
     _state_observe: Subscription,
+    _live_ticker: Task<()>,
 }
 
 impl Pickers {
@@ -406,6 +407,25 @@ impl Pickers {
                 this.models.clear();
             }
             cx.notify();
+        });
+        // Live tok/s tick: transcript frames re-render this view while text
+        // streams, but the rate's denominator must keep growing through silent
+        // stretches (a long think between tool rounds) — tock once a second
+        // while the selected chat is working so the meter decays, not freezes.
+        let live_ticker = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let alive = this.update(cx, |this: &mut Self, cx| {
+                    if this.state.read(cx).working() {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
         });
         // Dev/testing knob: `COMET_OPEN_PICKER=model|traits|repo|branch` boots
         // with that popover open — synthetic input can't reach the app on
@@ -452,6 +472,7 @@ impl Pickers {
             mutate_task: None,
             _search_events: search_events,
             _state_observe: state_observe,
+            _live_ticker: live_ticker,
         }
     }
 
@@ -1644,10 +1665,16 @@ impl Pickers {
             attach_overlay_end(ref_chip, &mut overlay, PickerKind::Branch, "branch-popover");
 
         // Left: where the work happens — the checkout, then the ref it sits
-        // on, read as one phrase across a separator. Right: what the last
-        // turn of that work cost.
+        // on, read as one phrase across a separator. Right: what the turn
+        // costs — a live readout while it streams, the settled whole-turn
+        // average once it lands.
+        let live_rate = self
+            .state
+            .read(cx)
+            .live_tokens_per_sec(std::time::Instant::now());
         let cost = run_cost(
             session.as_ref().and_then(|chat| chat.usage).as_ref(),
+            live_rate,
             &theme,
         );
         if let Some(chat) = &session {
@@ -2693,10 +2720,17 @@ impl Render for Pickers {
 /// state of this conversation, not of a run in flight. Empty until a turn has
 /// been measured: the host stamps [`comet_proto::ChatUsage`] once per turn,
 /// and a viewport that has not seen one shows nothing rather than zeros.
-fn run_cost(usage: Option<&ChatUsage>, theme: &Theme) -> Option<AnyElement> {
-    let usage = usage?;
+fn run_cost(
+    usage: Option<&ChatUsage>,
+    live_rate: Option<f32>,
+    theme: &Theme,
+) -> Option<AnyElement> {
     let mut parts: Vec<AnyElement> = Vec::new();
-    if let Some(rate) = view::tokens_per_sec(usage) {
+    // Live (chars-estimated) while the turn streams, the exact whole-turn
+    // average from the chat row once it settles — live wins when both are up
+    // because it is what the user is watching right now.
+    let rate = live_rate.or_else(|| usage.and_then(view::tokens_per_sec));
+    if let Some(rate) = rate {
         parts.push(
             div()
                 .flex()
@@ -2718,7 +2752,9 @@ fn run_cost(usage: Option<&ChatUsage>, theme: &Theme) -> Option<AnyElement> {
                 .into_any_element(),
         );
     }
-    if let Some(gauge) = view::context_gauge(usage) {
+    if let Some(usage) = usage
+        && let Some(gauge) = view::context_gauge(usage)
+    {
         parts.push(context_battery(gauge, view::format_context(usage)));
     }
     if parts.is_empty() {

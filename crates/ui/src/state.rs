@@ -27,12 +27,29 @@ use gpui::{App, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
-use comet_doc::SessionMessageEntry;
+use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use comet_engine::{Engine, EngineConfig, EngineRuntime, rpc::AuthRpc};
-use comet_proto::{AuthState, Chat, ChatIndicator, Device, HarnessId, Project, Session};
+use comet_proto::{
+    AuthState, Chat, ChatIndicator, Device, HarnessId, Project, Session, SessionStatus,
+};
 use comet_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
 // ---------------------------------------------------------------------------
+/// Chars per token for the live readout. Prose and code both land near 4, so
+/// a single constant is within noise of the exact end-of-turn figure — good
+/// enough for a live meter that the real usage count replaces on completion.
+const CHARS_PER_TOKEN: f32 = 4.0;
+
+/// Live tok/s from streamed output. `None` on nothing-streamed-yet or a
+/// sub-frame elapsed window (the latter guards a div-by-near-zero flash on
+/// the very first frame of a turn).
+pub fn live_tokens_per_sec(streamed_chars: u64, elapsed_secs: f32) -> Option<f32> {
+    if streamed_chars == 0 || elapsed_secs <= 0.0 {
+        return None;
+    }
+    Some(streamed_chars as f32 / CHARS_PER_TOKEN / elapsed_secs)
+}
+
 // Engine handle
 // ---------------------------------------------------------------------------
 
@@ -362,6 +379,12 @@ pub struct AppState {
     pub auto_selected: bool,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
+    /// When the selected chat's turn entered Working — the clock behind the
+    /// LIVE tok/s readout. Deliberately NOT a CRDT field: it is ephemeral,
+    /// viewport-local, and derives from streams the view already gets, so it
+    /// never threatens the LWW-once-per-turn `ChatUsage` on the chat row. Set
+    /// from `apply_sessions`/`apply_transcript`; `None` while idle.
+    working_since: Option<std::time::Instant>,
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
@@ -392,6 +415,7 @@ impl AppState {
             devices: Vec::new(),
             projects: Vec::new(),
             chats: Vec::new(),
+            working_since: None,
             sessions: Vec::new(),
             selected_project: None,
             selected_chat: None,
@@ -424,6 +448,7 @@ impl AppState {
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) {
         self.sessions = sessions;
+        self.refresh_working_clock();
     }
 
     pub fn apply_projects(&mut self, mut projects: Vec<Project>) {
@@ -489,6 +514,7 @@ impl AppState {
             echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
         }
         self.transcript = entries;
+        self.refresh_working_clock();
     }
 
     /// Add an optimistic user echo (composer send path).
@@ -513,6 +539,62 @@ impl AppState {
             .and_then(|id| self.echoes.get(id))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Flip the live-rate clock with the Working state. Gated on the SESSION
+    /// status, not on a streaming message: through a tool loop the session
+    /// stays Working across the fleeting gaps between assistant rounds, so the
+    /// clock spans the whole turn instead of resetting on every burst — which
+    /// would re-create the final-burst spike this readout exists to kill.
+    fn refresh_working_clock(&mut self) {
+        let working = self.selected_chat.as_deref().is_some_and(|id| {
+            self.sessions
+                .iter()
+                .any(|s| s.chat_id == *id && s.status == SessionStatus::Working)
+        });
+        match (self.working_since.is_some(), working) {
+            (false, true) => self.working_since = Some(std::time::Instant::now()),
+            (true, false) => self.working_since = None,
+            _ => {}
+        }
+    }
+
+    /// Is the selected chat's turn running right now? Gates the live ticker's
+    /// re-render so the rate's denominator keeps moving through silent
+    /// stretches (a long think between tool rounds) without a hot loop.
+    pub fn working(&self) -> bool {
+        self.working_since.is_some()
+    }
+
+    /// Chars of assistant text in the current turn — everything after the last
+    /// User message. A fresh prompt appends a User message and rolls the
+    /// boundary forward, so completed tool-round messages of THIS turn stay
+    /// counted while earlier turns drop out.
+    pub fn current_turn_streamed(&self) -> u64 {
+        let start = self
+            .transcript
+            .iter()
+            .rposition(|e| e.role == MessageRole::User)
+            .map_or(0, |i| i + 1);
+        self.transcript[start..]
+            .iter()
+            .filter(|e| e.role == MessageRole::Assistant)
+            .flat_map(|e| e.parts.iter())
+            .filter_map(|p| match p {
+                MessagePart::Text { text, .. } => Some(text.chars().count() as u64),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// LIVE generation speed while the selected chat's turn streams. Chars→
+    /// tokens is an estimate (pi reports real usage only at message_end), so
+    /// this is the "watch it move" number; the settled whole-turn average on
+    /// the chat row replaces it once the turn completes.
+    pub fn live_tokens_per_sec(&self, now: std::time::Instant) -> Option<f32> {
+        let started = self.working_since?;
+        let secs = now.saturating_duration_since(started).as_secs_f32();
+        live_tokens_per_sec(self.current_turn_streamed(), secs)
     }
 
     // ---- queries ----
@@ -1335,6 +1417,69 @@ mod tests {
         // No projects at all: selection clears.
         state.apply_projects(vec![]);
         assert_eq!(state.selected_project, None);
+    }
+
+    #[test]
+    fn live_tokens_per_sec_derivation() {
+        // 800 chars at ~4 chars/token over 10s → 20 tok/s.
+        assert_eq!(
+            live_tokens_per_sec(800, 10.0),
+            Some(20.0),
+            "chars ÷ chars-per-token ÷ seconds"
+        );
+        // Nothing streamed yet: no rate.
+        assert_eq!(live_tokens_per_sec(0, 5.0), None);
+        // Sub-frame elapsed window (the first instant of a turn): no rate,
+        // so we never flash a div-by-near-zero blowup.
+        assert_eq!(live_tokens_per_sec(400, 0.0), None);
+    }
+
+    #[test]
+    fn current_turn_streamed_counts_only_this_turn() {
+        fn text_entry(
+            id: &str,
+            role: MessageRole,
+            text: &str,
+            streaming: bool,
+        ) -> SessionMessageEntry {
+            SessionMessageEntry {
+                id: id.into(),
+                role,
+                parts: vec![MessagePart::Text {
+                    id: format!("{id}-p"),
+                    text: text.into(),
+                }],
+                created_at: 0,
+                device_id: "d".into(),
+                status: streaming.then_some(comet_doc::MessageStatus::Streaming),
+                continuation_of: None,
+            }
+        }
+        let mut state = AppState::new();
+        state.transcript = vec![
+            // Prior turn — must NOT be counted (it precedes the last user msg).
+            text_entry("u0", MessageRole::User, "earlier prompt", false),
+            text_entry(
+                "a-early",
+                MessageRole::Assistant,
+                "earlier answer that is long, real long to make the point",
+                false,
+            ),
+            // Current turn: this user message rolls the boundary forward.
+            text_entry("u1", MessageRole::User, "build it", false),
+            text_entry("a1", MessageRole::Assistant, "reasoning round", false),
+            text_entry("a2", MessageRole::Assistant, "another round", false),
+            text_entry("a3", MessageRole::Assistant, "the live burst", true),
+        ];
+        // After the last User: a1+a2+a3, their literal lengths summed.
+        let expected = ("reasoning round".chars().count()
+            + "another round".chars().count()
+            + "the live burst".chars().count()) as u64;
+        assert_eq!(
+            state.current_turn_streamed(),
+            expected,
+            "tool rounds of the current turn count"
+        );
     }
 
     #[test]

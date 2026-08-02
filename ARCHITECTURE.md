@@ -211,10 +211,15 @@ feature spec `docs/research/feature-inventory.md` §1.
   right, what the last turn cost — its average generation speed (`tok/s`, summed across every
   model call in the turn so a tool loop reads as one number, not the final burst's ~10x instant
   rate) and a five-cell **context battery** that drains green → lime → amber → orange → red as
-  the conversation fills the model's window, exact figures on its tooltip. Both are measured,
-  not estimated: pi reports `contextWindow` in `get_state` and per-message `usage` on
-  `message_end`, the adapter times each message's stream, and the host sums a turn's messages
-  and stamps `ChatUsage` on the workspace chat row once (small, LWW — a per-frame
+  the conversation fills the model's window, exact figures on its tooltip. While the turn is
+  streaming, the `tok/s` readout is a LIVE chars→tokens estimate (~4 chars/token) computed
+  in the viewport from the transcript it already streams (`current_turn_streamed` ÷ time in
+  `Working`, gated on `SessionStatus` so tool-round gaps don't reset the clock) — deliberately
+  NOT a CRDT field, since a per-frame number would churn; it hands off to the settled whole-turn
+  average when generation completes. Both figures are measured, not estimated: pi reports
+  `contextWindow` in `get_state` and per-message `usage` on `message_end`, the adapter times
+  each message's stream, and the host sums a turn's messages and stamps `ChatUsage` on the
+  workspace chat row once (small, LWW — a per-frame
   number would be CRDT churn). Derivations live in `comet_proto::view` (`tokens_per_sec`,
   `context_gauge`), so the TUI's own status line reads the same numbers and the same five
   states. The strip above the composer stays what it was: the working indicator alone.
