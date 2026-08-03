@@ -287,17 +287,15 @@ impl PiSettingsPage {
 
     fn submit_openai_compatible(&mut self, cx: &mut Context<Self>) {
         let Some(PiDialog::OpenAiCompatible {
-            base_url,
-            api_key,
-            has_stored_key,
+            base_url, api_key, ..
         }) = &self.dialog
         else {
             return;
         };
         let base_url = base_url.read(cx).text().trim().to_string();
         let api_key = api_key.read(cx).text().trim().to_string();
-        if base_url.is_empty() || (api_key.is_empty() && !has_stored_key) {
-            self.error = Some("Enter a base URL and API key".into());
+        if base_url.is_empty() {
+            self.error = Some("Enter a base URL".into());
             cx.notify();
             return;
         }
@@ -961,7 +959,7 @@ impl PiSettingsPage {
             PiDialog::ApiKey { provider_name, input, .. } => (
                 "Add provider API key",
                 div().mt(px(10.0)).flex().flex_col()
-                    .child(popover::dialog_body(&theme, &format!("Store an API key for {provider_name} in Pi's device-local auth.json. The key never leaves this device.")))
+                    .child(popover::dialog_body(&theme, format!("Store an API key for {provider_name} in Pi's device-local auth.json. The key never leaves this device.")))
                     .child(div().mt(px(12.0)).child(popover::dialog_field(input.clone().into_any_element()).font_family(theme.font_mono.clone())))
                     .into_any_element(),
                 "Save API key",
@@ -979,7 +977,7 @@ impl PiSettingsPage {
                     .flex_col()
                     .child(popover::dialog_body(
                         &theme,
-                        "Connect an endpoint that implements OpenAI Chat Completions. Nova loads its /models registry automatically; the API key stays in device-local auth.json.",
+                        "Connect an endpoint that implements OpenAI Chat Completions. Nova loads its /models registry automatically; an API key is optional for local endpoints and stays in device-local auth.json when supplied.",
                     ))
                     .child(dialog_input(&theme, "Base URL", base_url.clone()))
                     .child(dialog_input(
@@ -987,7 +985,7 @@ impl PiSettingsPage {
                         if *has_stored_key {
                             "API key (leave blank to keep saved key)"
                         } else {
-                            "API key"
+                            "API key (optional)"
                         },
                         api_key.clone(),
                     ))
@@ -1006,13 +1004,13 @@ impl PiSettingsPage {
             ),
             PiDialog::RemoveCredential { provider_name, .. } => (
                 "Remove provider credential?",
-                popover::dialog_body(&theme, &format!("Pi will forget the stored {provider_name} credential on this device. Environment credentials are not changed.")).into_any_element(),
+                popover::dialog_body(&theme, format!("Pi will forget the stored {provider_name} credential on this device. Environment credentials are not changed.")).into_any_element(),
                 "Remove credential",
                 true,
             ),
             PiDialog::RemovePackage { source, .. } => (
                 "Remove Pi package?",
-                popover::dialog_body(&theme, &format!("Remove {source} from this Pi scope? Existing Pi sessions keep their currently loaded runtime until restarted.")).into_any_element(),
+                popover::dialog_body(&theme, format!("Remove {source} from this Pi scope? Existing Pi sessions keep their currently loaded runtime until restarted.")).into_any_element(),
                 "Remove package",
                 true,
             ),

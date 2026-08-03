@@ -237,14 +237,13 @@ impl PiManagement {
         if !providers.is_object() {
             *providers = Value::Object(Map::new());
         }
-        providers.as_object_mut().expect("providers is an object").insert(
-            OPENAI_COMPATIBLE_PROVIDER.into(),
-            serde_json::json!({
-                "baseUrl": base_url,
-                "api": "openai-completions",
-                "models": models.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
-            }),
-        );
+        providers
+            .as_object_mut()
+            .expect("providers is an object")
+            .insert(
+                OPENAI_COMPATIBLE_PROVIDER.into(),
+                openai_provider_config(base_url, &models, key.is_some()),
+            );
         write_object_atomic(&path, &root, false)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
 
@@ -422,6 +421,28 @@ fn parse_openai_model_registry(body: &str) -> Result<Vec<String>, String> {
         return Err("model registry returned no model IDs".into());
     }
     Ok(models)
+}
+
+fn openai_provider_config(base_url: &str, models: &[String], authenticated: bool) -> Value {
+    let mut provider = Map::new();
+    provider.insert("baseUrl".into(), Value::String(base_url.into()));
+    provider.insert("api".into(), Value::String("openai-completions".into()));
+    provider.insert(
+        "models".into(),
+        Value::Array(
+            models
+                .iter()
+                .map(|id| serde_json::json!({ "id": id }))
+                .collect(),
+        ),
+    );
+    // Pi requires an auth source before custom models are selectable. A
+    // successful unauthenticated registry probe identifies a keyless local
+    // endpoint, so give Pi the documented placeholder credential inline.
+    if !authenticated {
+        provider.insert("apiKey".into(), Value::String("none".into()));
+    }
+    Value::Object(provider)
 }
 
 fn validate_project_path(
@@ -747,6 +768,16 @@ mod tests {
             ["a-model", "z-model"]
         );
         assert!(parse_openai_model_registry(r#"{"data":[]}"#).is_err());
+    }
+
+    #[test]
+    fn keyless_openai_provider_gets_pi_placeholder_auth() {
+        let models = vec!["local-model".to_string()];
+        let keyless = openai_provider_config("http://localhost:1234/v1", &models, false);
+        assert_eq!(keyless["apiKey"], "none");
+        assert_eq!(keyless["models"][0]["id"], "local-model");
+        let authenticated = openai_provider_config("https://example.com/v1", &models, true);
+        assert!(authenticated.get("apiKey").is_none());
     }
 
     #[tokio::test]
