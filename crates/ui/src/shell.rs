@@ -1328,20 +1328,29 @@ impl Shell {
                                 ui_font,
                                 code_font,
                                 preference,
-                                bg_hex,
-                                fg_hex,
+                                bg_hex_dark,
+                                bg_hex_light,
+                                fg_hex_dark,
+                                fg_hex_light,
+                                accent,
                                 contrast,
                             } = event;
                             this.settings.ui_font = ui_font.clone();
                             this.settings.code_font = code_font.clone();
                             this.settings.theme_preference = *preference;
-                            this.settings.bg_hex = bg_hex.clone();
-                            this.settings.fg_hex = fg_hex.clone();
+                            this.settings.bg_hex_dark = bg_hex_dark.clone();
+                            this.settings.bg_hex_light = bg_hex_light.clone();
+                            this.settings.fg_hex_dark = fg_hex_dark.clone();
+                            this.settings.fg_hex_light = fg_hex_light.clone();
+                            this.settings.accent = *accent;
                             this.settings.contrast_percent = *contrast;
                             cx.set_global(ThemeConfig {
                                 preference: *preference,
-                                bg_hex: bg_hex.clone(),
-                                fg_hex: fg_hex.clone(),
+                                bg_hex_dark: bg_hex_dark.clone(),
+                                bg_hex_light: bg_hex_light.clone(),
+                                fg_hex_dark: fg_hex_dark.clone(),
+                                fg_hex_light: fg_hex_light.clone(),
+                                accent: *accent,
                                 contrast: *contrast,
                                 ui_font: ui_font.clone(),
                                 code_font: code_font.clone(),

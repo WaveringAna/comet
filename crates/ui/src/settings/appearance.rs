@@ -1,13 +1,14 @@
 //! Settings → Appearance: theme scheme/colors and the typefaces used by the
 //! interface and code.
 //!
-//! The theme section drives [`ThemeConfig`]: a System/Light/Dark preference,
-//! custom background + foreground hexes, and a contrast percentage. Changes
-//! are applied to the live theme immediately and persisted by the shell.
-//! Font names come from gpui's platform text system, so the fields can accept
-//! any family installed on the current OS. The suggestion menu is filtered by
-//! the role: proportional families for UI text and families that advertise a
-//! monospaced/code face for code.
+//! The theme section drives [`ThemeConfig`]: a System/Light/Dark preference, an
+//! accent theme (hue for links/selection/indicators), custom background +
+//! foreground hexes keyed per scheme (dark and light each keep their own), and
+//! a contrast percentage. Changes are applied to the live theme immediately
+//! and persisted by the shell. Font names come from gpui's platform text
+//! system, so the fields can accept any family installed on the current OS.
+//! The suggestion menu is filtered by the role: proportional families for UI
+//! text and families that advertise a monospaced/code face for code.
 
 use std::time::Instant;
 
@@ -20,7 +21,8 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover;
 use crate::settings::{DEFAULT_CODE_FONT, DEFAULT_UI_FONT};
 use crate::theme::{
-    ColorScheme, Theme, ThemeConfig, ThemePreference, default_bg_hex, default_fg_hex, parse_hex,
+    Accent, ColorScheme, Theme, ThemeConfig, ThemePreference, default_bg_hex, default_fg_hex,
+    parse_hex,
 };
 
 /// Always available in this app because Geist is bundled with the UI.
@@ -67,27 +69,36 @@ impl FontKind {
     }
 }
 
-/// Changes are applied to the live theme and persisted by the shell.
+/// Changes are applied to the live theme and persisted by the shell. Hexes are
+/// keyed per scheme: dark and light each keep their own background/foreground.
 #[derive(Debug, Clone)]
 pub enum AppearanceEvent {
     Changed {
         ui_font: String,
         code_font: String,
         preference: ThemePreference,
-        bg_hex: Option<String>,
-        fg_hex: Option<String>,
+        bg_hex_dark: Option<String>,
+        bg_hex_light: Option<String>,
+        fg_hex_dark: Option<String>,
+        fg_hex_light: Option<String>,
+        accent: Accent,
         contrast: f32,
     },
 }
 
 pub struct AppearancePage {
     preference: ThemePreference,
-    /// Committed custom hexes; `None` means "follow the active scheme's default".
-    bg_hex: Option<String>,
-    fg_hex: Option<String>,
+    /// Committed custom hexes, keyed per scheme; `None` means "follow that
+    /// scheme's default".
+    bg_hex_dark: Option<String>,
+    bg_hex_light: Option<String>,
+    fg_hex_dark: Option<String>,
+    fg_hex_light: Option<String>,
+    accent: Accent,
     contrast: f32,
-    /// The scheme the page resolves scheme defaults against (the scheme the
-    /// installed theme was built with — for `System`, the OS appearance).
+    /// The OS appearance, refreshed every render — the scheme the page
+    /// resolves `System` and hex-slot edits against (never the stale scheme
+    /// the installed theme happened to be built with when the page opened).
     active_scheme: ColorScheme,
     ui_input: Entity<ComposerInput>,
     code_input: Entity<ComposerInput>,
@@ -175,8 +186,11 @@ impl AppearancePage {
 
         Self {
             preference: config.preference,
-            bg_hex: config.bg_hex.clone(),
-            fg_hex: config.fg_hex.clone(),
+            bg_hex_dark: config.bg_hex_dark.clone(),
+            bg_hex_light: config.bg_hex_light.clone(),
+            fg_hex_dark: config.fg_hex_dark.clone(),
+            fg_hex_light: config.fg_hex_light.clone(),
+            accent: config.accent,
             contrast: config.contrast,
             active_scheme,
             ui_input,
@@ -209,24 +223,65 @@ impl AppearancePage {
         self.preference.resolved(self.active_scheme)
     }
 
-    /// Fold valid hex edits into the committed custom values. A value equal to
-    /// the scheme's default is treated as "untouched" so switching schemes
-    /// keeps following the new default until the user types something of their
-    /// own.
+    fn bg_hex_for(&self, scheme: ColorScheme) -> &Option<String> {
+        match scheme {
+            ColorScheme::Dark => &self.bg_hex_dark,
+            ColorScheme::Light => &self.bg_hex_light,
+        }
+    }
+
+    fn fg_hex_for(&self, scheme: ColorScheme) -> &Option<String> {
+        match scheme {
+            ColorScheme::Dark => &self.fg_hex_dark,
+            ColorScheme::Light => &self.fg_hex_light,
+        }
+    }
+
+    /// The background hex shown for a scheme: its own custom value, or its
+    /// default while untouched.
+    fn effective_bg_hex(&self, scheme: ColorScheme) -> String {
+        self.bg_hex_for(scheme)
+            .clone()
+            .unwrap_or_else(|| default_bg_hex(scheme).to_string())
+    }
+
+    /// The foreground hex shown for a scheme: its own custom value, or its
+    /// default while untouched.
+    fn effective_fg_hex(&self, scheme: ColorScheme) -> String {
+        self.fg_hex_for(scheme)
+            .clone()
+            .unwrap_or_else(|| default_fg_hex(scheme).to_string())
+    }
+
+    /// Fold valid hex edits into the committed custom value for the scheme the
+    /// preference resolves to right now. A value equal to that scheme's default
+    /// is treated as "untouched" so the scheme keeps following its default
+    /// until the user types something of their own.
     fn sync_hex_edits(&mut self, cx: &mut Context<Self>) {
+        let scheme = self.resolved_scheme();
         let bg_text = self.bg_input.read(cx).text().to_string();
         if parse_hex(&bg_text).is_some()
-            && self.bg_hex.as_deref() != Some(bg_text.as_str())
-            && !bg_text.eq_ignore_ascii_case(default_bg_hex(self.resolved_scheme()))
+            && !bg_text.eq_ignore_ascii_case(default_bg_hex(scheme))
         {
-            self.bg_hex = Some(bg_text);
+            let slot = match scheme {
+                ColorScheme::Dark => &mut self.bg_hex_dark,
+                ColorScheme::Light => &mut self.bg_hex_light,
+            };
+            if slot.as_deref() != Some(bg_text.as_str()) {
+                *slot = Some(bg_text);
+            }
         }
         let fg_text = self.fg_input.read(cx).text().to_string();
         if parse_hex(&fg_text).is_some()
-            && self.fg_hex.as_deref() != Some(fg_text.as_str())
-            && !fg_text.eq_ignore_ascii_case(default_fg_hex(self.resolved_scheme()))
+            && !fg_text.eq_ignore_ascii_case(default_fg_hex(scheme))
         {
-            self.fg_hex = Some(fg_text);
+            let slot = match scheme {
+                ColorScheme::Dark => &mut self.fg_hex_dark,
+                ColorScheme::Light => &mut self.fg_hex_light,
+            };
+            if slot.as_deref() != Some(fg_text.as_str()) {
+                *slot = Some(fg_text);
+            }
         }
     }
 
@@ -235,8 +290,11 @@ impl AppearancePage {
             ui_font: self.value(FontKind::Ui, cx),
             code_font: self.value(FontKind::Code, cx),
             preference: self.preference,
-            bg_hex: self.bg_hex.clone(),
-            fg_hex: self.fg_hex.clone(),
+            bg_hex_dark: self.bg_hex_dark.clone(),
+            bg_hex_light: self.bg_hex_light.clone(),
+            fg_hex_dark: self.fg_hex_dark.clone(),
+            fg_hex_light: self.fg_hex_light.clone(),
+            accent: self.accent,
             contrast: self.contrast,
         });
         cx.notify();
@@ -253,22 +311,61 @@ impl AppearancePage {
 
     fn set_preference(&mut self, preference: ThemePreference, cx: &mut Context<Self>) {
         self.preference = preference;
-        // Untouched hex fields follow the newly resolved scheme's default.
-        if self.bg_hex.is_none() {
-            self.bg_input.update(cx, |input, cx| {
-                input.set_text(default_bg_hex(self.resolved_scheme()), cx)
-            });
+        // Hexes are keyed per scheme: show the newly resolved scheme's own
+        // effective hex (its custom value or its default) so switching
+        // light↔dark never carries one scheme's colors into the other.
+        let scheme = self.resolved_scheme();
+        let bg_hex = self.effective_bg_hex(scheme);
+        let fg_hex = self.effective_fg_hex(scheme);
+        self.bg_input
+            .update(cx, |input, cx| input.set_text(bg_hex, cx));
+        self.fg_input
+            .update(cx, |input, cx| input.set_text(fg_hex, cx));
+        self.commit(cx);
+    }
+
+    fn set_accent(&mut self, accent: Accent, cx: &mut Context<Self>) {
+        if self.accent == accent {
+            return;
         }
-        if self.fg_hex.is_none() {
-            self.fg_input.update(cx, |input, cx| {
-                input.set_text(default_fg_hex(self.resolved_scheme()), cx)
-            });
-        }
+        self.accent = accent;
         self.commit(cx);
     }
 
     fn set_contrast(&mut self, contrast: f32, cx: &mut Context<Self>) {
         self.contrast = contrast.round().clamp(0.0, 100.0);
+        self.commit(cx);
+    }
+
+    /// Revert one hex field to its scheme's default: clears that scheme's
+    /// custom slot and repaints the field with the default. This is the
+    /// targeted escape hatch for "I darkened the light scheme and now light
+    /// won't come back" — Restore defaults also wipes fonts, which a color
+    /// slip shouldn't cost.
+    fn reset_hex(&mut self, is_bg: bool, cx: &mut Context<Self>) {
+        let scheme = self.resolved_scheme();
+        match (is_bg, scheme) {
+            (true, ColorScheme::Dark) => {
+                self.bg_hex_dark = None;
+                let hex = default_bg_hex(scheme);
+                self.bg_input.update(cx, |input, cx| input.set_text(hex, cx));
+            }
+            (true, ColorScheme::Light) => {
+                self.bg_hex_light = None;
+                let hex = default_bg_hex(scheme);
+                self.bg_input.update(cx, |input, cx| input.set_text(hex, cx));
+            }
+            (false, ColorScheme::Dark) => {
+                self.fg_hex_dark = None;
+                let hex = default_fg_hex(scheme);
+                self.fg_input.update(cx, |input, cx| input.set_text(hex, cx));
+            }
+            (false, ColorScheme::Light) => {
+                self.fg_hex_light = None;
+                let hex = default_fg_hex(scheme);
+                self.fg_input.update(cx, |input, cx| input.set_text(hex, cx));
+            }
+        }
         self.commit(cx);
     }
 
@@ -284,8 +381,11 @@ impl AppearancePage {
         self.code_input
             .update(cx, |input, cx| input.set_text(DEFAULT_CODE_FONT, cx));
         self.preference = ThemePreference::System;
-        self.bg_hex = None;
-        self.fg_hex = None;
+        self.bg_hex_dark = None;
+        self.bg_hex_light = None;
+        self.fg_hex_dark = None;
+        self.fg_hex_light = None;
+        self.accent = Accent::Indigo;
         self.contrast = 100.0;
         let scheme = self.resolved_scheme();
         self.bg_input
@@ -578,6 +678,81 @@ impl AppearancePage {
             .into_any_element()
     }
 
+    /// The accent theme swatch row — a wrapping grid of hue chips (the same
+    /// picker model as the Codex desktop app's accent setting). Each chip shows
+    /// its accent color in the resolved scheme; the selected one gets a border
+    /// + wash.
+    fn render_accent_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let scheme = self.resolved_scheme();
+        div()
+            .px(px(20.0))
+            .py(px(16.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(16.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(self.label_column(
+                "Accent",
+                "The hue used for links, selection, and active indicators.",
+                theme,
+            ))
+            .child(
+                div()
+                    .id("appearance-accent-swatches")
+                    .w(px(CONTROL_COLUMN_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(6.0))
+                    .children(Accent::ALL.into_iter().map(|accent| {
+                        let selected = self.accent == accent;
+                        let swatch = accent.accent(scheme);
+                        div()
+                            .id(SharedString::from(format!(
+                                "appearance-accent-{}",
+                                accent.label().to_lowercase()
+                            )))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(if selected {
+                                theme.border_strong
+                            } else {
+                                theme.border
+                            })
+                            .bg(if selected {
+                                theme.wash(0.08)
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_accent(accent, cx);
+                            }))
+                            .child(div().size(px(12.0)).rounded_full().bg(swatch))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .text_color(if selected {
+                                        theme.text
+                                    } else {
+                                        theme.text_muted
+                                    })
+                                    .child(SharedString::from(accent.label())),
+                            )
+                    })),
+            )
+            .into_any_element()
+    }
+
     /// One hex row: a monospace input in a trigger-style box plus a live
     /// swatch of the color it currently spells.
     fn render_hex_row(
@@ -600,6 +775,14 @@ impl AppearancePage {
             )
         };
         let swatch = parse_hex(&raw_text).unwrap_or(theme.surface_raised);
+        // Show a reset affordance while this scheme carries a custom value —
+        // the one-click way back to its default.
+        let scheme = self.resolved_scheme();
+        let custom = if is_bg {
+            self.bg_hex_for(scheme).is_some()
+        } else {
+            self.fg_hex_for(scheme).is_some()
+        };
         let trigger = div()
             .id(SharedString::from(format!(
                 "appearance-hex-trigger-{}",
@@ -620,6 +803,28 @@ impl AppearancePage {
             .gap(px(8.0))
             .hover(|s| s.border_color(theme.border_strong).bg(theme.wash(0.06)))
             .child(div().flex_1().min_w_0().child(input))
+            .when(custom, |el| {
+                el.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "appearance-hex-reset-{}",
+                            if is_bg { "bg" } else { "fg" }
+                        )))
+                        .flex_none()
+                        .cursor_pointer()
+                        .rounded(px(4.0))
+                        .p(px(2.0))
+                        .hover(|s| s.bg(theme.wash(0.08)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.reset_hex(is_bg, cx);
+                        }))
+                        .child(
+                            crate::icons::icon(crate::icons::RESTART)
+                                .size(px(13.0))
+                                .text_color(theme.text_muted.opacity(0.7)),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex_none()
@@ -749,7 +954,13 @@ impl AppearancePage {
 }
 
 impl Render for AppearancePage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The OS appearance, refreshed every frame. The page must resolve
+        // "System" (and which hex slot an edit lands in) against the scheme
+        // the user is actually seeing — not the scheme that was installed when
+        // the page opened, which follows the preference and goes stale the
+        // moment the preference or the OS scheme changes.
+        self.active_scheme = ColorScheme::from(window.appearance());
         let theme = Theme::of(cx).clone();
         div()
             .id("appearance-page")
@@ -799,17 +1010,18 @@ impl Render for AppearancePage {
                 .child(
                     crate::settings::widgets::section_card(&theme)
                         .child(self.render_scheme_row(&theme, cx))
+                        .child(self.render_accent_row(&theme, cx))
                         .child(self.render_hex_row(
                             true,
                             "Background",
-                            "The app background — main panel and window.",
+                            "The active scheme's background — dark and light keep separate colors.",
                             &theme,
                             cx,
                         ))
                         .child(self.render_hex_row(
                             false,
                             "Foreground",
-                            "Primary text. Secondary roles derive from it toward the background.",
+                            "Primary text for the active scheme. Secondary roles derive from it toward the background.",
                             &theme,
                             cx,
                         ))

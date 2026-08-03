@@ -80,6 +80,100 @@ impl From<gpui::WindowAppearance> for ColorScheme {
     }
 }
 
+/// A named accent theme — the hue family used for links, selection, working
+/// indicators, and active controls. Each theme carries its own dark and light
+/// stops (the 400/500 pair in dark, the 600 in light — the same tailwind stops
+/// the fixed palette used), so an accent reads on both schemes instead of
+/// forcing one pair onto both. `danger`/`warning` stay semantic and are NOT
+/// part of the accent theme: an error or offline notice must read as red/amber
+/// under any accent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Accent {
+    #[default]
+    Indigo,
+    Blue,
+    Violet,
+    Teal,
+    Green,
+    Amber,
+    Rose,
+    Red,
+}
+
+impl Accent {
+    /// All themes, in display order (Settings → Appearance → Accent).
+    pub const ALL: [Accent; 8] = [
+        Accent::Indigo,
+        Accent::Blue,
+        Accent::Violet,
+        Accent::Teal,
+        Accent::Green,
+        Accent::Amber,
+        Accent::Rose,
+        Accent::Red,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Indigo => "Indigo",
+            Self::Blue => "Blue",
+            Self::Violet => "Violet",
+            Self::Teal => "Teal",
+            Self::Green => "Green",
+            Self::Amber => "Amber",
+            Self::Rose => "Rose",
+            Self::Red => "Red",
+        }
+    }
+
+    /// The primary accent tone for a scheme. Dark uses the 400 stop, light the
+    /// 600 — the same oklch pairs the fixed palette used before theming.
+    pub fn accent(self, scheme: ColorScheme) -> Hsla {
+        match (self, scheme) {
+            (Self::Indigo, ColorScheme::Dark) => oklch(0.673, 0.182, 276.935), // indigo-400
+            (Self::Indigo, ColorScheme::Light) => oklch(0.511, 0.262, 276.966), // indigo-600
+            (Self::Blue, ColorScheme::Dark) => oklch(0.707, 0.165, 254.624),   // blue-400
+            (Self::Blue, ColorScheme::Light) => oklch(0.546, 0.245, 262.881),  // blue-600
+            (Self::Violet, ColorScheme::Dark) => oklch(0.702, 0.183, 293.541), // violet-400
+            (Self::Violet, ColorScheme::Light) => oklch(0.541, 0.281, 293.009), // violet-600
+            (Self::Teal, ColorScheme::Dark) => oklch(0.777, 0.152, 181.912),   // teal-400
+            (Self::Teal, ColorScheme::Light) => oklch(0.6, 0.118, 184.704),    // teal-600
+            (Self::Green, ColorScheme::Dark) => oklch(0.792, 0.209, 151.711),  // green-400
+            (Self::Green, ColorScheme::Light) => oklch(0.627, 0.194, 149.214), // green-600
+            (Self::Amber, ColorScheme::Dark) => oklch(0.828, 0.189, 84.429),   // amber-400
+            (Self::Amber, ColorScheme::Light) => oklch(0.666, 0.179, 58.318),  // amber-600
+            (Self::Rose, ColorScheme::Dark) => oklch(0.712, 0.209, 12.928),    // rose-400
+            (Self::Rose, ColorScheme::Light) => oklch(0.586, 0.253, 17.585),   // rose-600
+            (Self::Red, ColorScheme::Dark) => oklch(0.704, 0.191, 22.216),     // red-400
+            (Self::Red, ColorScheme::Light) => oklch(0.577, 0.245, 27.325),    // red-600
+        }
+    }
+
+    /// A stronger accent for fills. Dark uses the 500 stop; light reuses the
+    /// 600 (as the fixed palette did) so a filled control stays on-brand.
+    pub fn accent_strong(self, scheme: ColorScheme) -> Hsla {
+        match (self, scheme) {
+            (Self::Indigo, ColorScheme::Dark) => oklch(0.585, 0.233, 277.117), // indigo-500
+            (Self::Indigo, ColorScheme::Light) => oklch(0.511, 0.262, 276.966), // indigo-600
+            (Self::Blue, ColorScheme::Dark) => oklch(0.623, 0.214, 259.815),   // blue-500
+            (Self::Blue, ColorScheme::Light) => oklch(0.546, 0.245, 262.881),  // blue-600
+            (Self::Violet, ColorScheme::Dark) => oklch(0.606, 0.25, 292.717),  // violet-500
+            (Self::Violet, ColorScheme::Light) => oklch(0.541, 0.281, 293.009), // violet-600
+            (Self::Teal, ColorScheme::Dark) => oklch(0.704, 0.14, 182.503),    // teal-500
+            (Self::Teal, ColorScheme::Light) => oklch(0.6, 0.118, 184.704),    // teal-600
+            (Self::Green, ColorScheme::Dark) => oklch(0.723, 0.219, 149.579),  // green-500
+            (Self::Green, ColorScheme::Light) => oklch(0.627, 0.194, 149.214), // green-600
+            (Self::Amber, ColorScheme::Dark) => oklch(0.769, 0.188, 70.08),    // amber-500
+            (Self::Amber, ColorScheme::Light) => oklch(0.666, 0.179, 58.318),  // amber-600
+            (Self::Rose, ColorScheme::Dark) => oklch(0.645, 0.246, 16.439),    // rose-500
+            (Self::Rose, ColorScheme::Light) => oklch(0.586, 0.253, 17.585),   // rose-600
+            (Self::Red, ColorScheme::Dark) => oklch(0.637, 0.237, 25.331),     // red-500
+            (Self::Red, ColorScheme::Light) => oklch(0.577, 0.245, 27.325),    // red-600
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Defaults + derivation constants
 // ---------------------------------------------------------------------------
@@ -277,13 +371,20 @@ impl Theme {
         crate::theme::wash(alpha)
     }
 
-    /// Build a theme from the persisted recipe: the two anchor hexes and the
-    /// contrast percentage. Every intermediate role is a fixed fraction of the
-    /// distance between `bg` and `fg`, scaled by `contrast / 100` — so the
-    /// defaults reproduce the pre-theming dark theme pixel-for-pixel, and a
-    /// light theme is its exact mirror. Invalid hexes fall back to the
-    /// scheme's defaults; accents are brand hues and stay fixed.
-    pub fn custom(scheme: ColorScheme, bg_hex: &str, fg_hex: &str, contrast: f32) -> Self {
+    /// Build a theme from the persisted recipe: the two anchor hexes, the
+    /// accent theme, and the contrast percentage. Every intermediate role is a
+    /// fixed fraction of the distance between `bg` and `fg`, scaled by
+    /// `contrast / 100` — so the defaults reproduce the pre-theming dark theme
+    /// pixel-for-pixel, and a light theme is its exact mirror. Invalid hexes
+    /// fall back to the scheme's defaults; `danger`/`warning` are semantic and
+    /// stay scheme-fixed regardless of accent.
+    pub fn custom(
+        scheme: ColorScheme,
+        bg_hex: &str,
+        fg_hex: &str,
+        accent: Accent,
+        contrast: f32,
+    ) -> Self {
         let spread = (contrast / DEFAULT_CONTRAST).clamp(0.0, 1.0);
         let default_bg = default_bg_hex(scheme);
         let default_fg = default_fg_hex(scheme);
@@ -305,20 +406,18 @@ impl Theme {
         // over unchanged. This is the useful role split from upstream's light
         // palette without giving up our custom color anchors.
         let hairline_scale = if scheme.is_dark() { 1.0 } else { 1.35 };
-        let (accent, accent_strong, danger, warning) = match scheme {
-            ColorScheme::Dark => (
-                oklch(0.673, 0.182, 276.935), // indigo-400
-                oklch(0.585, 0.233, 277.117), // indigo-500
-                oklch(0.704, 0.191, 22.216),  // red-400
-                oklch(0.828, 0.189, 84.429),  // amber-400
-            ),
-            ColorScheme::Light => (
-                oklch(0.511, 0.262, 276.966), // indigo-600
-                oklch(0.511, 0.262, 276.966), // indigo-600
-                oklch(0.577, 0.245, 27.325),  // red-600
-                oklch(0.555, 0.163, 48.998),  // amber-700
-            ),
-        };
+        let (accent_c, accent_strong_c, danger, warning) = (
+            accent.accent(scheme),
+            accent.accent_strong(scheme),
+            match scheme {
+                ColorScheme::Dark => oklch(0.704, 0.191, 22.216), // red-400
+                ColorScheme::Light => oklch(0.577, 0.245, 27.325), // red-600
+            },
+            match scheme {
+                ColorScheme::Dark => oklch(0.828, 0.189, 84.429), // amber-400
+                ColorScheme::Light => oklch(0.555, 0.163, 48.998), // amber-700
+            },
+        );
         Self {
             scheme,
             bg,
@@ -341,8 +440,8 @@ impl Theme {
             text: fg,
             text_muted: mix(fg, bg, MUTED_SINK * spread),
             text_faint: mix(fg, bg, FAINT_SINK * spread),
-            accent,
-            accent_strong,
+            accent: accent_c,
+            accent_strong: accent_strong_c,
             danger,
             warning,
             font_sans: "Geist".into(),
@@ -356,12 +455,12 @@ impl Theme {
     /// reference screenshots of the original app (docs/reference): main panel
     /// `#060606`, shell/sidebar `#0d0d0d`.
     pub fn dark() -> Self {
-        Self::custom(ColorScheme::Dark, "", "", DEFAULT_CONTRAST)
+        Self::custom(ColorScheme::Dark, "", "", Accent::Indigo, DEFAULT_CONTRAST)
     }
 
     /// The light mirror: near-white surfaces, near-black text, dark hairlines.
     pub fn light() -> Self {
-        Self::custom(ColorScheme::Light, "", "", DEFAULT_CONTRAST)
+        Self::custom(ColorScheme::Light, "", "", Accent::Indigo, DEFAULT_CONTRAST)
     }
 
     /// Keep the paint system fixed while replacing only the two text roles.
@@ -405,17 +504,25 @@ impl Global for Theme {}
 // Theme recipe (persisted appearance settings)
 // ---------------------------------------------------------------------------
 
-/// The persisted theme recipe — preference, custom color anchors, and the
-/// two text roles. The shell keeps one as a global so the window-appearance
-/// observer (which runs with only `&mut Window, &mut App` and cannot reach
-/// the shell entity) can rebuild the theme when the OS scheme flips.
+/// The persisted theme recipe — preference, custom color anchors (keyed per
+/// scheme so dark and light each keep their own hexes), the accent theme, and
+/// the two text roles. The shell keeps one as a global so the
+/// window-appearance observer (which runs with only `&mut Window, &mut App`
+/// and cannot reach the shell entity) can rebuild the theme when the OS scheme
+/// flips.
 #[derive(Debug, Clone)]
 pub struct ThemeConfig {
     pub preference: ThemePreference,
-    /// Custom background hex; `None` uses the active scheme's default.
-    pub bg_hex: Option<String>,
-    /// Custom foreground hex; `None` uses the active scheme's default.
-    pub fg_hex: Option<String>,
+    /// Custom dark-scheme background hex; `None` uses the dark default.
+    pub bg_hex_dark: Option<String>,
+    /// Custom light-scheme background hex; `None` uses the light default.
+    pub bg_hex_light: Option<String>,
+    /// Custom dark-scheme foreground hex; `None` uses the dark default.
+    pub fg_hex_dark: Option<String>,
+    /// Custom light-scheme foreground hex; `None` uses the light default.
+    pub fg_hex_light: Option<String>,
+    /// The accent theme (hue family for links/selection/indicators).
+    pub accent: Accent,
     /// Contrast percentage (0..100) — the tonal spread between the anchor hexes
     /// and the derived roles (surfaces, muted/faint text, hairlines, washes).
     pub contrast: f32,
@@ -425,25 +532,41 @@ pub struct ThemeConfig {
 
 impl ThemeConfig {
     pub fn build(&self, system: ColorScheme) -> Theme {
-        Theme::custom(
-            self.preference.resolved(system),
-            self.bg_hex.as_deref().unwrap_or_default(),
-            self.fg_hex.as_deref().unwrap_or_default(),
-            self.contrast,
-        )
-        .with_fonts(self.ui_font.clone(), self.code_font.clone())
+        let scheme = self.preference.resolved(system);
+        let (bg_hex, fg_hex) = match scheme {
+            ColorScheme::Dark => (
+                self.bg_hex_dark.as_deref().unwrap_or_default(),
+                self.fg_hex_dark.as_deref().unwrap_or_default(),
+            ),
+            ColorScheme::Light => (
+                self.bg_hex_light.as_deref().unwrap_or_default(),
+                self.fg_hex_light.as_deref().unwrap_or_default(),
+            ),
+        };
+        Theme::custom(scheme, bg_hex, fg_hex, self.accent, self.contrast)
+            .with_fonts(self.ui_font.clone(), self.code_font.clone())
     }
 
-    /// The hex shown in settings for the background: the custom value, or the
-    /// active scheme's default while untouched.
+    /// The hex shown in settings for a scheme's background: that scheme's
+    /// custom value, or its default while untouched.
     pub fn effective_bg_hex(&self, scheme: ColorScheme) -> String {
-        self.bg_hex
+        let custom = match scheme {
+            ColorScheme::Dark => &self.bg_hex_dark,
+            ColorScheme::Light => &self.bg_hex_light,
+        };
+        custom
             .clone()
             .unwrap_or_else(|| default_bg_hex(scheme).to_string())
     }
 
+    /// The hex shown in settings for a scheme's foreground: that scheme's
+    /// custom value, or its default while untouched.
     pub fn effective_fg_hex(&self, scheme: ColorScheme) -> String {
-        self.fg_hex
+        let custom = match scheme {
+            ColorScheme::Dark => &self.fg_hex_dark,
+            ColorScheme::Light => &self.fg_hex_light,
+        };
+        custom
             .clone()
             .unwrap_or_else(|| default_fg_hex(scheme).to_string())
     }
@@ -780,7 +903,7 @@ mod tests {
 
     #[test]
     fn custom_defaults_reproduce_the_dark_theme() {
-        let built = Theme::custom(ColorScheme::Dark, "#060606", "#e5e5e5", 100.0);
+        let built = Theme::custom(ColorScheme::Dark, "#060606", "#e5e5e5", Accent::Indigo, 100.0);
         let reference = Theme::dark();
         assert_eq!(built.scheme, ColorScheme::Dark);
         // Anchor hexes land exactly.
@@ -832,7 +955,7 @@ mod tests {
 
     #[test]
     fn contrast_zero_flattens_the_ramp() {
-        let flat = Theme::custom(ColorScheme::Dark, "#060606", "#e5e5e5", 0.0);
+        let flat = Theme::custom(ColorScheme::Dark, "#060606", "#e5e5e5", Accent::Indigo, 0.0);
         // No tonal spread: surfaces collapse to bg, secondary text to fg,
         // hairline washes to fully transparent.
         assert!((flat.surface.l - flat.bg.l).abs() < 1e-6);
@@ -863,8 +986,72 @@ mod tests {
     }
 
     #[test]
+    fn accent_defaults_and_scheme_stops() {
+        // Default accent is indigo and matches the fixed palette's tones.
+        let dark = Theme::dark();
+        let light = Theme::light();
+        assert_eq!(Accent::default(), Accent::Indigo);
+        assert_eq!(dark.accent, oklch(0.673, 0.182, 276.935)); // indigo-400
+        assert_eq!(dark.accent_strong, oklch(0.585, 0.233, 277.117)); // indigo-500
+        assert_eq!(light.accent, oklch(0.511, 0.262, 276.966)); // indigo-600
+        assert_eq!(light.accent_strong, light.accent);
+
+        // Non-default accents repaint the accent roles but leave the semantic
+        // danger/warning roles (red/amber) untouched.
+        let green = Theme::custom(ColorScheme::Dark, "", "", Accent::Green, 100.0);
+        assert_eq!(green.accent, oklch(0.792, 0.209, 151.711)); // green-400
+        assert_eq!(green.danger, dark.danger);
+        assert_eq!(green.warning, dark.warning);
+
+        // Every theme has distinct dark/light stops (no hue is shared).
+        for accent in Accent::ALL {
+            assert_ne!(accent.accent(ColorScheme::Dark), accent.accent(ColorScheme::Light));
+            assert_eq!(accent.accent(ColorScheme::Light), accent.accent_strong(ColorScheme::Light));
+        }
+    }
+
+    #[test]
+    fn accent_labels_and_all_are_unique() {
+        let labels: std::collections::HashSet<&str> =
+            Accent::ALL.iter().map(|a| a.label()).collect();
+        assert_eq!(labels.len(), Accent::ALL.len());
+        assert_eq!(Accent::ALL.len(), 8);
+        assert_eq!(Accent::Indigo.label(), "Indigo");
+    }
+
+    #[test]
+    fn hexes_are_keyed_per_scheme() {
+        // Dark carries a custom hex; light is untouched and follows its own
+        // default — switching schemes never leaks one scheme's colors into
+        // the other.
+        let config = ThemeConfig {
+            preference: ThemePreference::System,
+            bg_hex_dark: Some("#060606".into()),
+            bg_hex_light: None,
+            fg_hex_dark: Some("#e5e5e5".into()),
+            fg_hex_light: None,
+            accent: Accent::Indigo,
+            contrast: 100.0,
+            ui_font: "Geist".into(),
+            code_font: "Geist Mono".into(),
+        };
+        let dark = config.build(ColorScheme::Dark);
+        let light = config.build(ColorScheme::Light);
+        assert!((dark.bg.l - parse_hex("#060606").unwrap().l).abs() < 1e-6);
+        assert_eq!(light.bg, Theme::light().bg, "light keeps its own default");
+        assert_eq!(dark.scheme, ColorScheme::Dark);
+        assert_eq!(light.scheme, ColorScheme::Light);
+        // Effective-hex helpers resolve the right slot per scheme.
+        assert_eq!(config.effective_bg_hex(ColorScheme::Dark), "#060606");
+        assert_eq!(
+            config.effective_bg_hex(ColorScheme::Light),
+            default_bg_hex(ColorScheme::Light)
+        );
+    }
+
+    #[test]
     fn invalid_custom_hexes_fall_back_to_scheme_defaults() {
-        let t = Theme::custom(ColorScheme::Dark, "not-a-hex", "#zzzzzz", 100.0);
+        let t = Theme::custom(ColorScheme::Dark, "not-a-hex", "#zzzzzz", Accent::Indigo, 100.0);
         assert!((t.bg.l - parse_hex(DEFAULT_BG_DARK).unwrap().l).abs() < 1e-6);
         assert!((t.text.l - parse_hex(DEFAULT_FG_DARK).unwrap().l).abs() < 1e-6);
     }

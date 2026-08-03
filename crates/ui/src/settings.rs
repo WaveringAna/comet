@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::theme::{DEFAULT_CONTRAST, ThemeConfig, ThemePreference};
+use crate::theme::{Accent, DEFAULT_CONTRAST, ThemeConfig, ThemePreference};
 
 pub mod accounts;
 pub mod appearance;
@@ -82,12 +82,18 @@ pub struct UiSettings {
     pub code_font: String,
     /// Theme scheme preference (System follows the OS appearance live).
     pub theme_preference: ThemePreference,
-    /// Custom background hex; `None` uses the active scheme's default.
+    /// Custom background hex keyed by scheme; `None` uses that scheme's default.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bg_hex: Option<String>,
-    /// Custom foreground hex; `None` uses the active scheme's default.
+    pub bg_hex_dark: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fg_hex: Option<String>,
+    pub bg_hex_light: Option<String>,
+    /// Custom foreground hex keyed by scheme; `None` uses that scheme's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fg_hex_dark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fg_hex_light: Option<String>,
+    /// Accent theme — the hue family for links, selection, and active controls.
+    pub accent: Accent,
     /// Contrast percentage (0..100) — the tonal spread of the derived roles.
     pub contrast_percent: f32,
     /// Customizable shortcut combos (feature-inventory §1.4).
@@ -115,8 +121,11 @@ impl Default for UiSettings {
             ui_font: DEFAULT_UI_FONT.to_string(),
             code_font: DEFAULT_CODE_FONT.to_string(),
             theme_preference: ThemePreference::System,
-            bg_hex: None,
-            fg_hex: None,
+            bg_hex_dark: None,
+            bg_hex_light: None,
+            fg_hex_dark: None,
+            fg_hex_light: None,
+            accent: Accent::Indigo,
             contrast_percent: DEFAULT_CONTRAST,
             keymap: KeymapConfig::default(),
             hot_reload: false,
@@ -294,8 +303,11 @@ impl From<&UiSettings> for ThemeConfig {
     fn from(settings: &UiSettings) -> Self {
         Self {
             preference: settings.theme_preference,
-            bg_hex: settings.bg_hex.clone(),
-            fg_hex: settings.fg_hex.clone(),
+            bg_hex_dark: settings.bg_hex_dark.clone(),
+            bg_hex_light: settings.bg_hex_light.clone(),
+            fg_hex_dark: settings.fg_hex_dark.clone(),
+            fg_hex_light: settings.fg_hex_light.clone(),
+            accent: settings.accent,
             contrast: settings.contrast_percent,
             ui_font: settings.ui_font.clone(),
             code_font: settings.code_font.clone(),
@@ -337,19 +349,18 @@ impl UiSettings {
         }
         // Heal hand-edited hexes: drop custom values that don't parse so the
         // theme falls back to the scheme defaults instead of painting garbage.
-        if self
-            .bg_hex
-            .as_deref()
-            .is_some_and(|h| crate::theme::parse_hex(h).is_none())
-        {
-            self.bg_hex = None;
-        }
-        if self
-            .fg_hex
-            .as_deref()
-            .is_some_and(|h| crate::theme::parse_hex(h).is_none())
-        {
-            self.fg_hex = None;
+        for slot in [
+            &mut self.bg_hex_dark,
+            &mut self.bg_hex_light,
+            &mut self.fg_hex_dark,
+            &mut self.fg_hex_light,
+        ] {
+            if slot
+                .as_deref()
+                .is_some_and(|h| crate::theme::parse_hex(h).is_none())
+            {
+                *slot = None;
+            }
         }
         self
     }
@@ -416,8 +427,11 @@ mod tests {
             ui_font: "Inter".into(),
             code_font: "Menlo".into(),
             theme_preference: ThemePreference::Light,
-            bg_hex: Some("#111827".into()),
-            fg_hex: Some("#f9fafb".into()),
+            bg_hex_dark: Some("#111827".into()),
+            bg_hex_light: Some("#fafafa".into()),
+            fg_hex_dark: Some("#f9fafb".into()),
+            fg_hex_light: Some("#161616".into()),
+            accent: Accent::Teal,
             contrast_percent: 80.0,
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
@@ -475,8 +489,11 @@ mod tests {
     fn theme_defaults_and_clamping() {
         let d = UiSettings::default();
         assert_eq!(d.theme_preference, ThemePreference::System);
-        assert_eq!(d.bg_hex, None);
-        assert_eq!(d.fg_hex, None);
+        assert_eq!(d.bg_hex_dark, None);
+        assert_eq!(d.bg_hex_light, None);
+        assert_eq!(d.fg_hex_dark, None);
+        assert_eq!(d.fg_hex_light, None);
+        assert_eq!(d.accent, Accent::Indigo);
         assert_eq!(d.contrast_percent, DEFAULT_CONTRAST);
 
         // Clamping heals out-of-range and NaN contrast.
@@ -497,13 +514,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
-            r##"{"bgHex": "#12zzzz", "fgHex": "not-a-color", "themePreference": "dark"}"##,
+            r##"{"bgHexDark": "#12zzzz", "fgHexLight": "not-a-color", "themePreference": "dark"}"##,
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.theme_preference, ThemePreference::Dark);
-        assert_eq!(loaded.bg_hex, None);
-        assert_eq!(loaded.fg_hex, None);
+        assert_eq!(loaded.bg_hex_dark, None);
+        assert_eq!(loaded.fg_hex_light, None);
     }
 
     #[test]
