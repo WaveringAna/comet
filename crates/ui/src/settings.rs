@@ -16,6 +16,7 @@ pub mod accounts;
 pub mod appearance;
 pub mod archived;
 pub mod composer;
+pub mod developer;
 pub mod devices;
 pub mod pi;
 pub mod shortcuts;
@@ -91,6 +92,11 @@ pub struct UiSettings {
     pub contrast_percent: f32,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
+    /// Settings → Developer: participate in the warm-handoff dev loop
+    /// (scripts/nova-dev.sh) — persist the open chat across window swaps and
+    /// print the ready marker the supervisor waits for. The `NOVA_HOTRELOAD`
+    /// env var forces the same behavior on regardless of this flag.
+    pub hot_reload: bool,
 }
 
 impl Default for UiSettings {
@@ -113,6 +119,7 @@ impl Default for UiSettings {
             fg_hex: None,
             contrast_percent: DEFAULT_CONTRAST,
             keymap: KeymapConfig::default(),
+            hot_reload: false,
         }
     }
 }
@@ -416,6 +423,7 @@ mod tests {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
             },
+            hot_reload: true,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);

@@ -33,6 +33,7 @@ use crate::popover::{self, Loadable};
 use crate::rail;
 use crate::settings::appearance::{AppearanceEvent, AppearancePage};
 use crate::settings::archived::ArchivedPage;
+use crate::settings::developer::{DeveloperEvent, DeveloperPage};
 use crate::settings::pi::{PiSection, PiSettingsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
@@ -161,10 +162,11 @@ pub enum SettingsSection {
     PiPackages,
     PiAdvanced,
     Archived,
+    Developer,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 7] = [
+    pub const ALL: [SettingsSection; 8] = [
         SettingsSection::Appearance,
         SettingsSection::Shortcuts,
         SettingsSection::PiOverview,
@@ -172,6 +174,7 @@ impl SettingsSection {
         SettingsSection::PiPackages,
         SettingsSection::PiAdvanced,
         SettingsSection::Archived,
+        SettingsSection::Developer,
     ];
 
     /// Sidebar + header label (comet settings-sidebar.tsx SECTIONS / __root.tsx
@@ -185,6 +188,7 @@ impl SettingsSection {
             SettingsSection::PiPackages => "Packages & resources",
             SettingsSection::PiAdvanced => "Pi advanced",
             SettingsSection::Archived => "Archived sessions",
+            SettingsSection::Developer => "Developer",
         }
     }
 }
@@ -490,6 +494,8 @@ pub struct Shell {
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     appearance_sub: Option<Subscription>,
+    developer_page: Option<Entity<DeveloperPage>>,
+    developer_sub: Option<Subscription>,
     /// Window-appearance observer (System scheme following). Registered once on
     /// the first render; rebuilds the theme from the [`ThemeConfig`] global.
     appearance_observer: Option<Subscription>,
@@ -665,6 +671,10 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = UiSettings::load(&data_dir);
+        // Settings → Developer: hot reload participates from the first engine
+        // attach, so the persisted flag must reach AppState before bootstrap
+        // lands (scripts/nova-dev.sh relies on the ready marker).
+        state.update(cx, |s, _| s.set_hotreload(settings.hot_reload));
         // Install the persisted theme before the first shell frame so every
         // surface, including the settings page itself, uses the saved roles.
         // The recipe rides a global so the window-appearance observer (which
@@ -691,6 +701,7 @@ impl Shell {
             Some("settings/pi/packages") => Route::Settings(SettingsSection::PiPackages),
             Some("settings/pi/advanced") => Route::Settings(SettingsSection::PiAdvanced),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
+            Some("settings/developer") => Route::Settings(SettingsSection::Developer),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {
                 state.update(cx, |s, _| s.auto_selected = true);
@@ -729,6 +740,8 @@ impl Shell {
             archived_page: None,
             appearance_page: None,
             appearance_sub: None,
+            developer_page: None,
+            developer_sub: None,
             appearance_observer: None,
             pi_settings_page: None,
             shortcuts_page: None,
@@ -1401,6 +1414,26 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::Developer => {
+                if self.developer_page.is_none() {
+                    let page = cx.new(|cx| DeveloperPage::new(self.settings.hot_reload, cx));
+                    self.developer_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &DeveloperEvent, cx| {
+                            let DeveloperEvent::HotReloadChanged(on) = event;
+                            this.settings.hot_reload = *on;
+                            this.state.update(cx, |s, _| s.set_hotreload(*on));
+                            this.schedule_save(cx);
+                            cx.notify();
+                        },
+                    ));
+                    self.developer_page = Some(page);
+                }
+                match &self.developer_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
         }
     }
 
@@ -1927,6 +1960,7 @@ impl Shell {
             SettingsSection::PiPackages => icons::WIDGET,
             SettingsSection::PiAdvanced => icons::SETTINGS_MINIMALISTIC,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
+            SettingsSection::Developer => icons::TERMINAL,
         };
         let nav_row = |item: SettingsSection| {
             let selected = item == section;
@@ -2020,6 +2054,13 @@ impl Shell {
                             .flex()
                             .flex_col()
                             .child(nav_row(SettingsSection::Archived)),
+                    )
+                    .child(nav_label("Developer", 12.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(nav_row(SettingsSection::Developer)),
                     ),
             )
             // Back pinned to the bottom (comet settings-sidebar.tsx).

@@ -35,6 +35,22 @@ use comet_proto::{
 use comet_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
 // ---------------------------------------------------------------------------
+// Hot reload (dev-supervisor handoff). The Settings → Developer toggle or
+// `NOVA_HOTRELOAD=1` opts the headed app into a three-part contract used by
+// scripts/nova-dev.sh: persist the selected chat on every change, restore it
+// once the chats watch lands after attach, and print a ready marker on stdout
+// at the first engine attach so the supervisor knows the old window can be
+// retired. Normal runs never touch any of this.
+fn hotreload_enabled() -> bool {
+    std::env::var_os("NOVA_HOTRELOAD").is_some()
+}
+
+/// The ready marker is process-global and printed exactly once: the supervisor
+/// only reads the first attach, and reconnects must not re-signal.
+static HOTRELOAD_ANNOUNCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// ---------------------------------------------------------------------------
 /// Chars per token for the live readout. Prose and code both land near 4, so
 /// a single constant is within noise of the exact end-of-turn figure — good
 /// enough for a live meter that the real usage count replaces on completion.
@@ -396,6 +412,10 @@ pub struct AppState {
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
+    /// Settings → Developer hot-reload toggle (persisted in ui-settings.json,
+    /// pushed in by the shell). The `NOVA_HOTRELOAD` env var forces the same
+    /// behavior on — see [`hotreload_enabled`].
+    hotreload: bool,
     engine: Option<EngineHandle>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
@@ -424,6 +444,7 @@ impl AppState {
             local_device_id: None,
             update: None,
             data_dir: None,
+            hotreload: false,
             engine: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
@@ -790,7 +811,92 @@ impl AppState {
         if let Some(chat_id) = self.selected_chat.clone() {
             self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
         }
+        if self.hotreload_active() {
+            // Tell the dev supervisor a rebuilt window is attached and live;
+            // it may now retire the previous process.
+            if !HOTRELOAD_ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                use std::io::Write as _;
+                println!("nova-hotreload-ready");
+                let _ = std::io::stdout().flush();
+            }
+            // The chats watch lands asynchronously after attach, so restore
+            // the previous selection once rows exist (bounded wait — a fresh
+            // data dir with no chats must not spin forever).
+            cx.spawn(async move |this, cx| {
+                for _ in 0..50 {
+                    let landed = this
+                        .update(cx, |s, _| !s.chats.is_empty() || s.selected_chat.is_some())
+                        .unwrap_or(true);
+                    if landed {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                }
+                this.update(cx, |s, cx| s.restore_hotreload(cx)).ok();
+            })
+            .detach();
+        }
         cx.notify();
+    }
+
+    /// Hot-reload state file (`{data_dir}/hotreload-state.json`) — only Some
+    /// when the supervisor contract is active.
+    fn hotreload_path(&self) -> Option<PathBuf> {
+        if !self.hotreload_active() {
+            return None;
+        }
+        self.data_dir
+            .as_ref()
+            .map(|dir| dir.join("hotreload-state.json"))
+    }
+
+    /// Persist the current selection so a replacement process can reopen the
+    /// same chat. Called from `select_chat`; best-effort, never fatal.
+    fn persist_hotreload(&self) {
+        let Some(path) = self.hotreload_path() else {
+            return;
+        };
+        let body = serde_json::json!({ "selected_chat": self.selected_chat });
+        let _ = std::fs::write(path, body.to_string());
+    }
+
+    /// Reopen the chat the retired process had open, if it still exists.
+    fn restore_hotreload(&mut self, cx: &mut Context<Self>) {
+        if self.selected_chat.is_some() {
+            return;
+        }
+        let Some(path) = self.hotreload_path() else {
+            return;
+        };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return;
+        };
+        let Some(id) = value
+            .get("selected_chat")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if self.chats.iter().any(|c| c.id == id) {
+            self.select_chat(Some(id), cx);
+        }
+    }
+
+    /// Hot-reload participation: the Developer settings toggle or the
+    /// supervisor's `NOVA_HOTRELOAD` env var.
+    fn hotreload_active(&self) -> bool {
+        self.hotreload || hotreload_enabled()
+    }
+
+    /// Settings → Developer pushes the persisted flag in at boot and on change.
+    pub fn set_hotreload(&mut self, on: bool) {
+        self.hotreload = on;
     }
 
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
@@ -825,6 +931,7 @@ impl AppState {
         if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
             self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
         }
+        self.persist_hotreload();
         cx.notify();
     }
 

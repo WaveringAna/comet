@@ -9,7 +9,7 @@ use comet_harness::{Harness, HarnessError, mock::MockHarness};
 use comet_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessDescriptor {
     pub id: HarnessId,

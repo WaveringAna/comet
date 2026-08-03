@@ -11,7 +11,7 @@
 //! in free functions with unit tests; RPC results land in [`Loadable`] slots
 //! rendered as skeletons / inline errors with Retry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ use comet_rpc::methods;
 const MAX_REF_ROWS: usize = 300;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::model_cache::ModelCatalogCache;
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
 use crate::settings::composer::ComposerDefaults;
@@ -149,6 +150,75 @@ pub fn sort_models(models: &mut [Model]) {
             })
             .then_with(|| a.id.to_ascii_lowercase().cmp(&b.id.to_ascii_lowercase()))
     });
+}
+
+/// Merge a freshly-pulled catalog into the list the picker is displaying, in
+/// place: models the pull no longer lists vanish, rows whose metadata changed
+/// update, and brand-new models append — then the list re-sorts (stable, so
+/// untouched rows never move). The slot stays `Ready` the whole time, so an
+/// open never flashes a skeleton. Returns whether the displayed list changed
+/// (callers gate the cache save + notify on it).
+pub fn merge_models(displayed: &mut Vec<Model>, fresh: Vec<Model>) -> bool {
+    let mut changed = false;
+    let fresh_map: HashMap<&str, &Model> = fresh.iter().map(|m| (m.id.as_str(), m)).collect();
+    displayed.retain_mut(|m| match fresh_map.get(m.id.as_str()) {
+        Some(fresh_model) => {
+            if **fresh_model != *m {
+                *m = (**fresh_model).clone();
+                changed = true;
+            }
+            true
+        }
+        None => {
+            changed = true;
+            false
+        }
+    });
+    let known: HashSet<&str> = displayed.iter().map(|m| m.id.as_str()).collect();
+    let additions: Vec<Model> = fresh
+        .into_iter()
+        .filter(|m| !known.contains(m.id.as_str()))
+        .collect();
+    if !additions.is_empty() {
+        changed = true;
+        displayed.extend(additions);
+    }
+    if changed {
+        sort_models(displayed);
+    }
+    changed
+}
+
+/// The same silent merge for harness descriptors: a new harness appears, a
+/// removed one drops — the picker's provider list never flashes. Descriptors
+/// keep registry order (no sort). Returns whether the displayed list changed.
+pub fn merge_harnesses(displayed: &mut Vec<HarnessDescriptor>, fresh: Vec<HarnessDescriptor>) -> bool {
+    let mut changed = false;
+    let fresh_map: HashMap<HarnessId, &HarnessDescriptor> =
+        fresh.iter().map(|d| (d.id, d)).collect();
+    displayed.retain_mut(|d| match fresh_map.get(&d.id) {
+        Some(fresh_d) => {
+            if **fresh_d != *d {
+                *d = (**fresh_d).clone();
+                changed = true;
+            }
+            true
+        }
+        None => {
+            changed = true;
+            false
+        }
+    });
+    let known: HashSet<HarnessId> = displayed.iter().map(|d| d.id).collect();
+    let additions: Vec<HarnessDescriptor> = fresh
+        .into_iter()
+        .filter(|d| !known.contains(&d.id))
+        .collect();
+    if !additions.is_empty() {
+        changed = true;
+        displayed.extend(additions);
+    }
+    changed
 }
 
 fn model_provider(model: &Model) -> &str {
@@ -369,6 +439,15 @@ pub struct Pickers {
     /// Where [`Self::defaults`] persists (`{data_dir}/composer-defaults.json`);
     /// `None` before bootstrap stamps the state (writes are skipped).
     data_dir: Option<PathBuf>,
+    /// Disk cache of the model catalog (`{data_dir}/model-catalog-cache.json`):
+    /// Idle slots seed from it (boot, project switch, retry) so the picker
+    /// paints last-known rows instead of a skeleton; background pulls then
+    /// merge fresh results in silently.
+    model_cache: ModelCatalogCache,
+    /// One in-flight harness pull (dedupes open-time refreshes).
+    harness_pulling: bool,
+    /// In-flight model pulls per harness (same dedupe).
+    model_pulls: HashSet<HarnessId>,
     /// Selection the draft picks belong to — switching chats drops them so a
     /// pick made in one chat never leaks into another.
     draft_owner: Option<String>,
@@ -490,6 +569,10 @@ impl Pickers {
             .as_deref()
             .map(ComposerDefaults::load)
             .unwrap_or_default();
+        let model_cache = data_dir
+            .as_deref()
+            .map(ModelCatalogCache::load)
+            .unwrap_or_default();
         let draft_owner = state.read(cx).selected_chat.clone();
         let project_owner = state.read(cx).selected_project.clone();
         Self {
@@ -498,6 +581,9 @@ impl Pickers {
             config: DraftConfig::default(),
             defaults,
             data_dir,
+            model_cache,
+            harness_pulling: false,
+            model_pulls: HashSet::new(),
             draft_owner,
             open,
             harnesses: Loadable::Idle,
@@ -529,6 +615,16 @@ impl Pickers {
             && let Err(err) = self.defaults.save(dir)
         {
             tracing::warn!(error = %err, "composer-defaults save failed");
+        }
+    }
+
+    /// Persist the model-catalog cache (best-effort; written only when a pull
+    /// changed the displayed rows or the cache itself).
+    fn save_model_cache(&self) {
+        if let Some(dir) = self.data_dir.as_deref()
+            && let Err(err) = self.model_cache.save(dir)
+        {
+            tracing::warn!(error = %err, "model-catalog cache save failed");
         }
     }
 
@@ -742,9 +838,12 @@ impl Pickers {
                 if let Some(harness) = self.effective_harness(cx) {
                     // Pi reloads models.json when its own model picker opens.
                     // Mirror that behavior so a provider added in Settings is
-                    // visible without restarting Nova.
-                    self.models.remove(&harness);
-                    self.ensure_models(harness, cx);
+                    // visible without restarting Nova — WITHOUT a loading
+                    // flash: the disk-cache-seeded rows stay on screen while
+                    // a background pull merges fresh catalogs in silently
+                    // (new models appear, vanished ones drop).
+                    self.refresh_harnesses(cx);
+                    self.refresh_models(harness, cx);
                 }
             }
         }
@@ -754,9 +853,11 @@ impl Pickers {
     // ---- loads ----
 
     fn ensure_harnesses(&mut self, cx: &mut Context<Self>) {
-        // Only load from Idle: `render` re-runs this every frame, so an Error
-        // that could re-trigger a load would flip back to Loading before the
-        // retry row ever painted (and spam the engine). Retry resets to Idle.
+        // Seed + pull from Idle only: `render` re-runs this every frame, so an
+        // Error that could re-trigger a load would flip back to Loading before
+        // the retry row ever painted (and spam the engine). Retry resets to
+        // Idle. Ready slots (seeded or previously pulled) are refreshed on
+        // picker-open via [`Self::refresh_harnesses`].
         if !matches!(self.harnesses, Loadable::Idle) {
             return;
         }
@@ -764,31 +865,132 @@ impl Pickers {
             return;
         };
         let target = self.project_target(cx);
-        self.harnesses = Loadable::Loading;
+        // Seed from the disk cache: the picker paints last-known rows now;
+        // the background pull merges fresh descriptors in without a Loading
+        // flash. Only a cold cache (first ever run / never-seen device) shows
+        // a skeleton.
+        let device = target.as_deref().unwrap_or("");
+        if let Some(cached) = self.model_cache.harnesses_for(device) {
+            self.harnesses = Loadable::Ready(cached);
+        } else {
+            self.harnesses = Loadable::Loading;
+        }
+        let project_device = self
+            .state
+            .read(cx)
+            .selected_project_row()
+            .map(|p| p.device_id.clone());
+        self.pull_harnesses(engine, target, project_device, cx);
+    }
+
+    /// Refresh the harness catalog in the background, merging over the rows
+    /// already displayed (picker-open over a Ready slot).
+    fn refresh_harnesses(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.harnesses, Loadable::Idle) {
+            self.ensure_harnesses(cx);
+            return;
+        }
+        // An Error slot retries on reopen (the retry row's click resets to
+        // Idle; reopening the picker re-arms the same way).
+        if matches!(self.harnesses, Loadable::Error(_)) {
+            self.harnesses = Loadable::Idle;
+            self.ensure_harnesses(cx);
+            return;
+        }
+        if self.harness_pulling {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let target = self.project_target(cx);
+        let project_device = self
+            .state
+            .read(cx)
+            .selected_project_row()
+            .map(|p| p.device_id.clone());
+        self.pull_harnesses(engine, target, project_device, cx);
+    }
+
+    /// `ListHarnesses` for the project's device, merged silently into the
+    /// harness slot (and the disk cache) when it lands. Deduped by
+    /// [`Self::harness_pulling`] so rapid opens never double-pull.
+    fn pull_harnesses(
+        &mut self,
+        engine: EngineHandle,
+        target: Option<String>,
+        project_device: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.harness_pulling = true;
+        let mut params = serde_json::Map::new();
+        if let Some(target) = &target {
+            params.insert(
+                "targetDeviceId".into(),
+                serde_json::Value::String(target.clone()),
+            );
+        }
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let mut params = serde_json::Map::new();
-            if let Some(target) = &target {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(target.clone()),
-                );
-            }
             let result = engine
                 .client()
                 .call(methods::LIST_HARNESSES, serde_json::Value::Object(params))
                 .await;
             this.update(cx, |pickers, cx| {
-                pickers.harnesses = match result {
+                pickers.harness_pulling = false;
+                // A project switch mid-flight re-targeted the catalog — drop
+                // the stale result rather than pollute the new rows.
+                let current_device = pickers
+                    .state
+                    .read(cx)
+                    .selected_project_row()
+                    .map(|p| p.device_id.clone());
+                if current_device != project_device {
+                    return;
+                }
+                let mut changed = false;
+                match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
-                        Ok(list) => Loadable::Ready(list),
-                        Err(err) => Loadable::Error(err.to_string()),
+                        Ok(fresh) => {
+                            changed = match &mut pickers.harnesses {
+                                Loadable::Ready(list) => merge_harnesses(list, fresh.clone()),
+                                slot => {
+                                    *slot = Loadable::Ready(fresh.clone());
+                                    true
+                                }
+                            };
+                            // Cache under the CURRENT target so a just-landed
+                            // local-device probe keys the local engine's data
+                            // under "" and remote hosts under their id.
+                            let target = pickers.project_target(cx);
+                            let device = target.as_deref().unwrap_or("");
+                            if pickers.model_cache.store_harnesses(device, fresh) {
+                                changed = true;
+                            }
+                        }
+                        Err(err) => {
+                            // A failed pull keeps any displayed rows (seeded
+                            // cache or a prior success) — never flip a
+                            // populated list to an error row mid-open.
+                            if !matches!(pickers.harnesses, Loadable::Ready(_)) {
+                                pickers.harnesses = Loadable::Error(err.to_string());
+                                changed = true;
+                            }
+                        }
                     },
-                    Err(err) => Loadable::Error(err.to_string()),
-                };
+                    Err(err) => {
+                        if !matches!(pickers.harnesses, Loadable::Ready(_)) {
+                            pickers.harnesses = Loadable::Error(err.to_string());
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    pickers.save_model_cache();
+                    cx.notify();
+                }
                 if let Some(harness) = pickers.effective_harness(cx) {
                     pickers.ensure_models(harness, cx);
                 }
-                cx.notify();
             })
             .ok();
         }));
@@ -796,7 +998,9 @@ impl Pickers {
 
     fn ensure_models(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         // Absent or Idle only — same render-loop hazard as `ensure_harnesses`;
-        // the retry row clears the map to re-arm.
+        // the retry row clears the map to re-arm. Ready slots (seeded or
+        // previously pulled) are refreshed on picker-open via
+        // [`Self::refresh_models`].
         if self
             .models
             .get(&harness)
@@ -808,37 +1012,132 @@ impl Pickers {
             return;
         };
         let target = self.project_target(cx);
-        self.models.insert(harness, Loadable::Loading);
+        let project_device = self
+            .state
+            .read(cx)
+            .selected_project_row()
+            .map(|p| p.device_id.clone());
+        // Seed from the disk cache so the list paints last-known rows instead
+        // of a skeleton; the background pull merges fresh models in silently.
+        let device = target.as_deref().unwrap_or("");
+        if let Some(cached) = self.model_cache.models_for(harness, device) {
+            self.models.insert(harness, Loadable::Ready(cached));
+        } else {
+            self.models.insert(harness, Loadable::Loading);
+        }
+        self.pull_models(harness, engine, target, project_device, cx);
+    }
+
+    /// Refresh one harness's models in the background, merging over the rows
+    /// already displayed (picker-open over a Ready slot).
+    fn refresh_models(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        if !matches!(self.models.get(&harness), Some(Loadable::Ready(_))) {
+            // Idle seeds from the cache; an Error slot retries on reopen (the
+            // retry row clears to Idle; reopening the picker re-arms the
+            // same way).
+            self.models.remove(&harness);
+            self.ensure_models(harness, cx);
+            return;
+        }
+        if self.model_pulls.contains(&harness) {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let target = self.project_target(cx);
+        let project_device = self
+            .state
+            .read(cx)
+            .selected_project_row()
+            .map(|p| p.device_id.clone());
+        self.pull_models(harness, engine, target, project_device, cx);
+    }
+
+    /// `ListModels` for a harness, merged silently into the model slot and the
+    /// disk cache when it lands. Deduped per harness by [`Self::model_pulls`].
+    fn pull_models(
+        &mut self,
+        harness: HarnessId,
+        engine: EngineHandle,
+        target: Option<String>,
+        project_device: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.model_pulls.insert(harness);
+        let mut params = serde_json::json!({ "harness": harness });
+        if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
+            object.insert(
+                "targetDeviceId".into(),
+                serde_json::Value::String(target.clone()),
+            );
+        }
         cx.spawn(async move |this, cx| {
-            let mut params = serde_json::json!({ "harness": harness });
-            if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
-                object.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(target.clone()),
-                );
-            }
             let result = engine.client().call(methods::LIST_MODELS, params).await;
             this.update(cx, |pickers, cx| {
-                let loaded = match result {
+                pickers.model_pulls.remove(&harness);
+                // A project switch mid-flight re-targeted the catalog — drop
+                // the stale result rather than pollute the new rows.
+                let current_device = pickers
+                    .state
+                    .read(cx)
+                    .selected_project_row()
+                    .map(|p| p.device_id.clone());
+                if current_device != project_device {
+                    return;
+                }
+                let mut changed = false;
+                match result {
                     Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
-                        Ok(mut models) => {
-                            sort_models(&mut models);
-                            Loadable::Ready(models)
+                        Ok(mut fresh) => {
+                            sort_models(&mut fresh);
+                            if let Some(Loadable::Ready(list)) = pickers.models.get_mut(&harness)
+                            {
+                                changed = merge_models(list, fresh.clone());
+                            } else {
+                                pickers
+                                    .models
+                                    .insert(harness, Loadable::Ready(fresh.clone()));
+                                changed = true;
+                            }
+                            let target = pickers.project_target(cx);
+                            let device = target.as_deref().unwrap_or("");
+                            if pickers.model_cache.store_models(harness, device, fresh) {
+                                changed = true;
+                            }
                         }
-                        Err(err) => Loadable::Error(err.to_string()),
+                        Err(err) => {
+                            // A failed pull keeps any displayed rows — never
+                            // flip a populated list to an error row mid-open.
+                            if !matches!(
+                                pickers.models.get(&harness),
+                                Some(Loadable::Ready(_))
+                            ) {
+                                pickers.models.insert(harness, Loadable::Error(err.to_string()));
+                                changed = true;
+                            }
+                        }
                     },
-                    Err(err) => Loadable::Error(err.to_string()),
-                };
-                if let Loadable::Ready(models) = &loaded {
-                    let fresh = pickers
-                        .defaults
-                        .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
-                    if fresh {
-                        pickers.save_defaults();
+                    Err(err) => {
+                        if !matches!(pickers.models.get(&harness), Some(Loadable::Ready(_))) {
+                            pickers.models.insert(harness, Loadable::Error(err.to_string()));
+                            changed = true;
+                        }
                     }
                 }
-                pickers.models.insert(harness, loaded);
-                cx.notify();
+                if changed {
+                    pickers.save_model_cache();
+                    cx.notify();
+                }
+                // Feed the label cache so chips name models before a list
+                // loads (best-effort; only saved when something changed).
+                if let Some(Loadable::Ready(list)) = pickers.models.get(&harness)
+                    && pickers
+                        .defaults
+                        .remember_labels(list.iter().map(|m| (m.id.as_str(), m.label.as_str())))
+                {
+                    pickers.save_defaults();
+                }
             })
             .ok();
         })
@@ -3108,6 +3407,81 @@ mod tests {
                 "deepseek/deepseek-v4-pro",
             ]
         );
+    }
+
+    #[test]
+    fn merge_models_adds_removes_and_updates_in_place() {
+        let model = |id: &str, label: &str| Model {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![],
+        };
+        let mut displayed = vec![model("a", "A"), model("b", "B"), model("c", "C")];
+
+        // No diff: nothing changes, nothing is reported changed.
+        assert!(!merge_models(&mut displayed, vec![model("a", "A"), model("c", "C"), model("b", "B")]));
+        assert_eq!(displayed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+
+        // A vanished model drops; a changed label updates in place; a new
+        // model appends — all in one pull.
+        assert!(merge_models(
+            &mut displayed,
+            vec![model("a", "A!"), model("b", "B"), model("d", "D")],
+        ));
+        assert_eq!(displayed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b", "d"]);
+        assert_eq!(displayed[0].label, "A!");
+
+        // An empty fresh catalog silently empties the list.
+        assert!(merge_models(&mut displayed, vec![]));
+        assert!(displayed.is_empty());
+    }
+
+    #[test]
+    fn merge_models_reverts_to_sorted_order_when_new_rows_land() {
+        let model = |id: &str| Model {
+            id: id.into(),
+            label: id.split_once('/').unwrap().1.into(),
+            description: Some(id.split_once('/').unwrap().0.into()),
+            reasoning_levels: vec![],
+            options: vec![],
+        };
+        // Displayed order is discovery order — stale from an old catalog.
+        let mut displayed = vec![model("openai-codex/gpt-5.4"), model("deepseek/deepseek-v4-pro")];
+        // The pull brings a newer flagship that outranks the first row.
+        merge_models(
+            &mut displayed,
+            vec![
+                model("openai-codex/gpt-5.6-sol"),
+                model("openai-codex/gpt-5.4"),
+                model("deepseek/deepseek-v4-pro"),
+            ],
+        );
+        assert_eq!(
+            displayed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["openai-codex/gpt-5.6-sol", "openai-codex/gpt-5.4", "deepseek/deepseek-v4-pro"]
+        );
+    }
+
+    #[test]
+    fn merge_harnesses_adds_and_removes_descriptors() {
+        let descriptor = |id: HarnessId| HarnessDescriptor {
+            id,
+            name: format!("{id:?}"),
+            supports_steering: false,
+            steering_mode: comet_proto::SteeringMode::StepBoundary,
+            reasoning_levels: vec![],
+        };
+        let mut displayed = vec![descriptor(HarnessId::Pi)];
+        assert!(!merge_harnesses(&mut displayed, vec![descriptor(HarnessId::Pi)]));
+        assert!(merge_harnesses(
+            &mut displayed,
+            vec![descriptor(HarnessId::Pi), descriptor(HarnessId::ClaudeCode)],
+        ));
+        assert_eq!(displayed.len(), 2);
+        assert!(merge_harnesses(&mut displayed, vec![descriptor(HarnessId::ClaudeCode)]));
+        assert_eq!(displayed.iter().map(|d| d.id).collect::<Vec<_>>(), [HarnessId::ClaudeCode]);
     }
 
     #[test]

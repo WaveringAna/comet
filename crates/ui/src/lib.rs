@@ -21,6 +21,7 @@ pub mod frost;
 pub mod icons;
 pub mod loaders;
 pub mod markdown;
+pub mod model_cache;
 pub mod motion;
 pub mod pickers;
 pub mod popover;
