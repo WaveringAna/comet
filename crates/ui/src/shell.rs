@@ -33,6 +33,7 @@ use crate::popover::{self, Loadable};
 use crate::rail;
 use crate::settings::appearance::{AppearanceEvent, AppearancePage};
 use crate::settings::archived::ArchivedPage;
+use crate::settings::pi::{PiSection, PiSettingsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
@@ -155,13 +156,21 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
 pub enum SettingsSection {
     Appearance,
     Shortcuts,
+    PiOverview,
+    PiProviders,
+    PiPackages,
+    PiAdvanced,
     Archived,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 3] = [
+    pub const ALL: [SettingsSection; 7] = [
         SettingsSection::Appearance,
         SettingsSection::Shortcuts,
+        SettingsSection::PiOverview,
+        SettingsSection::PiProviders,
+        SettingsSection::PiPackages,
+        SettingsSection::PiAdvanced,
         SettingsSection::Archived,
     ];
 
@@ -171,6 +180,10 @@ impl SettingsSection {
         match self {
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Shortcuts => "Shortcuts",
+            SettingsSection::PiOverview => "Pi overview",
+            SettingsSection::PiProviders => "Provider credentials",
+            SettingsSection::PiPackages => "Packages & resources",
+            SettingsSection::PiAdvanced => "Pi advanced",
             SettingsSection::Archived => "Archived sessions",
         }
     }
@@ -480,6 +493,7 @@ pub struct Shell {
     /// Window-appearance observer (System scheme following). Registered once on
     /// the first render; rebuilds the theme from the [`ThemeConfig`] global.
     appearance_observer: Option<Subscription>,
+    pi_settings_page: Option<Entity<PiSettingsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     shortcuts_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
@@ -670,6 +684,12 @@ impl Shell {
                 Route::Settings(SettingsSection::Appearance)
             }
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
+            Some("settings/pi") | Some("settings/pi/overview") => {
+                Route::Settings(SettingsSection::PiOverview)
+            }
+            Some("settings/pi/providers") => Route::Settings(SettingsSection::PiProviders),
+            Some("settings/pi/packages") => Route::Settings(SettingsSection::PiPackages),
+            Some("settings/pi/advanced") => Route::Settings(SettingsSection::PiAdvanced),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {
@@ -710,6 +730,7 @@ impl Shell {
             appearance_page: None,
             appearance_sub: None,
             appearance_observer: None,
+            pi_settings_page: None,
             shortcuts_page: None,
             shortcuts_sub: None,
             chat_menu: None,
@@ -1324,6 +1345,29 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::PiOverview
+            | SettingsSection::PiProviders
+            | SettingsSection::PiPackages
+            | SettingsSection::PiAdvanced => {
+                let pi_section = match section {
+                    SettingsSection::PiOverview => PiSection::Overview,
+                    SettingsSection::PiProviders => PiSection::Providers,
+                    SettingsSection::PiPackages => PiSection::Packages,
+                    SettingsSection::PiAdvanced => PiSection::Advanced,
+                    _ => unreachable!(),
+                };
+                if self.pi_settings_page.is_none() {
+                    let state = self.state.clone();
+                    self.pi_settings_page =
+                        Some(cx.new(|cx| PiSettingsPage::new(state, pi_section, cx)));
+                }
+                if let Some(page) = &self.pi_settings_page {
+                    page.update(cx, |page, cx| page.set_section(pi_section, cx));
+                    page.clone().into_any_element()
+                } else {
+                    Empty.into_any_element()
+                }
+            }
             SettingsSection::Shortcuts => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
@@ -1878,7 +1922,52 @@ impl Shell {
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Shortcuts => icons::KEYBOARD,
+            SettingsSection::PiOverview => icons::PI_MARK,
+            SettingsSection::PiProviders => icons::KEY_MINIMALISTIC,
+            SettingsSection::PiPackages => icons::WIDGET,
+            SettingsSection::PiAdvanced => icons::SETTINGS_MINIMALISTIC,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
+        };
+        let nav_row = |item: SettingsSection| {
+            let selected = item == section;
+            div()
+                .id(SharedString::from(format!("settings-nav-{}", item.label())))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(8.0))
+                .px(px(Theme::SPACE_SM))
+                .py(px(6.0))
+                .text_size(px(13.0))
+                .when(selected, |el| {
+                    el.bg(crate::theme::wash(0.17))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                })
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::wash(0.11)).text_color(theme.text))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_settings(item, cx)))
+                .child(
+                    icon(section_icon(item))
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from(item.label()))
+        };
+        let nav_label = |label: &'static str, top: f32| {
+            div()
+                .px(px(Theme::SPACE_SM))
+                .pt(px(top))
+                .pb(px(4.0))
+                .text_size(px(10.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted.opacity(0.45))
+                .child(SharedString::from(label))
         };
         // Match the user's dragged sidebar width — the pane container clips to
         // it, so a hardcoded default here left hover washes stopping short of
@@ -1904,41 +1993,34 @@ impl Shell {
                             .text_color(theme.text_muted.opacity(0.6))
                             .child(SharedString::from("Settings")),
                     )
-                    .child(div().flex().flex_col().gap(px(2.0)).children(
-                        SettingsSection::ALL.into_iter().map(|item| {
-                            let selected = item == section;
-                            div()
-                                .id(SharedString::from(format!("settings-nav-{}", item.label())))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .rounded(px(8.0))
-                                .px(px(Theme::SPACE_SM))
-                                .py(px(6.0))
-                                .text_size(px(13.0))
-                                .when(selected, |el| {
-                                    el.bg(crate::theme::wash(0.17))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                })
-                                .text_color(if selected {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                })
-                                .cursor_pointer()
-                                .hover(|s| s.bg(crate::theme::wash(0.11)).text_color(theme.text))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.open_settings(item, cx)),
-                                )
-                                .child(
-                                    icon(section_icon(item))
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from(item.label()))
-                        }),
-                    )),
+                    .child(nav_label("General", 2.0))
+                    .child(
+                        div().flex().flex_col().gap(px(2.0)).children(
+                            [SettingsSection::Appearance, SettingsSection::Shortcuts]
+                                .into_iter()
+                                .map(&nav_row),
+                        ),
+                    )
+                    .child(nav_label("Pi", 12.0))
+                    .child(
+                        div().flex().flex_col().gap(px(2.0)).children(
+                            [
+                                SettingsSection::PiOverview,
+                                SettingsSection::PiProviders,
+                                SettingsSection::PiPackages,
+                                SettingsSection::PiAdvanced,
+                            ]
+                            .into_iter()
+                            .map(&nav_row),
+                        ),
+                    )
+                    .child(nav_label("Workspace", 12.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(nav_row(SettingsSection::Archived)),
+                    ),
             )
             // Back pinned to the bottom (comet settings-sidebar.tsx).
             .child(

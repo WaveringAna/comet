@@ -1,7 +1,7 @@
 //! Composer pickers (feature-inventory §1.7): RepoPicker (recents + search +
 //! in-app folder browser + clone/create), BranchPicker (search + isolated-
-//! worktree toggle), HarnessModelPicker (harness rail + model list, harness
-//! locked once the chat exists), TraitsPicker (reasoning ladder + advertised
+//! worktree toggle), HarnessModelPicker (provider rail + model list),
+//! TraitsPicker (reasoning ladder + advertised
 //! model options; trigger shows the non-default summary "High · 1M · Fast").
 //!
 //! All selections accumulate into a [`DraftConfig`] the composer threads into
@@ -121,14 +121,25 @@ pub fn default_model(models: &[Model]) -> Option<&Model> {
     models.first()
 }
 
-/// Sort a runtime model catalog for people rather than preserving provider
-/// discovery order: newest numeric version first, then stronger models within
-/// the same version, then the base model before named variants. The final
-/// label/id tie-breakers keep the result stable for equal metadata.
+/// Group a runtime model catalog by provider while preserving Pi's provider
+/// priority (the default provider is emitted first), then sort models within
+/// each provider newest-first. The final tie-breakers keep equal metadata
+/// stable.
 pub fn sort_models(models: &mut [Model]) {
+    let provider_order: HashMap<String, usize> = models
+        .iter()
+        .map(model_provider)
+        .enumerate()
+        .fold(HashMap::new(), |mut order, (ix, provider)| {
+            order.entry(provider.to_string()).or_insert(ix);
+            order
+        });
     models.sort_by(|a, b| {
-        model_version_parts(model_label(b))
-            .cmp(&model_version_parts(model_label(a)))
+        provider_order[model_provider(a)]
+            .cmp(&provider_order[model_provider(b)])
+            .then_with(|| {
+                model_version_parts(model_label(b)).cmp(&model_version_parts(model_label(a)))
+            })
             .then_with(|| max_reasoning(&b).cmp(&max_reasoning(&a)))
             .then_with(|| model_variant_key(model_label(a)).cmp(&model_variant_key(model_label(b))))
             .then_with(|| {
@@ -138,6 +149,38 @@ pub fn sort_models(models: &mut [Model]) {
             })
             .then_with(|| a.id.to_ascii_lowercase().cmp(&b.id.to_ascii_lowercase()))
     });
+}
+
+fn model_provider(model: &Model) -> &str {
+    model
+        .id
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .filter(|provider| !provider.is_empty())
+        .unwrap_or("other")
+}
+
+fn provider_label(provider: &str) -> String {
+    match provider {
+        "openai-codex" => "OpenAI Codex".into(),
+        "openai-compatible" => "OpenAI compatible".into(),
+        "openai" => "OpenAI".into(),
+        "anthropic" => "Anthropic".into(),
+        "github-copilot" => "GitHub Copilot".into(),
+        "google" => "Google Gemini".into(),
+        other => other
+            .split(['-', '_'])
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
 }
 
 fn model_label(model: &Model) -> &str {
@@ -334,6 +377,8 @@ pub struct Pickers {
     open: Option<PickerKind>,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
+    /// Provider tab being browsed. `None` follows the selected model.
+    viewed_provider: Option<String>,
     refs: Loadable<Vec<RepoRef>>,
     /// Project id the `refs` slot belongs to (invalidated on project change).
     refs_project: Option<String>,
@@ -405,6 +450,7 @@ impl Pickers {
                 // a project switch may land on another device, so refetch.
                 this.harnesses = Loadable::Idle;
                 this.models.clear();
+                this.viewed_provider = None;
             }
             cx.notify();
         });
@@ -456,6 +502,7 @@ impl Pickers {
             open,
             harnesses: Loadable::Idle,
             models: HashMap::new(),
+            viewed_provider: None,
             refs: Loadable::Idle,
             refs_project: None,
             active: 0,
@@ -487,11 +534,6 @@ impl Pickers {
 
     pub fn draft(&self) -> &DraftConfig {
         &self.config
-    }
-
-    /// Harness is locked once the chat exists (feature-inventory §1.7).
-    fn harness_locked(&self, cx: &App) -> bool {
-        self.state.read(cx).selected_chat.is_some()
     }
 
     fn engine(&self, cx: &App) -> Option<EngineHandle> {
@@ -662,6 +704,9 @@ impl Pickers {
         });
         // The keyboard-nav highlight starts ON the selected row — row 0
         // otherwise reads as a second active row (user report).
+        if kind == PickerKind::HarnessModel {
+            self.viewed_provider = None;
+        }
         self.active = match kind {
             PickerKind::Checkout => match self.config.checkout {
                 CheckoutKind::Local => 0,
@@ -695,6 +740,10 @@ impl Pickers {
             PickerKind::HarnessModel | PickerKind::Traits => {
                 self.ensure_harnesses(cx);
                 if let Some(harness) = self.effective_harness(cx) {
+                    // Pi reloads models.json when its own model picker opens.
+                    // Mirror that behavior so a provider added in Settings is
+                    // visible without restarting Nova.
+                    self.models.remove(&harness);
                     self.ensure_models(harness, cx);
                 }
             }
@@ -1057,22 +1106,10 @@ impl Pickers {
         cx.notify();
     }
 
-    fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        if self.harness_locked(cx) {
-            return;
-        }
-        if self.config.harness != Some(harness) {
-            // The remembered model for this harness takes over via the
-            // defaults fallback; a foreign pick must not linger.
-            self.config.model = None;
-            self.config.reasoning = None;
-            self.config.model_options.clear();
-        }
-        self.config.harness = Some(harness);
-        self.defaults.harness = Some(harness);
-        self.save_defaults();
+    fn pick_provider(&mut self, provider: String, cx: &mut Context<Self>) {
+        self.viewed_provider = Some(provider);
+        self.active = 0;
         self.model_scroll.set_offset(gpui::Point::default());
-        self.ensure_models(harness, cx);
         cx.notify();
     }
 
@@ -1255,22 +1292,58 @@ impl Pickers {
         }
     }
 
-    /// The viewed harness's model list, when loaded (keyboard nav rows).
-    fn model_rows_len(&self, cx: &App) -> usize {
+    fn provider_ids(&self, cx: &App) -> Vec<String> {
+        let Some(models) = self
+            .effective_harness(cx)
+            .and_then(|h| self.models.get(&h))
+            .and_then(|models| models.ready())
+        else {
+            return Vec::new();
+        };
+        let mut providers = Vec::new();
+        for model in models {
+            let provider = model_provider(model);
+            if !providers.iter().any(|known| known == provider) {
+                providers.push(provider.to_string());
+            }
+        }
+        providers
+    }
+
+    fn effective_provider(&self, cx: &App) -> Option<String> {
+        self.viewed_provider
+            .clone()
+            .or_else(|| {
+                self.selected_model(cx)
+                    .map(model_provider)
+                    .map(str::to_string)
+            })
+            .or_else(|| self.provider_ids(cx).into_iter().next())
+    }
+
+    fn visible_models<'a>(&'a self, cx: &'a App) -> Vec<&'a Model> {
+        let Some(provider) = self.effective_provider(cx) else {
+            return Vec::new();
+        };
         self.effective_harness(cx)
             .and_then(|h| self.models.get(&h))
-            .and_then(|l| l.ready())
-            .map(|m| m.len())
-            .unwrap_or(0)
+            .and_then(|models| models.ready())
+            .into_iter()
+            .flatten()
+            .filter(|model| model_provider(model) == provider)
+            .collect()
+    }
+
+    /// The viewed provider's model list, when loaded (keyboard nav rows).
+    fn model_rows_len(&self, cx: &App) -> usize {
+        self.visible_models(cx).len()
     }
 
     /// Enter on the harness/model popover: pick the highlighted model.
     fn activate_model_row(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self
-            .effective_harness(cx)
-            .and_then(|h| self.models.get(&h))
-            .and_then(|l| l.ready())
-            .and_then(|m| m.get(self.active))
+            .visible_models(cx)
+            .get(self.active)
             .map(|m| m.id.clone())
         else {
             return;
@@ -2008,57 +2081,30 @@ impl Pickers {
             .into_any_element()
     }
 
-    /// The combined harness + model switcher (comet harness-model-picker.tsx):
-    /// a vertical harness rail of square brand-icon tabs on the left, the
-    /// viewed harness's models on the right. On an existing chat the other
-    /// tabs stay visible but disabled — the lock reads as a rule.
+    /// The combined model switcher: Pi is the single production agent, so the
+    /// left rail exposes the useful dimension — providers — and the right pane
+    /// shows that provider's models.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let locked = self.harness_locked(cx);
-        let effective = self.effective_harness(cx);
+        let effective_harness = self.effective_harness(cx);
+        let effective_provider = self.effective_provider(cx);
         let model_scroll = self.model_scroll.clone();
 
-        let rail: AnyElement = match &self.harnesses {
-            Loadable::Loading | Loadable::Idle => div()
-                .p(px(4.0))
-                .child(popover::skeleton_rows("harness-skeleton", &theme, 3))
-                .into_any_element(),
-            Loadable::Error(message) => {
-                let message = message.clone();
-                self.retry_row(
-                    "harness-retry",
-                    &message,
-                    PickerKind::HarnessModel,
-                    &theme,
-                    cx,
-                )
-            }
-            Loadable::Ready(list) => {
-                let mut descriptors: Vec<HarnessDescriptor> = visible_harnesses(list);
-                // The committed harness always gets its rail tab, even when
-                // it's the (normally hidden) mock harness of a dev session.
-                if let Some(effective) = effective
-                    && !descriptors.iter().any(|d| d.id == effective)
-                    && let Some(descriptor) = list.iter().find(|d| d.id == effective)
-                {
-                    descriptors.insert(0, descriptor.clone());
-                }
-                // Vertical agents rail (the palette's Devices-rail language):
-                // brand icon + name per row, active carries the glass ring.
+        let rail: AnyElement = match effective_harness.and_then(|h| self.models.get(&h)) {
+            Some(Loadable::Ready(_)) => {
+                let providers = self.provider_ids(cx);
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
                     .p(px(4.0))
-                    .child(popover::menu_heading(&theme, "Agents"))
-                    .children(descriptors.into_iter().enumerate().map(|(ix, descriptor)| {
-                        let harness = descriptor.id;
-                        let is_viewed = effective == Some(harness);
-                        let is_disabled = locked && !is_viewed;
-                        let (icon_path, tint) = harness_brand_icon(harness);
-                        let name: SharedString = descriptor.name.clone().into();
+                    .child(popover::menu_heading(&theme, "Providers"))
+                    .children(providers.into_iter().enumerate().map(|(ix, provider)| {
+                        let is_viewed = effective_provider.as_deref() == Some(provider.as_str());
+                        let label: SharedString = provider_label(&provider).into();
+                        let icon_path = provider_brand_icon(&provider);
                         div()
-                            .id(("harness-tab", ix))
+                            .id(("provider-tab", ix))
                             .h(px(30.0))
                             .px(px(8.0))
                             .flex()
@@ -2077,111 +2123,116 @@ impl Pickers {
                                 el.bg(crate::theme::glass_selected_bg())
                                     .shadow(crate::theme::glass_selected_shadows())
                             })
-                            .when(is_disabled, |el| el.opacity(0.35))
-                            .when(!is_disabled, |el| {
-                                el.cursor_pointer()
-                                    .hover(|s| s.bg(crate::theme::white_alpha(0.06)))
-                            })
+                            .cursor_pointer()
+                            .hover(|s| s.bg(crate::theme::white_alpha(0.06)))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.pick_harness(harness, cx);
+                                this.pick_provider(provider.clone(), cx);
                             }))
                             .child(
                                 crate::icons::icon(icon_path)
                                     .size(px(16.0))
                                     .flex_none()
-                                    .text_color(tint.unwrap_or(if is_viewed {
+                                    .text_color(if is_viewed {
                                         theme.text
                                     } else {
                                         theme.text_muted
-                                    })),
+                                    }),
                             )
-                            .child(div().min_w_0().truncate().child(name))
+                            .child(div().min_w_0().truncate().child(label))
                     }))
                     .into_any_element()
             }
+            Some(Loadable::Error(_)) => div()
+                .p(px(4.0))
+                .child(popover::menu_heading(&theme, "Providers"))
+                .into_any_element(),
+            _ => div()
+                .p(px(4.0))
+                .child(popover::menu_heading(&theme, "Providers"))
+                .child(popover::skeleton_rows("provider-skeleton", &theme, 3))
+                .into_any_element(),
         };
-
-        let _ = locked; // the lock still dims foreign rail rows above
 
         // The rows are collected FLAT — they become the scroll container's
         // direct children so `scroll_to_item(active)` maps 1:1 (the palette's
         // keyboard-follow standard).
-        let model_children: Vec<AnyElement> = match effective.map(|h| (h, self.models.get(&h))) {
-            Some((_, Some(Loadable::Ready(models)))) => {
-                // The check mirrors the chip: the resolved concrete pick (draft
-                // / chat config / remembered, else the harness default row).
-                let selected = self.selected_model(cx).map(|m| m.id.clone());
-                let active = self.active;
-                let models = models.clone();
-                models
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, model)| {
-                        let label: SharedString = model.label.clone().into();
-                        let description: Option<SharedString> =
-                            model.description.clone().map(Into::into);
-                        let id = model.id.clone();
-                        let is_selected = selected.as_deref() == Some(model.id.as_str())
-                            || (selected.is_none() && ix == 0);
-                        popover::menu_row_nav(
-                            &theme,
-                            is_selected,
-                            ix == active,
-                            format!("model-row-{ix}"),
-                        )
-                        .when(is_selected || ix == active, |el| {
-                            el.shadow(crate::theme::glass_selected_shadows())
+        let model_children: Vec<AnyElement> =
+            match effective_harness.map(|h| (h, self.models.get(&h))) {
+                Some((_, Some(Loadable::Ready(_)))) => {
+                    // The check mirrors the chip: the resolved concrete pick (draft
+                    // / chat config / remembered, else the harness default row).
+                    let selected = self.selected_model(cx).map(|m| m.id.clone());
+                    let active = self.active;
+                    let models: Vec<Model> = self.visible_models(cx).into_iter().cloned().collect();
+                    models
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, model)| {
+                            let label: SharedString = model.label.clone().into();
+                            let description: Option<SharedString> =
+                                model.description.clone().map(Into::into);
+                            let id = model.id.clone();
+                            let is_selected = selected.as_deref() == Some(model.id.as_str())
+                                || (selected.is_none() && ix == 0);
+                            popover::menu_row_nav(
+                                &theme,
+                                is_selected,
+                                ix == active,
+                                format!("model-row-{ix}"),
+                            )
+                            .when(is_selected || ix == active, |el| {
+                                el.shadow(crate::theme::glass_selected_shadows())
+                            })
+                            .id(("model-row", ix))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pick_model(id.clone(), cx);
+                            }))
+                            .child(
+                                // Name + 11px muted description subline, per
+                                // harness-model-picker.tsx (`min-w-0 flex-1` column).
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().w_full().truncate().child(label))
+                                    .when_some(description, |el, description| {
+                                        el.child(
+                                            div()
+                                                .w_full()
+                                                .truncate()
+                                                .text_size(px(11.0))
+                                                .text_color(theme.text_muted.opacity(0.7))
+                                                .child(description),
+                                        )
+                                    }),
+                            )
+                            .when(is_selected, |el| el.child(popover::menu_check(&theme)))
+                            .into_any_element()
                         })
-                        .id(("model-row", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.pick_model(id.clone(), cx);
-                        }))
-                        .child(
-                            // Name + 11px muted description subline, per
-                            // harness-model-picker.tsx (`min-w-0 flex-1` column).
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .child(div().w_full().truncate().child(label))
-                                .when_some(description, |el, description| {
-                                    el.child(
-                                        div()
-                                            .w_full()
-                                            .truncate()
-                                            .text_size(px(11.0))
-                                            .text_color(theme.text_muted.opacity(0.7))
-                                            .child(description),
-                                    )
-                                }),
-                        )
-                        .when(is_selected, |el| el.child(popover::menu_check(&theme)))
-                        .into_any_element()
-                    })
-                    .collect()
-            }
-            Some((_, Some(Loadable::Error(message)))) => {
-                let message = message.clone();
-                vec![self.retry_row(
-                    "model-retry",
-                    &message,
-                    PickerKind::HarnessModel,
-                    &theme,
-                    cx,
-                )]
-            }
-            _ => vec![
-                div()
-                    .px(px(8.0))
-                    .py(px(24.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted.opacity(0.6))
-                    .text_center()
-                    .child(SharedString::from("Loading models…"))
-                    .into_any_element(),
-            ],
-        };
+                        .collect()
+                }
+                Some((_, Some(Loadable::Error(message)))) => {
+                    let message = message.clone();
+                    vec![self.retry_row(
+                        "model-retry",
+                        &message,
+                        PickerKind::HarnessModel,
+                        &theme,
+                        cx,
+                    )]
+                }
+                _ => vec![
+                    div()
+                        .px(px(8.0))
+                        .py(px(24.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted.opacity(0.6))
+                        .text_center()
+                        .child(SharedString::from("Loading models…"))
+                        .into_any_element(),
+                ],
+            };
 
         // One combined menu (user request): harness tabs across the top,
         // then the viewed harness's models, then the reasoning ladder and
@@ -2447,6 +2498,14 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         ),
         HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
         HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
+    }
+}
+
+fn provider_brand_icon(provider: &str) -> &'static str {
+    match provider {
+        "openai" | "openai-codex" | "openai-compatible" => crate::icons::OPENAI_MARK,
+        "anthropic" => crate::icons::CLAUDE_MARK,
+        _ => crate::icons::GLOBAL,
     }
 }
 
@@ -3015,6 +3074,38 @@ mod tests {
                 "gpt-5.4",
                 "gpt-5.4-mini",
                 "gpt-5.3-codex-spark",
+            ]
+        );
+    }
+
+    #[test]
+    fn model_catalog_groups_providers_in_pi_priority_order() {
+        let model = |id: &str| Model {
+            id: id.into(),
+            label: id.split_once('/').unwrap().1.into(),
+            description: Some(id.split_once('/').unwrap().0.into()),
+            reasoning_levels: vec![],
+            options: vec![],
+        };
+        let mut models = vec![
+            model("openai-codex/gpt-5.4"),
+            model("deepseek/deepseek-v4-pro"),
+            model("openai-codex/gpt-5.6-sol"),
+            model("deepseek/deepseek-v4-flash"),
+        ];
+
+        sort_models(&mut models);
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "openai-codex/gpt-5.6-sol",
+                "openai-codex/gpt-5.4",
+                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-v4-pro",
             ]
         );
     }

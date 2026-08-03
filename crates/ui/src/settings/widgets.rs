@@ -230,19 +230,27 @@ pub fn error_strip(message: impl Into<SharedString>) -> gpui::Div {
 /// The amber warning strip (`flex items-start gap-2 border-amber-400/20
 /// bg-amber-400/[0.06] text-amber-200/90` with a leading `DangerTriangle
 /// mt-0.5 size-3.5`).
-pub fn warning_strip(message: impl Into<SharedString>) -> gpui::Div {
-    let amber = crate::theme::oklch(0.828, 0.189, 84.429); // amber-400
-    let amber_text = crate::theme::oklch(0.924, 0.12, 95.746); // amber-200
+pub fn warning_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div {
+    // Dark uses a luminous amber-200 foreground on the near-black surface.
+    // That same token nearly disappears on light mode, so light uses the
+    // theme's amber-700 role at full opacity. Border/fill stay chromatically
+    // related but gain a little more ink against the pale panel.
+    let amber = theme.warning;
+    let (amber_text, border_alpha, fill_alpha) = if theme.scheme.is_dark() {
+        (crate::theme::oklch(0.924, 0.12, 95.746), 0.2, 0.06) // amber-200
+    } else {
+        (theme.warning, 0.28, 0.09) // amber-700
+    };
     div()
         .mt(px(8.0))
         .px(px(16.0))
         .py(px(10.0))
         .rounded(px(12.0))
         .border_1()
-        .border_color(amber.opacity(0.2))
-        .bg(amber.opacity(0.06))
+        .border_color(amber.opacity(border_alpha))
+        .bg(amber.opacity(fill_alpha))
         .text_size(px(12.0))
-        .text_color(amber_text.opacity(0.9))
+        .text_color(amber_text)
         .flex()
         .flex_row()
         .items_start()

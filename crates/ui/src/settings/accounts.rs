@@ -1348,7 +1348,7 @@ impl Render for AccountsPage {
                             .children(
                                 warnings
                                     .into_iter()
-                                    .map(|warning| widgets::warning_strip(warning)),
+                                    .map(|warning| widgets::warning_strip(&theme, warning)),
                             )
                             .child(card)
                             .into_any_element()

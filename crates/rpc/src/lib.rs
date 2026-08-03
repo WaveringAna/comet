@@ -90,6 +90,14 @@ pub mod methods {
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
     pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
+    // Pi runtime settings (ControlRpc, relay-forwardable — configuration and
+    // credentials belong to the device that launches Pi).
+    pub const GET_PI_SETTINGS: &str = "GetPiSettings";
+    pub const SET_PI_SETTING: &str = "SetPiSetting";
+    pub const SET_PI_CREDENTIAL: &str = "SetPiCredential";
+    pub const REMOVE_PI_CREDENTIAL: &str = "RemovePiCredential";
+    pub const SET_PI_OPENAI_COMPATIBLE: &str = "SetPiOpenAiCompatible";
+    pub const PI_PACKAGE_ACTION: &str = "PiPackageAction";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";

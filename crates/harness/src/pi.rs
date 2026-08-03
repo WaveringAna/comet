@@ -27,7 +27,10 @@ use comet_proto::{
 
 use crate::{Harness, HarnessError, RunControls, SteerMessage};
 
-fn resolve_pi_executable() -> Option<PathBuf> {
+/// Resolve the Pi CLI exactly as the harness does. The engine's settings
+/// management surface reuses this so diagnostics and package actions never
+/// disagree with the executable a session will launch.
+pub fn resolve_pi_executable() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PI_EXECUTABLE").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }

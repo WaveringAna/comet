@@ -53,13 +53,14 @@ use serde::Deserialize;
 use tokio::sync::watch;
 
 use comet_doc::SessionCommandPayload;
-use comet_proto::{ChatConfig, HarnessId};
+use comet_proto::{ChatConfig, HarnessId, PiSettingsScope};
 use comet_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
+use crate::pi_management::PiManagement;
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, home_dir};
 use crate::sessions::SessionsEngine;
@@ -206,6 +207,74 @@ struct CompleteAgentLoginParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PiSettingsParams {
+    #[serde(default = "global_pi_scope")]
+    scope: PiSettingsScope,
+    #[serde(default)]
+    project_path: Option<String>,
+}
+
+fn global_pi_scope() -> PiSettingsScope {
+    PiSettingsScope::Global
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetPiSettingParams {
+    #[serde(default = "global_pi_scope")]
+    scope: PiSettingsScope,
+    #[serde(default)]
+    project_path: Option<String>,
+    key: String,
+    value: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetPiCredentialParams {
+    #[serde(default = "global_pi_scope")]
+    scope: PiSettingsScope,
+    #[serde(default)]
+    project_path: Option<String>,
+    provider: String,
+    key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemovePiCredentialParams {
+    #[serde(default = "global_pi_scope")]
+    scope: PiSettingsScope,
+    #[serde(default)]
+    project_path: Option<String>,
+    provider: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetPiOpenAiCompatibleParams {
+    #[serde(default = "global_pi_scope")]
+    scope: PiSettingsScope,
+    #[serde(default)]
+    project_path: Option<String>,
+    base_url: String,
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PiPackageActionParams {
+    #[serde(default = "global_pi_scope")]
+    scope: PiSettingsScope,
+    #[serde(default)]
+    project_path: Option<String>,
+    action: String,
+    source: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UploadChunkParams {
     upload_id: String,
     /// Base64 payload chunk.
@@ -329,6 +398,7 @@ pub struct EngineRpc {
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
     agent_accounts: AgentAccounts,
+    pi_management: PiManagement,
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<comet_update::Updater>,
@@ -357,6 +427,7 @@ impl EngineRpc {
             diff_sync,
             uploads,
             agent_accounts,
+            pi_management: PiManagement,
             auth: None,
             links: None,
             updater: None,
@@ -588,6 +659,13 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            // Pi configuration, credentials, and packages are device-local.
+            | methods::GET_PI_SETTINGS
+            | methods::SET_PI_SETTING
+            | methods::SET_PI_CREDENTIAL
+            | methods::REMOVE_PI_CREDENTIAL
+            | methods::SET_PI_OPENAI_COMPATIBLE
+            | methods::PI_PACKAGE_ACTION
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -749,6 +827,11 @@ impl RpcService for EngineRpc {
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
+                if p.harness == HarnessId::Pi
+                    && let Err(error) = self.pi_management.refresh_openai_compatible().await
+                {
+                    tracing::warn!(%error, "OpenAI-compatible model registry refresh failed; using last saved registry");
+                }
                 let harness = self
                     .registry
                     .resolve(p.harness)
@@ -1033,6 +1116,65 @@ impl RpcService for EngineRpc {
                 let p: LoginIdParams = parse_params(params)?;
                 self.agent_accounts.cancel_login(&p.login_id);
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::GET_PI_SETTINGS => {
+                let p: PiSettingsParams = parse_params(params)?;
+                let snapshot = self
+                    .pi_management
+                    .snapshot(p.scope, p.project_path.as_deref())
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&snapshot)
+            }
+            methods::SET_PI_SETTING => {
+                let p: SetPiSettingParams = parse_params(params)?;
+                let snapshot = self
+                    .pi_management
+                    .set_setting(p.scope, p.project_path.as_deref(), &p.key, p.value)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&snapshot)
+            }
+            methods::SET_PI_CREDENTIAL => {
+                let p: SetPiCredentialParams = parse_params(params)?;
+                let snapshot = self
+                    .pi_management
+                    .set_api_key(&p.provider, &p.key, p.project_path.as_deref(), p.scope)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&snapshot)
+            }
+            methods::REMOVE_PI_CREDENTIAL => {
+                let p: RemovePiCredentialParams = parse_params(params)?;
+                let snapshot = self
+                    .pi_management
+                    .remove_credential(&p.provider, p.project_path.as_deref(), p.scope)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&snapshot)
+            }
+            methods::SET_PI_OPENAI_COMPATIBLE => {
+                let p: SetPiOpenAiCompatibleParams = parse_params(params)?;
+                let snapshot = self
+                    .pi_management
+                    .set_openai_compatible(
+                        &p.base_url,
+                        p.api_key.as_deref(),
+                        p.project_path.as_deref(),
+                        p.scope,
+                    )
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&snapshot)
+            }
+            methods::PI_PACKAGE_ACTION => {
+                let p: PiPackageActionParams = parse_params(params)?;
+                let snapshot = self
+                    .pi_management
+                    .package_action(&p.action, &p.source, p.scope, p.project_path.as_deref())
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&snapshot)
             }
             methods::UPLOAD_CHUNK => {
                 let p: UploadChunkParams = parse_params(params)?;

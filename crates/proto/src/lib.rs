@@ -7,7 +7,9 @@
 pub mod agent;
 pub mod entities;
 pub mod motion;
+pub mod pi_settings;
 pub mod view;
 
 pub use agent::*;
 pub use entities::*;
+pub use pi_settings::*;
