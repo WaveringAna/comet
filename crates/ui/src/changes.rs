@@ -42,6 +42,8 @@ pub const HUNK_HEADER_HEIGHT: f32 = 28.0;
 pub const DIFF_LINE_HEIGHT: f32 = 21.0;
 pub const NOTICE_HEIGHT: f32 = 24.0;
 pub const BODY_BOTTOM_PAD: f32 = 8.0;
+/// Keeps diff gutters legible before a long code row expands the scroller.
+const DIFF_MIN_CONTENT_WIDTH: f32 = 720.0;
 /// Gutter width per line-number column.
 pub const GUTTER_WIDTH: f32 = 36.0;
 /// The +/−/· marker column between the gutters and the code.
@@ -324,6 +326,188 @@ pub fn body_height(file: &FileDiff) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Reading diff (Meat-style mechanical first pass, inspired by
+// https://github.com/boldsoftware/meat; Apache-2.0 attribution in LICENSE.)
+// ---------------------------------------------------------------------------
+
+/// A deliberately conservative, deterministic first pass for a reading diff.
+///
+/// Meat's useful insight is that reviewers need behavior, not scaffolding. The
+/// engine already supplies the authoritative checkout patch, so this pass keeps
+/// every changed non-scaffolding line intact while removing generated outputs,
+/// imports, and ordinary diff context. It never invents or rewrites code. That
+/// makes the Review pane immediately useful offline and keeps its result safe
+/// to read while a future model-backed pass remains an additive enhancement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadingDiff {
+    /// The behavior-bearing reading view.
+    pub files: Vec<FileDiff>,
+    /// The complementary rows omitted from `files`.
+    pub elided_files: Vec<FileDiff>,
+    pub hidden_files: usize,
+    pub elided_lines: usize,
+    pub elisions: Vec<Elision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Elision {
+    pub path: String,
+    pub lines: usize,
+}
+
+fn is_generated_path(path: &str) -> bool {
+    matches!(
+        path.rsplit('/').next().unwrap_or(path),
+        "Cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "bun.lockb"
+    ) || path.contains("/dist/")
+        || path.contains("/generated/")
+}
+
+fn is_import_start(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("use ")
+        || line.starts_with("import ")
+        || line.starts_with("from ")
+        || line.starts_with("#include")
+        || line.starts_with("require(")
+}
+
+fn is_generated_banner(line: &str) -> bool {
+    // These markers occur in generated-file headers, not merely anywhere in a
+    // source line. Matching the whole line would classify implementation code
+    // that mentions the marker (including this detector) as generated.
+    let line = line.trim_start();
+    let comment = line
+        .strip_prefix("//")
+        .or_else(|| line.strip_prefix('#'))
+        .or_else(|| line.strip_prefix("/*"))
+        .map(str::trim_start)
+        .unwrap_or("");
+    comment.starts_with("@generated")
+        || comment.starts_with("Code generated")
+        || comment.starts_with("DO NOT EDIT")
+}
+
+fn is_generated_file(file: &FileDiff) -> bool {
+    is_generated_path(&file.path)
+        || file
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|line| is_generated_banner(&line.text))
+}
+
+/// Reduce a parsed patch to code-shaped, behavior-bearing rows. The original
+/// parsed patch remains untouched, so switching back to Full is instantaneous.
+pub fn abridge_files(files: &[FileDiff]) -> ReadingDiff {
+    let mut abridged = Vec::new();
+    let mut elided_files = Vec::new();
+    let mut hidden_files = 0;
+    let mut elided_lines = 0;
+    let mut elisions = Vec::new();
+
+    for file in files {
+        if is_generated_file(file) {
+            let lines = file.hunks.iter().map(|h| h.lines.len()).sum::<usize>();
+            hidden_files += 1;
+            elided_lines += lines;
+            elisions.push(Elision {
+                path: file.path.clone(),
+                lines,
+            });
+            elided_files.push(file.clone());
+            continue;
+        }
+
+        let mut hidden_in_file = 0;
+        let mut out = file.clone();
+        let mut omitted = file.clone();
+        out.hunks.clear();
+        omitted.hunks.clear();
+        out.additions = 0;
+        out.deletions = 0;
+        omitted.additions = 0;
+        omitted.deletions = 0;
+        for hunk in &file.hunks {
+            let mut kept = Hunk {
+                header: hunk.header.clone(),
+                lines: Vec::new(),
+            };
+            let mut omitted_hunk = Hunk {
+                header: hunk.header.clone(),
+                lines: Vec::new(),
+            };
+            let mut import_block = false;
+            for line in &hunk.lines {
+                let source = line.text.trim_start();
+                // Rust/Go multiline imports: once an added/removed `use` or
+                // `import (` starts, hide its same-polarity members through the
+                // closing parenthesis. Context is always scaffolding here.
+                let hidden = if is_import_start(source) {
+                    import_block = source.ends_with('(') || source == "import (";
+                    true
+                } else if import_block && matches!(line.kind, LineKind::Add | LineKind::Del) {
+                    if source == ")" {
+                        import_block = false;
+                    }
+                    true
+                } else {
+                    import_block = false;
+                    matches!(line.kind, LineKind::Context)
+                };
+                if hidden {
+                    hidden_in_file += 1;
+                    match line.kind {
+                        LineKind::Add => omitted.additions += 1,
+                        LineKind::Del => omitted.deletions += 1,
+                        _ => {}
+                    }
+                    omitted_hunk.lines.push(line.clone());
+                } else {
+                    match line.kind {
+                        LineKind::Add => out.additions += 1,
+                        LineKind::Del => out.deletions += 1,
+                        _ => {}
+                    }
+                    kept.lines.push(line.clone());
+                }
+            }
+            if kept
+                .lines
+                .iter()
+                .any(|line| matches!(line.kind, LineKind::Add | LineKind::Del))
+            {
+                out.hunks.push(kept);
+            }
+            if !omitted_hunk.lines.is_empty() {
+                omitted.hunks.push(omitted_hunk);
+            }
+        }
+        if out.hunks.is_empty() && !file.binary {
+            hidden_files += 1;
+        } else {
+            abridged.push(out);
+        }
+        if hidden_in_file > 0 {
+            elided_lines += hidden_in_file;
+            elisions.push(Elision {
+                path: file.path.clone(),
+                lines: hidden_in_file,
+            });
+            elided_files.push(omitted);
+        }
+    }
+
+    ReadingDiff {
+        files: abridged,
+        elided_files,
+        hidden_files,
+        elided_lines,
+        elisions,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resolution + states (pure)
 // ---------------------------------------------------------------------------
 
@@ -425,6 +609,7 @@ struct ParsedDiff {
     deletions: u32,
     file_count: usize,
     files: Arc<Vec<FileDiff>>,
+    reading: Arc<ReadingDiff>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -490,6 +675,10 @@ pub struct Changes {
     parse_task: Option<Task<()>>,
     folds: HashMap<String, FileFold>,
     highlights: HashMap<String, HighlightSlot>,
+    /// False = literal unified patch; true = Meat-style reading diff.
+    reading_mode: bool,
+    /// Within reading mode, show the complement rather than the kept rows.
+    showing_elisions: bool,
     list: ListState,
     _observe: Subscription,
 }
@@ -508,6 +697,8 @@ impl Changes {
             parse_task: None,
             folds: HashMap::new(),
             highlights: HashMap::new(),
+            reading_mode: true,
+            showing_elisions: false,
             list: ListState::new(0, ListAlignment::Top, px(320.0)),
             _observe: observe,
         }
@@ -659,7 +850,17 @@ impl Changes {
                 } else {
                     files.len()
                 };
-                changes.list.reset(files.len());
+                let reading = Arc::new(abridge_files(&files));
+                let visible_count = if changes.reading_mode {
+                    if changes.showing_elisions {
+                        reading.elided_files.len()
+                    } else {
+                        reading.files.len()
+                    }
+                } else {
+                    files.len()
+                };
+                changes.list.reset(visible_count);
                 changes.folds.clear();
                 changes.highlights.clear();
                 changes.parsed = Some(ParsedDiff {
@@ -669,11 +870,48 @@ impl Changes {
                     deletions,
                     file_count,
                     files: Arc::new(files),
+                    reading,
                 });
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    fn set_reading_mode(&mut self, reading_mode: bool, cx: &mut Context<Self>) {
+        if self.reading_mode == reading_mode {
+            return;
+        }
+        self.reading_mode = reading_mode;
+        self.showing_elisions = false;
+        if let Some(parsed) = &self.parsed {
+            let count = if reading_mode {
+                parsed.reading.files.len()
+            } else {
+                parsed.files.len()
+            };
+            self.list.reset(count);
+        }
+        self.folds.clear();
+        self.highlights.clear();
+        cx.notify();
+    }
+
+    fn toggle_elisions(&mut self, cx: &mut Context<Self>) {
+        let Some(parsed) = &self.parsed else {
+            return;
+        };
+        self.reading_mode = true;
+        self.showing_elisions = !self.showing_elisions;
+        let count = if self.showing_elisions {
+            parsed.reading.elided_files.len()
+        } else {
+            parsed.reading.files.len()
+        };
+        self.list.reset(count);
+        self.folds.clear();
+        self.highlights.clear();
+        cx.notify();
     }
 
     fn toggle_fold(&mut self, path: &str, expanded_height: f32) {
@@ -766,8 +1004,28 @@ impl Changes {
         let Some(parsed) = &self.parsed else {
             return gpui::Empty.into_any_element();
         };
-        let files = parsed.files.clone();
-        let parsed_key = parsed.key.clone();
+        let files = if self.reading_mode {
+            Arc::new(if self.showing_elisions {
+                parsed.reading.elided_files.clone()
+            } else {
+                parsed.reading.files.clone()
+            })
+        } else {
+            parsed.files.clone()
+        };
+        let parsed_key = if self.reading_mode {
+            format!(
+                "{}:{}",
+                parsed.key,
+                if self.showing_elisions {
+                    "elisions"
+                } else {
+                    "reading"
+                }
+            )
+        } else {
+            parsed.key.clone()
+        };
         let Some(file) = files.get(ix) else {
             return gpui::Empty.into_any_element();
         };
@@ -914,8 +1172,54 @@ impl Changes {
             .into_any_element()
     }
 
-    fn render_header_strip(&self, theme: &Theme) -> Option<AnyElement> {
+    fn render_header_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let parsed = self.parsed.as_ref()?;
+        let reading_mode = self.reading_mode;
+        let showing_elisions = self.showing_elisions;
+        let reading = parsed.reading.clone();
+        let has_elisions = !reading.elided_files.is_empty();
+        let full_button = div()
+            .id("diff-full")
+            .h(px(24.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .rounded(px(5.0))
+            .text_size(px(10.5))
+            .cursor_pointer()
+            .bg(if !reading_mode {
+                crate::theme::wash(0.10)
+            } else {
+                crate::theme::wash(0.025)
+            })
+            .text_color(if !reading_mode {
+                theme.text
+            } else {
+                theme.text_faint
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.set_reading_mode(false, cx)))
+            .child("Full diff");
+        let meat_button = div()
+            .id("diff-reading")
+            .h(px(24.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .rounded(px(5.0))
+            .text_size(px(10.5))
+            .cursor_pointer()
+            .bg(if reading_mode {
+                crate::theme::wash(0.10)
+            } else {
+                crate::theme::wash(0.025)
+            })
+            .text_color(if reading_mode {
+                theme.text
+            } else {
+                theme.text_faint
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.set_reading_mode(true, cx)))
+            .child("Reading diff");
         Some(
             div()
                 .flex_none()
@@ -931,7 +1235,18 @@ impl Changes {
                     div()
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(uncommitted_label(parsed.file_count))),
+                        .child(SharedString::from(if reading_mode {
+                            if showing_elisions {
+                                format!(
+                                    "{} files elided from reading diff",
+                                    reading.elided_files.len()
+                                )
+                            } else {
+                                format!("{} files to review", reading.files.len())
+                            }
+                        } else {
+                            uncommitted_label(parsed.file_count)
+                        })),
                 )
                 .child(
                     div()
@@ -948,6 +1263,35 @@ impl Changes {
                         .child(SharedString::from(format!("−{}", parsed.deletions))),
                 )
                 .child(div().flex_1())
+                .when(reading_mode && has_elisions, |el| {
+                    let label = if showing_elisions {
+                        "Back to reading diff".to_string()
+                    } else {
+                        format!(
+                            "Show {} elided lines in {} files",
+                            reading.elided_lines,
+                            reading.elided_files.len()
+                        )
+                    };
+                    el.child(
+                        div()
+                            .id("toggle-elisions")
+                            .h(px(24.0))
+                            .px(px(7.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(5.0))
+                            .cursor_pointer()
+                            .bg(crate::theme::wash(0.025))
+                            .hover(|style| style.bg(crate::theme::wash(0.07)))
+                            .text_size(px(10.0))
+                            .text_color(theme.text_faint)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_elisions(cx)))
+                            .child(SharedString::from(label)),
+                    )
+                })
+                .child(full_button)
+                .child(meat_button)
                 .when(parsed.truncated, |el| {
                     el.child(
                         div()
@@ -1148,11 +1492,12 @@ fn render_file_body(
                             .font_family(theme.font_mono.clone())
                             .child(SharedString::from(marker)),
                     )
+                    // Do not shrink or clip source text: the containing body
+                    // is an x-scroll viewport, so its intrinsic width creates
+                    // the horizontal range for long lines.
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
+                            .flex_none()
                             .pl(px(12.0))
                             .font_family(theme.font_mono.clone())
                             .text_size(px(DIFF_TEXT_SIZE))
@@ -1164,11 +1509,21 @@ fn render_file_body(
         }
     }
 
+    // The vertical file list owns y-scrolling; each expanded body owns only
+    // x-scrolling so long source lines remain readable without affecting its
+    // virtualization or fold height.
     div()
-        .flex()
-        .flex_col()
-        .pb(px(BODY_BOTTOM_PAD))
-        .children(children)
+        .id(SharedString::from(format!("diff-body-{}", file.path)))
+        .w_full()
+        .overflow_x_scroll()
+        .child(
+            div()
+                .min_w(px(DIFF_MIN_CONTENT_WIDTH))
+                .flex()
+                .flex_col()
+                .pb(px(BODY_BOTTOM_PAD))
+                .children(children),
+        )
         .into_any_element()
 }
 
@@ -1221,7 +1576,7 @@ impl Render for Changes {
                         .min_h_0()
                         .flex()
                         .flex_col()
-                        .children(self.render_header_strip(&theme))
+                        .children(self.render_header_strip(&theme, cx))
                         .child(
                             list(self.list.clone(), cx.processor(Self::render_row))
                                 .flex_1()
@@ -1400,6 +1755,77 @@ rename to new_name.rs
         assert_eq!(parse_hunk_header("@@ -1,4 +2,5 @@"), Some((1, 2)));
         assert_eq!(parse_hunk_header("@@ -7 +9 @@ fn ctx"), Some((7, 9)));
         assert_eq!(parse_hunk_header("@@ garbage"), None);
+    }
+
+    #[test]
+    fn reading_diff_removes_context_imports_and_generated_outputs() {
+        let patch = "\
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,5 +1,6 @@
+ use old::Thing;
+-use old::Thing;
++use new::Thing;
+ fn run() {
+-    old_call();
++    new_call(Thing);
+ }
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1 +1 @@
+-old-lock
++new-lock
+";
+        let reading = abridge_files(&parse_patch(patch));
+        assert_eq!(reading.hidden_files, 1);
+        assert_eq!(reading.files.len(), 1);
+        assert_eq!(reading.files[0].hunks.len(), 1);
+        assert_eq!(reading.files[0].hunks[0].lines.len(), 2);
+        assert!(
+            reading.files[0].hunks[0]
+                .lines
+                .iter()
+                .all(|line| !line.text.contains("use "))
+        );
+        assert_eq!(reading.files[0].additions, 1);
+        assert_eq!(reading.files[0].deletions, 1);
+        assert_eq!(
+            reading.elisions,
+            vec![
+                Elision {
+                    path: "src/lib.rs".to_string(),
+                    lines: 5,
+                },
+                Elision {
+                    path: "Cargo.lock".to_string(),
+                    lines: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn generated_banner_must_be_a_comment_header() {
+        let patch = "\
+diff --git a/src/check.rs b/src/check.rs
+--- a/src/check.rs
++++ b/src/check.rs
+@@ -1 +1 @@
+-let generated = false;
++let generated = line.text.contains(\"Code generated\");
+diff --git a/out.rs b/out.rs
+--- a/out.rs
++++ b/out.rs
+@@ -1 +1 @@
+-// old
++// Code generated by tool. DO NOT EDIT.
+";
+        let reading = abridge_files(&parse_patch(patch));
+        assert_eq!(reading.files.len(), 1);
+        assert_eq!(reading.files[0].path, "src/check.rs");
+        assert_eq!(reading.hidden_files, 1);
     }
 
     #[test]
