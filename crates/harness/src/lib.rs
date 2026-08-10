@@ -1,4 +1,4 @@
-//! comet-harness — one interface over pi / Claude Code / Codex (and a mock for tests).
+//! nova-harness — one interface over pi / Claude Code / Codex (and a mock for tests).
 //!
 //! Integration decisions (docs/research/harness.md):
 //! - Claude Code: spawn the installed `claude` CLI with
@@ -13,7 +13,7 @@ use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
-use comet_proto::{
+use nova_proto::{
     AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode, UserInputAnswer,
     UserInputQuestion,
 };
@@ -147,7 +147,7 @@ pub(crate) fn prepend_exe_dir_to_path(cmd: &mut tokio::process::Command, exe: &s
 /// Rolling tail of a child's stderr, shared between the reader task and the
 /// crash-message composer: an unexpected exit surfaces "<name> exited
 /// unexpectedly (<status>): <last stderr lines>" instead of a bare shrug —
-/// the proper background-crash message old comet showed (user requirement).
+/// the proper background-crash message old nova showed (user requirement).
 #[derive(Clone, Default)]
 pub(crate) struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
 

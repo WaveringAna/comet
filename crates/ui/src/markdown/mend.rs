@@ -12,7 +12,7 @@
 //! flip when the row completes — instead of jittering throughout.
 //!
 //! Repairs, in the spirit of remend's handler set (its katex/html/comparison
-//! handlers don't apply here — comet renders raw HTML literally and has no
+//! handlers don't apply here — nova renders raw HTML literally and has no
 //! math):
 //! - emphasis parity: `**a`→`**a**`, `*a`→`*a*`, `_a`/`__a`, `~~a`, nested
 //!   closers innermost-first (`**a *b` → `**a *b***`), half-streamed closers
@@ -43,7 +43,7 @@
 
 /// Sentinel destination for a link whose URL is still streaming. The renderer
 /// styles it like any link but must not register it as clickable.
-pub const PENDING_LINK_URL: &str = "comet:pending-link";
+pub const PENDING_LINK_URL: &str = "nova:pending-link";
 
 /// One unclosed emphasis-family delimiter run (`*`, `_`, or `~~`).
 struct OpenDelim {
@@ -176,7 +176,7 @@ pub fn close_hanging(text: &str) -> Option<String> {
     {
         pending.push((open, format!("]({PENDING_LINK_URL})")));
     }
-    pending.sort_by(|a, b| b.0.cmp(&a.0));
+    pending.sort_by_key(|item| std::cmp::Reverse(item.0));
     let closers: String = pending.into_iter().map(|(_, s)| s).collect();
 
     // A trailing line of only `-`/`--`/`=`/`==` under text is a setext
@@ -375,10 +375,10 @@ mod tests {
 
     #[test]
     fn links_mend_to_pending_sentinel() {
-        mends("[docs](https://x.dev/lo", "[docs](comet:pending-link)");
-        mends("[docs](", "[docs](comet:pending-link)");
-        mends("see [do", "see [do](comet:pending-link)");
-        mends("![alt](https://x/i.p", "![alt](comet:pending-link)");
+        mends("[docs](https://x.dev/lo", "[docs](nova:pending-link)");
+        mends("[docs](", "[docs](nova:pending-link)");
+        mends("see [do", "see [do](nova:pending-link)");
+        mends("![alt](https://x/i.p", "![alt](nova:pending-link)");
         stays("see [");
         stays("[x] task-like"); // completed bracket, no url
     }
@@ -386,13 +386,13 @@ mod tests {
     #[test]
     fn link_urls_allow_nested_parens() {
         stays("[a](https://x.dev/(y)) done");
-        mends("[a](https://x.dev/(y", "[a](comet:pending-link)");
+        mends("[a](https://x.dev/(y", "[a](nova:pending-link)");
     }
 
     #[test]
     fn emphasis_inside_link_text_closes_inside() {
-        mends("[**a", "[**a**](comet:pending-link)");
-        mends("**a [b", "**a [b](comet:pending-link)**");
+        mends("[**a", "[**a**](nova:pending-link)");
+        mends("**a [b", "**a [b](nova:pending-link)**");
     }
 
     #[test]

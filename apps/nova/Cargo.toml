@@ -1,21 +1,24 @@
 [package]
-name = "comet"
+name = "nova"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "comet"
+name = "nova"
 path = "src/main.rs"
 
 [dependencies]
-comet-engine.workspace = true
-comet-ui.workspace = true
-comet-tui.workspace = true
-comet-update.workspace = true
+nova-engine.workspace = true
+nova-ui.workspace = true
+nova-tui.workspace = true
+nova-update.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

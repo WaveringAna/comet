@@ -23,9 +23,9 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use comet_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
-use comet_proto::{RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion};
-use comet_rpc::methods;
+use nova_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
+use nova_proto::{RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion};
+use nova_rpc::methods;
 
 use crate::attachments::{self, StagedAttachment};
 use crate::motion;
@@ -118,7 +118,7 @@ pub const CARET_BLINK_MS: u64 = 500;
 /// through the first half-period (typing bursts never blink — each keystroke
 /// resets the phase), then alternating.
 pub fn caret_visible(ms_since_activity: u64) -> bool {
-    (ms_since_activity / CARET_BLINK_MS) % 2 == 0
+    (ms_since_activity / CARET_BLINK_MS).is_multiple_of(2)
 }
 
 /// Auto-grow: content height for a wrapped-line count.
@@ -1705,16 +1705,16 @@ impl ComposerInput {
 
     /// Keep the cursor visible when content exceeds the element height.
     fn clamp_scroll(&mut self, element_height: f32) {
-        if self.follow_cursor {
-            if let Some(cursor) = self.point_for_index(self.cursor_offset()) {
-                self.scroll_top = input_scroll_offset_for_cursor(
-                    self.scroll_top,
-                    f32::from(cursor.y),
-                    f32::from(self.line_height),
-                    self.content_height,
-                    element_height,
-                );
-            }
+        if self.follow_cursor
+            && let Some(cursor) = self.point_for_index(self.cursor_offset())
+        {
+            self.scroll_top = input_scroll_offset_for_cursor(
+                self.scroll_top,
+                f32::from(cursor.y),
+                f32::from(self.line_height),
+                self.content_height,
+                element_height,
+            );
         }
         self.scroll_top = self
             .scroll_top
@@ -2260,9 +2260,9 @@ impl Composer {
             _input_events: input_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
-        // a rig) — `COMET_ATTACH=/path/a.png[,/path/b.png]`, and
-        // `COMET_ATTACH_PREVIEW=1` boots with the first one's lightbox open.
-        if let Ok(spec) = std::env::var("COMET_ATTACH") {
+        // a rig) — `NOVA_ATTACH=/path/a.png[,/path/b.png]`, and
+        // `NOVA_ATTACH_PREVIEW=1` boots with the first one's lightbox open.
+        if let Ok(spec) = std::env::var("NOVA_ATTACH") {
             let staged: Vec<StagedAttachment> = spec
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
@@ -2270,13 +2270,13 @@ impl Composer {
                     match attachments::stage_file(std::path::Path::new(path.trim())) {
                         Ok(att) => Some(att),
                         Err(err) => {
-                            tracing::warn!(%path, error = %err, "COMET_ATTACH stage failed");
+                            tracing::warn!(%path, error = %err, "NOVA_ATTACH stage failed");
                             None
                         }
                     }
                 })
                 .collect();
-            if std::env::var("COMET_ATTACH_PREVIEW").is_ok_and(|v| v == "1")
+            if std::env::var("NOVA_ATTACH_PREVIEW").is_ok_and(|v| v == "1")
                 && let Some(first) = staged.first()
             {
                 composer.preview = Some(attachments::PreviewImage {
@@ -2295,7 +2295,7 @@ impl Composer {
         composer
     }
 
-    /// Capture-knob passthrough (`COMET_OPEN_DIALOG=model`): open the
+    /// Capture-knob passthrough (`NOVA_OPEN_DIALOG=model`): open the
     /// combined harness/model menu.
     pub fn debug_open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pickers
@@ -2657,7 +2657,7 @@ impl Composer {
         // so the doc frame dedups it away).
         let echo = SessionMessageEntry {
             id: message_id.clone(),
-            role: comet_doc::MessageRole::User,
+            role: nova_doc::MessageRole::User,
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: echo_text.clone(),
@@ -2736,7 +2736,7 @@ impl Composer {
                                     .call(methods::CREATE_WORKTREE, params)
                                     .await
                                     .map_err(|e| format!("Worktree failed: {e}"))?;
-                                let worktree: comet_proto::Worktree = serde_json::from_value(value)
+                                let worktree: nova_proto::Worktree = serde_json::from_value(value)
                                     .map_err(|e| format!("Worktree reply malformed: {e}"))?;
                                 cwd = worktree.path.clone();
                                 worktree_cwd = Some(worktree.path);
@@ -2821,7 +2821,7 @@ impl Composer {
                     // without flickering).
                     let refreshed = SessionMessageEntry {
                         id: message_id.clone(),
-                        role: comet_doc::MessageRole::User,
+                        role: nova_doc::MessageRole::User,
                         parts: vec![MessagePart::Text {
                             id: "t0".into(),
                             text: content.clone(),
@@ -3825,7 +3825,7 @@ mod tests {
             h4,
             4.0 * INPUT_LINE_HEIGHT + TEXTAREA_PAD_V + ACTIONS_ROW_HEIGHT + PILL_BORDER_V
         );
-        // Caps at a 260px textarea box (comet max-h-[260px] / the JS clamp).
+        // Caps at a 260px textarea box (nova max-h-[260px] / the JS clamp).
         assert_eq!(
             composer_total_height(input_content_height(100)),
             COMPOSER_MAX_HEIGHT
@@ -4131,7 +4131,7 @@ mod tests {
 
     #[test]
     fn pending_input_detection() {
-        use comet_doc::MessageStatus;
+        use nova_doc::MessageStatus;
         let input_part = MessagePart::Input {
             id: "in-r1".into(),
             request_id: "r1".into(),

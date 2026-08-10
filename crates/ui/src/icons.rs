@@ -103,15 +103,15 @@ icon_assets![
     (INFO_CIRCLE, "info-circle"),
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
-    // Hand-drawn comet glyphs (terminal-panel.tsx / composer-actions.tsx /
-    // menu-check.tsx / logo.tsx).
+    // Hand-drawn glyphs inherited from Comet (terminal-panel.tsx /
+    // composer-actions.tsx / menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),
     (PLUS, "plus"),
     (CLOSE, "close"),
     (STOP, "stop"),
     (CHECK, "check"),
     (COPY, "copy"),
-    (COMET_LOGO, "comet-logo"),
+    (NOVA_LOGO, "nova-logo"),
     // Harness brand marks (icons.tsx).
     (PI_MARK, "pi-mark"),
     (CLAUDE_MARK, "claude-mark"),
@@ -119,7 +119,7 @@ icon_assets![
     (CURSOR_MARK, "cursor-mark"),
 ];
 
-/// The Claude mark's brand orange (`#D97757`) — comet keeps it even on the
+/// The Claude mark's brand orange (`#D97757`) — nova keeps it even on the
 /// monochrome surface.
 pub fn claude_brand() -> Hsla {
     gpui::rgb(0xD97757).into()

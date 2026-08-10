@@ -49,9 +49,9 @@ use futures::stream::BoxStream;
 use serde::Deserialize;
 use tokio::sync::watch;
 
-use comet_doc::SessionCommandPayload;
-use comet_proto::{ChatConfig, CollaborationControlRequest, HarnessId, PiSettingsScope};
-use comet_rpc::{RpcError, RpcReply, RpcService, methods, parse_params};
+use nova_doc::SessionCommandPayload;
+use nova_proto::{ChatConfig, CollaborationControlRequest, HarnessId, PiSettingsScope};
+use nova_rpc::{RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
 use crate::diff_sync::CheckoutDiffSync;
@@ -397,7 +397,7 @@ pub struct EngineRpc {
     uploads: Uploads,
     agent_accounts: AgentAccounts,
     pi_management: PiManagement,
-    updater: Option<comet_update::Updater>,
+    updater: Option<nova_update::Updater>,
     nova: Option<NovaHost>,
 }
 
@@ -431,7 +431,7 @@ impl EngineRpc {
     }
 
     /// Attach the release checker (UpdateStatus stream + ApplyUpdate).
-    pub fn with_updater(mut self, updater: comet_update::Updater) -> Self {
+    pub fn with_updater(mut self, updater: nova_update::Updater) -> Self {
         self.updater = Some(updater);
         self
     }
@@ -448,7 +448,7 @@ impl EngineRpc {
         })
     }
 
-    fn updater(&self) -> Result<&comet_update::Updater, RpcError> {
+    fn updater(&self) -> Result<&nova_update::Updater, RpcError> {
         self.updater
             .as_ref()
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
@@ -743,11 +743,11 @@ struct UpdatePeerParams {
     name: String,
     endpoint: String,
     #[serde(default = "default_role")]
-    role: comet_nova::trust::Role,
+    role: nova_network::trust::Role,
 }
 
-fn default_role() -> comet_nova::trust::Role {
-    comet_nova::trust::Role::Peer
+fn default_role() -> nova_network::trust::Role {
+    nova_network::trust::Role::Peer
 }
 
 #[async_trait]
@@ -1160,7 +1160,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&chunk)
             }
             // Nova Engine peer-network settings (IPC-only; never peer-forwarded).
-            comet_nova::methods::NOVA_LOCAL_DEVICE => {
+            nova_network::methods::NOVA_LOCAL_DEVICE => {
                 let nova = self.nova()?;
                 RpcReply::value(&serde_json::json!({
                     "deviceId": nova.device_id(),
@@ -1169,24 +1169,24 @@ impl RpcService for EngineRpc {
                     "ticket": nova.ticket()?,
                 }))
             }
-            comet_nova::methods::NOVA_BEGIN_PAIRING => {
+            nova_network::methods::NOVA_BEGIN_PAIRING => {
                 Ok(RpcReply::Value(self.nova()?.begin_pairing()))
             }
-            comet_nova::methods::NOVA_CANCEL_PAIRING => {
+            nova_network::methods::NOVA_CANCEL_PAIRING => {
                 Ok(RpcReply::Value(self.nova()?.cancel_pairing()))
             }
-            comet_nova::methods::NOVA_LIST_PEERS => RpcReply::value(&self.nova()?.list_peers()),
-            comet_nova::methods::NOVA_WATCH_PEERS => Ok(RpcReply::Stream(nova_peer_watch_stream(
-                self.nova()?.clone(),
-            ))),
-            comet_nova::methods::NOVA_PAIR_PEER => {
+            nova_network::methods::NOVA_LIST_PEERS => RpcReply::value(&self.nova()?.list_peers()),
+            nova_network::methods::NOVA_WATCH_PEERS => Ok(RpcReply::Stream(
+                nova_peer_watch_stream(self.nova()?.clone()),
+            )),
+            nova_network::methods::NOVA_PAIR_PEER => {
                 let p: PairPeerParams = parse_params(params)?;
                 self.nova()?
                     .pair_peer(&p.endpoint, &p.code)
                     .await
                     .map(RpcReply::Value)
             }
-            comet_nova::methods::NOVA_UPDATE_PEER => {
+            nova_network::methods::NOVA_UPDATE_PEER => {
                 let p: UpdatePeerParams = parse_params(params)?;
                 let nova = self.nova()?.clone();
                 let result = nova
@@ -1197,7 +1197,7 @@ impl RpcService for EngineRpc {
                 }
                 result
             }
-            comet_nova::methods::NOVA_TEST_PEER => {
+            nova_network::methods::NOVA_TEST_PEER => {
                 let p: IdParams = parse_params(params)?;
                 let client = self.nova()?.dial(&p.device_id).await?;
                 client
@@ -1205,21 +1205,21 @@ impl RpcService for EngineRpc {
                     .await
                     .map(|_| RpcReply::Value(serde_json::json!({"ok": true})))
             }
-            comet_nova::methods::NOVA_REVOKE_PEER => {
+            nova_network::methods::NOVA_REVOKE_PEER => {
                 let p: IdParams = parse_params(params)?;
                 let nova = self.nova()?.clone();
                 let result = nova.revoke_peer(&p.device_id).map(RpcReply::Value);
                 nova.invalidate(&p.device_id).await;
                 result
             }
-            comet_nova::methods::NOVA_FORGET_PEER => {
+            nova_network::methods::NOVA_FORGET_PEER => {
                 let p: IdParams = parse_params(params)?;
                 let nova = self.nova()?.clone();
                 let result = nova.forget_peer(&p.device_id).map(RpcReply::Value);
                 nova.invalidate(&p.device_id).await;
                 result
             }
-            comet_nova::methods::NOVA_SCAN => {
+            nova_network::methods::NOVA_SCAN => {
                 let p: ScanParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.nova()?.scan(
                     p.ranges,
@@ -1227,7 +1227,7 @@ impl RpcService for EngineRpc {
                     p.allow_public,
                 )?))
             }
-            comet_nova::methods::NOVA_SYNC_HEADS => {
+            nova_network::methods::NOVA_SYNC_HEADS => {
                 let sync = PeerSync::new(
                     self.nova()?.clone(),
                     self.workspace.clone(),
@@ -1239,7 +1239,7 @@ impl RpcService for EngineRpc {
                         .map_err(|error| RpcError::Failed(error.to_string()))?,
                 )
             }
-            comet_nova::methods::NOVA_SYNC_APPLY => {
+            nova_network::methods::NOVA_SYNC_APPLY => {
                 let exchange: SyncExchange = parse_params(params)?;
                 let sync = PeerSync::new(
                     self.nova()?.clone(),

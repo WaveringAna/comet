@@ -806,7 +806,7 @@ pub fn materialize_tail(
 mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
-    use comet_proto::{AgentEvent, ToolCall};
+    use nova_proto::{AgentEvent, ToolCall};
 
     fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {

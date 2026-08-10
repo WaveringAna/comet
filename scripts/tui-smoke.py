@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end smoke test for `comet-tui`, driven through a real pty.
+"""End-to-end smoke test for `nova-tui`, driven through a real pty.
 
 The property under test is the one no unit test can reach: that the viewport and
 the engine have independent lifetimes. We start the TUI with nothing running,
@@ -25,18 +25,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tui_capture import CSI, OSC, Screen, Tui  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(ROOT, "target", "debug", "comet-tui")
-COMET = os.path.join(ROOT, "target", "debug", "comet")
-DATA_DIR = "/tmp/comet-tui-smoke/daemon"
+BIN = os.path.join(ROOT, "target", "debug", "nova-tui")
+NOVA = os.path.join(ROOT, "target", "debug", "nova")
+DATA_DIR = "/tmp/nova-tui-smoke/daemon"
 IPC = "27933"
 ROWS, COLS = 34, 110
 
 ENV = dict(
     os.environ,
-    COMET_DATA_DIR=DATA_DIR,
-    COMET_IPC_PORT=IPC,
+    NOVA_DATA_DIR=DATA_DIR,
+    NOVA_IPC_PORT=IPC,
     # The mock harness streams a canned reply, so no agent CLI is needed.
-    COMET_HARNESS="mock",
+    NOVA_HARNESS="mock",
     # Keep the detached test engine quiet; Nova has no hosted sign-in phase.
     RUST_LOG="warn",
     TERM="xterm-256color",
@@ -75,11 +75,11 @@ def probe() -> bool:
 
 def main() -> int:
     keep = "--keep" in sys.argv
-    for binary in (BIN, COMET):
+    for binary in (BIN, NOVA):
         if not os.path.exists(binary):
-            print(f"missing {binary} — run: cargo build -p comet -p comet-tui-bin")
+            print(f"missing {binary} — run: cargo build -p nova -p nova-tui-bin")
             return 2
-    subprocess.run(["rm", "-rf", "/tmp/comet-tui-smoke"], check=False)
+    subprocess.run(["rm", "-rf", "/tmp/nova-tui-smoke"], check=False)
     os.makedirs(DATA_DIR, exist_ok=True)
 
     try:
@@ -118,7 +118,7 @@ def main() -> int:
         )
         screen = tui.settle(3, quiet=0.5)
         check(
-            "swift-delta" in screen.text() or "comet-native" in screen.text(),
+            "swift-delta" in screen.text() or "nova-native" in screen.text(),
             "the new space appeared without a restart",
             screen.text(),
         )
@@ -224,7 +224,7 @@ def main() -> int:
 def daemon_pid() -> int | None:
     """The engine holding this data dir, from the lock file it stamps.
 
-    Deliberately not `pkill -f 'comet headless'`: that would kill the
+    Deliberately not `pkill -f 'nova headless'`: that would kill the
     developer's own daemon on the same machine. The lock file scopes the kill to
     the throwaway data dir this test created.
     """
@@ -275,7 +275,7 @@ def rpc(method: str, params: str) -> str:
             "run",
             "-q",
             "-p",
-            "comet-rpc",
+            "nova-rpc",
             "--example",
             "rpc_probe",
             "--",

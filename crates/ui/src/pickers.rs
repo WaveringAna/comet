@@ -20,12 +20,12 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px,
 };
 
-use comet_engine::registry::HarnessDescriptor;
-use comet_proto::{
+use nova_engine::registry::HarnessDescriptor;
+use nova_proto::{
     ChatConfig, ChatUsage, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel,
     view,
 };
-use comet_rpc::methods;
+use nova_rpc::methods;
 
 /// Display cap for the ref list (t3code shows pages of 100 with a status
 /// footer; a flat cap + "Showing X of Y refs" reads the same without
@@ -81,7 +81,7 @@ pub enum CheckoutPlan {
     CurrentCheckout,
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
-    /// `CreateWorktree` off `base` on send (comet mints a `comet/<name>`
+    /// `CreateWorktree` off `base` on send (nova mints a `nova/<name>`
     /// branch). `base: None` = refs never loaded — send falls back to the
     /// project folder rather than failing.
     NewWorktree { base: Option<String> },
@@ -141,7 +141,7 @@ pub fn sort_models(models: &mut [Model]) {
             .then_with(|| {
                 model_version_parts(model_label(b)).cmp(&model_version_parts(model_label(a)))
             })
-            .then_with(|| max_reasoning(&b).cmp(&max_reasoning(&a)))
+            .then_with(|| max_reasoning(b).cmp(&max_reasoning(a)))
             .then_with(|| model_variant_key(model_label(a)).cmp(&model_variant_key(model_label(b))))
             .then_with(|| {
                 a.label
@@ -297,7 +297,7 @@ fn max_reasoning(model: &Model) -> Option<ReasoningLevel> {
     model.reasoning_levels.iter().max().copied()
 }
 
-/// A model's default reasoning: X-High when the ladder offers it (comet
+/// A model's default reasoning: X-High when the ladder offers it (nova
 /// `DEFAULT_REASONING = "xhigh"`), else High, else the ladder's first entry.
 /// `None` only for ladder-less models (e.g. Haiku's thinking toggle instead).
 pub fn default_reasoning(ladder: &[ReasoningLevel]) -> Option<ReasoningLevel> {
@@ -414,7 +414,7 @@ pub fn breadcrumbs(path: &str) -> Vec<(String, String)> {
 }
 
 /// Directory rows of a listing (files never render in the browser).
-pub fn browser_rows(listing: &FolderListing) -> Vec<&comet_proto::FolderEntry> {
+pub fn browser_rows(listing: &FolderListing) -> Vec<&nova_proto::FolderEntry> {
     listing.entries.iter().filter(|e| e.is_dir).collect()
 }
 
@@ -475,7 +475,7 @@ pub struct Pickers {
     /// Re-open suppression after outside-click dismissal (the dismiss and the
     /// trigger click would otherwise toggle twice).
     suppressed: Option<(PickerKind, Instant)>,
-    /// `COMET_OPEN_PICKER` boot: keep claiming focus until it sticks, so
+    /// `NOVA_OPEN_PICKER` boot: keep claiming focus until it sticks, so
     /// keyboard nav drives the data-side-opened popover (headless rigs have
     /// no synthetic pointer, but synthetic keys do arrive).
     boot_focus_pending: bool,
@@ -555,10 +555,10 @@ impl Pickers {
                 }
             }
         });
-        // Dev/testing knob: `COMET_OPEN_PICKER=model|traits|repo|branch` boots
+        // Dev/testing knob: `NOVA_OPEN_PICKER=model|traits|repo|branch` boots
         // with that popover open — synthetic input can't reach the app on
         // headless compositors, so captures need a data-side path.
-        let open = match std::env::var("COMET_OPEN_PICKER").ok().as_deref() {
+        let open = match std::env::var("NOVA_OPEN_PICKER").ok().as_deref() {
             Some("model") => Some(PickerKind::HarnessModel),
             Some("traits") => Some(PickerKind::HarnessModel),
             Some("branch") => Some(PickerKind::Branch),
@@ -767,7 +767,7 @@ impl Pickers {
         cx.notify();
     }
 
-    /// Capture knob (`COMET_OPEN_DIALOG=model`): open the combined
+    /// Capture knob (`NOVA_OPEN_DIALOG=model`): open the combined
     /// harness/model menu programmatically.
     pub fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open != Some(PickerKind::HarnessModel) {
@@ -1306,8 +1306,8 @@ impl Pickers {
     /// - The picked ref already lives in ANOTHER worktree → RETARGET the
     ///   session onto that worktree (`reuseExistingWorktree`): a `setChatCwd`
     ///   + `setChatBranch` mutate, no git. Resume is cwd-scoped, so the next
-    ///   run there starts a fresh harness conversation — the transcript
-    ///   itself carries on.
+    ///     run there starts a fresh harness conversation — the transcript
+    ///     itself carries on.
     /// - Otherwise → `git checkout` in the SESSION's own cwd (`SwitchRef`,
     ///   routed over Nova to the host device). The host's HEAD watcher
     ///   reconciles `chat.branch` to every device. Errors (dirty tree, ref
@@ -1825,7 +1825,6 @@ impl Pickers {
         &self,
         kind: PickerKind,
         label: SharedString,
-        set: bool,
         chip_icon: Option<(&'static str, Option<gpui::Hsla>)>,
         suffix: Option<SharedString>,
         theme: &Theme,
@@ -1856,15 +1855,7 @@ impl Pickers {
             .font_weight(gpui::FontWeight::MEDIUM)
             // comet composer/styles.tsx `pill`: `transition-colors` — the wash
             // and text brighten fade over 150ms.
-            .text_color(motion::hover_blend(
-                id,
-                if set {
-                    theme.text.opacity(0.9)
-                } else {
-                    theme.text_muted
-                },
-                theme.text,
-            ))
+            .text_color(motion::hover_blend(id, theme.text.opacity(0.9), theme.text))
             .bg(if open {
                 theme.element_hover
             } else {
@@ -2110,7 +2101,7 @@ impl Pickers {
         let theme = Theme::of(cx).clone();
         popover::popover_card(&theme)
             .w(px(width))
-            // comet caps its tallest picker at min(640px, 75vh).
+            // nova caps its tallest picker at min(640px, 75vh).
             .max_h(px(640.0))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -2124,7 +2115,7 @@ impl Pickers {
     }
 
     /// [`Self::popover_frame`] without the p-1 inset — the harness/model
-    /// picker's rail + list panes bleed to the card edge (comet
+    /// picker's rail + list panes bleed to the card edge (nova
     /// harness-model-picker.tsx `className="w-80 p-0"`).
     fn popover_frame_flush(
         &self,
@@ -2842,10 +2833,11 @@ fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
         )
 }
 
-/// `COMET_HARNESS=mock` (the e2e/dev rig) opts the mock harness into the UI;
+/// `NOVA_HARNESS=mock` (the e2e/dev rig) opts the mock harness into the UI;
 /// production launches never set it, so the mock never surfaces there.
 fn mock_harness_enabled() -> bool {
-    std::env::var("COMET_HARNESS")
+    std::env::var("NOVA_HARNESS")
+        .or_else(|_| std::env::var("COMET_HARNESS"))
         .ok()
         .as_deref()
         .map(str::trim)
@@ -2927,7 +2919,7 @@ fn footer_group(
 impl Render for Pickers {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        // A COMET_OPEN_PICKER popover never went through `toggle`, so claim
+        // A NOVA_OPEN_PICKER popover never went through `toggle`, so claim
         // its keyboard focus here (re-claim until it sticks — the shell's
         // first-paint fallback focuses the composer after our first render).
         if self.boot_focus_pending {
@@ -2960,7 +2952,7 @@ impl Render for Pickers {
         if let Some(harness) = self.effective_harness(cx) {
             self.ensure_models(harness, cx);
         }
-        // A popover opened data-side (COMET_OPEN_PICKER) never went through
+        // A popover opened data-side (NOVA_OPEN_PICKER) never went through
         // `toggle`, so kick its loads here (all ensure_* are idempotent).
         if matches!(
             self.open,
@@ -3042,7 +3034,6 @@ impl Render for Pickers {
         let combined_chip = self.trigger_chip(
             PickerKind::HarnessModel,
             model_label,
-            true,
             Some(harness_icon),
             Some(traits_label),
             &theme,
@@ -3079,7 +3070,7 @@ impl Render for Pickers {
 /// The composer footer's right end: what the last reply cost. It sits opposite
 /// the checkout phrase because it is the same kind of fact — the standing
 /// state of this conversation, not of a run in flight. Empty until a turn has
-/// been measured: the host stamps [`comet_proto::ChatUsage`] once per turn,
+/// been measured: the host stamps [`nova_proto::ChatUsage`] once per turn,
 /// and a viewport that has not seen one shows nothing rather than zeros.
 fn run_cost(
     usage: Option<&ChatUsage>,
@@ -3194,7 +3185,7 @@ fn context_battery(gauge: view::ContextGauge, detail: String) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+    use nova_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
     #[test]
     fn traits_summary_formats_non_defaults() {
@@ -3295,7 +3286,7 @@ mod tests {
                     is_repo: false,
                 },
                 FolderEntry {
-                    name: "comet".into(),
+                    name: "nova".into(),
                     is_dir: true,
                     is_repo: true,
                 },
@@ -3304,7 +3295,7 @@ mod tests {
         };
         // Files never show as rows.
         assert_eq!(browser_rows(&listing).len(), 2);
-        assert_eq!(browser_rows(&listing)[1].name, "comet");
+        assert_eq!(browser_rows(&listing)[1].name, "nova");
     }
 
     #[test]
@@ -3489,7 +3480,7 @@ mod tests {
             id,
             name: format!("{id:?}"),
             supports_steering: false,
-            steering_mode: comet_proto::SteeringMode::StepBoundary,
+            steering_mode: nova_proto::SteeringMode::StepBoundary,
             reasoning_levels: vec![],
         };
         let mut displayed = vec![descriptor(HarnessId::Pi)];
@@ -3548,7 +3539,7 @@ mod tests {
             id,
             name: name.into(),
             supports_steering: true,
-            steering_mode: comet_proto::SteeringMode::StepBoundary,
+            steering_mode: nova_proto::SteeringMode::StepBoundary,
             reasoning_levels: vec![],
         };
         let mixed = vec![
@@ -3563,7 +3554,7 @@ mod tests {
         assert_eq!(visible[0].id, HarnessId::Pi);
         let only_mock = vec![descriptor(HarnessId::Mock, "Mock")];
         assert!(visible_harnesses_impl(&only_mock, false).is_empty());
-        // …and opted back in by COMET_HARNESS=mock (the e2e rig).
+        // …and opted back in by NOVA_HARNESS=mock (the e2e rig).
         assert_eq!(visible_harnesses_impl(&mixed, true).len(), 2);
         assert_eq!(visible_harnesses_impl(&mixed, true)[0].id, HarnessId::Mock);
     }

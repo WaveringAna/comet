@@ -1308,227 +1308,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "comet"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "clap",
- "comet-engine",
- "comet-tui",
- "comet-ui",
- "comet-update",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "comet-doc"
-version = "0.1.6"
-dependencies = [
- "chrono",
- "comet-proto",
- "loro",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tracing",
-]
-
-[[package]]
-name = "comet-engine"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "comet-doc",
- "comet-harness",
- "comet-nova",
- "comet-proto",
- "comet-rpc",
- "comet-sync",
- "comet-update",
- "futures",
- "libc",
- "loro",
- "notify",
- "portable-pty",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "comet-harness"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "comet-proto",
- "futures",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "comet-nova"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "comet-rpc",
- "futures",
- "iroh",
- "ring",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "comet-proto"
-version = "0.1.6"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "comet-rpc"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "async-trait",
- "comet-proto",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "comet-sync"
-version = "0.1.6"
-dependencies = [
- "comet-doc",
- "loro",
- "rusqlite",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "comet-tui"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "comet-doc",
- "comet-proto",
- "comet-rpc",
- "futures",
- "libc",
- "ratatui",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "unicode-segmentation",
- "unicode-width",
- "uuid",
-]
-
-[[package]]
-name = "comet-tui-bin"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "clap",
- "comet-tui",
-]
-
-[[package]]
-name = "comet-ui"
-version = "0.1.6"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "comet-doc",
- "comet-engine",
- "comet-proto",
- "comet-rpc",
- "comet-update",
- "futures",
- "gpui",
- "gpui_platform",
- "gpui_tokio",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "unicode-segmentation",
- "uuid",
-]
-
-[[package]]
-name = "comet-update"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "futures",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "compact_str"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5634,6 +5413,228 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "585d3cb5e12e01aed9e8a1f70d5c6b5e86fe2a6e48fc8cd0b3e0b8df6f6eb174"
 dependencies = [
  "instant",
+]
+
+[[package]]
+name = "nova"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nova-engine",
+ "nova-tui",
+ "nova-ui",
+ "nova-update",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nova-doc"
+version = "0.1.6"
+dependencies = [
+ "chrono",
+ "loro",
+ "nova-proto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "nova-engine"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "libc",
+ "loro",
+ "notify",
+ "nova-doc",
+ "nova-harness",
+ "nova-network",
+ "nova-proto",
+ "nova-rpc",
+ "nova-sync",
+ "nova-update",
+ "portable-pty",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "nova-harness"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "futures",
+ "libc",
+ "nova-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "nova-network"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "iroh",
+ "nova-rpc",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "nova-proto"
+version = "0.1.6"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "nova-rpc"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "nova-proto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "nova-sync"
+version = "0.1.6"
+dependencies = [
+ "loro",
+ "nova-doc",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "nova-tui"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures",
+ "libc",
+ "nova-doc",
+ "nova-proto",
+ "nova-rpc",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width",
+ "uuid",
+]
+
+[[package]]
+name = "nova-tui-bin"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nova-tui",
+]
+
+[[package]]
+name = "nova-ui"
+version = "0.1.6"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "gpui",
+ "gpui_platform",
+ "gpui_tokio",
+ "nova-doc",
+ "nova-engine",
+ "nova-proto",
+ "nova-rpc",
+ "nova-update",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "unicode-segmentation",
+ "uuid",
+]
+
+[[package]]
+name = "nova-update"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

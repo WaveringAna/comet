@@ -5,7 +5,7 @@
 //! (`delta`/`textDelta`, `exitCode`/`exit_code`, camelCase/snake_case item
 //! types) are accepted, and unknown item types map to nothing.
 
-use comet_proto::{AgentEvent, TodoItem, ToolCall};
+use nova_proto::{AgentEvent, TodoItem, ToolCall};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

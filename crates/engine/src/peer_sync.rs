@@ -134,7 +134,7 @@ impl PeerSync {
         let remote: SyncHeads = serde_json::from_value(
             client
                 .call(
-                    comet_nova::methods::NOVA_SYNC_HEADS,
+                    nova_network::methods::NOVA_SYNC_HEADS,
                     serde_json::Value::Null,
                 )
                 .await
@@ -146,7 +146,7 @@ impl PeerSync {
         let response: SyncExchange = serde_json::from_value(
             client
                 .call(
-                    comet_nova::methods::NOVA_SYNC_APPLY,
+                    nova_network::methods::NOVA_SYNC_APPLY,
                     serde_json::to_value(request).map_err(|error| {
                         EngineError::Other(format!("peer sync request encode failed: {error}"))
                     })?,

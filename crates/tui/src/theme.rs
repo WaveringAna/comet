@@ -1,8 +1,8 @@
 //! Palette — comet's, not an invention.
 //!
 //! Every value here is the sRGB conversion of the exact oklch the gpui viewport
-//! paints (`comet-ui/src/theme.rs`), so the two surfaces are the same product.
-//! The tests at the bottom pin the conversions; `comet_proto::view::dot` holds
+//! paints (`nova-ui/src/theme.rs`), so the two surfaces are the same product.
+//! The tests at the bottom pin the conversions; `nova_proto::view::dot` holds
 //! the status hues both frontends read, because a dot that means "running" in
 //! one place cannot mean something else in the other.
 //!
@@ -254,8 +254,8 @@ impl Theme {
     }
 
     /// The dot color for a chat status.
-    pub fn dot(&self, status: comet_proto::ChatIndicator) -> Style {
-        use comet_proto::ChatIndicator as I;
+    pub fn dot(&self, status: nova_proto::ChatIndicator) -> Style {
+        use nova_proto::ChatIndicator as I;
         let color = match status {
             I::Working => self.dot_working,
             I::AwaitingInput => self.dot_awaiting,
@@ -287,7 +287,7 @@ pub const ANIMATION_TICK_MS: u64 = 80;
 mod tests {
     use super::*;
 
-    /// The oklch → sRGB conversion, duplicated from `comet-ui`'s theme so this
+    /// The oklch → sRGB conversion, duplicated from `nova-ui`'s theme so this
     /// crate can assert its literals without depending on gpui.
     fn oklch(l: f32, c: f32, h_deg: f32) -> Color {
         let h = h_deg.to_radians();
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_is_comets() {
+    fn the_palette_is_novas() {
         // If the desktop theme moves, these fail and say so — the whole point of
         // porting values rather than eyeballing them.
         let t = Theme::dark();
@@ -328,13 +328,13 @@ mod tests {
     fn status_dots_match_the_shared_hues() {
         // The meanings live in proto so they cannot diverge per surface.
         let t = Theme::dark();
-        let d = comet_proto::view::dot::WORKING;
+        let d = nova_proto::view::dot::WORKING;
         assert_eq!(t.dot_working, oklch(d.0, d.1, d.2), "pink, not amber");
-        let d = comet_proto::view::dot::AWAITING;
+        let d = nova_proto::view::dot::AWAITING;
         assert_eq!(t.dot_awaiting, oklch(d.0, d.1, d.2));
-        let d = comet_proto::view::dot::ERRORED;
+        let d = nova_proto::view::dot::ERRORED;
         assert_eq!(t.dot_errored, oklch(d.0, d.1, d.2));
-        let d = comet_proto::view::dot::COMPLETED;
+        let d = nova_proto::view::dot::COMPLETED;
         assert_eq!(t.dot_completed, oklch(d.0, d.1, d.2), "emerald");
         // Awaiting is the accent, exactly as in the original.
         assert_eq!(t.dot_awaiting, t.accent);
@@ -397,7 +397,7 @@ mod tests {
             assert_eq!(style.bg, None, "a plain theme paints no fill");
         }
         // …so the states that need attention carry a modifier instead.
-        use comet_proto::ChatIndicator as I;
+        use nova_proto::ChatIndicator as I;
         assert!(
             t.dot(I::AwaitingInput)
                 .add_modifier

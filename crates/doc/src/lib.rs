@@ -1,4 +1,4 @@
-//! comet-doc — session & workspace Loro doc schemas and the typed mirror layer.
+//! nova-doc — session & workspace Loro doc schemas and the typed mirror layer.
 //!
 //! The persisted schema shape includes stable container names, part maps with `LoroText`
 //! bodies, and command entries. Paired Nova Engines exchange this data directly.

@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=Comet
+Name=Nova
 GenericName=Coding Agent Controller
 Comment=Multi-device controller for coding agents
-Exec=comet
-TryExec=comet
-Icon=comet
+Exec=nova
+TryExec=nova
+Icon=nova
 Terminal=false
 Categories=Development;Utility;
 Keywords=agent;claude;codex;ai;coding;
-StartupWMClass=comet
+StartupWMClass=nova

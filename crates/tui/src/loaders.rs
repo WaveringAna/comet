@@ -1,15 +1,15 @@
 //! comet's loaders, rendered into cells.
 //!
-//! These are the desktop app's own indicators — the 5-cell comet wave, the 2×3
-//! mini gradient spinner, and the animated comet mark — driven by the same pure
-//! curves in [`comet_proto::motion`]. A loading indicator is a brand surface, so
+//! These are the desktop app's own indicators — the 5-cell nova wave, the 2×3
+//! mini gradient spinner, and the animated nova mark — driven by the same pure
+//! curves in [`nova_proto::motion`]. A loading indicator is a brand surface, so
 //! the terminal shows comet's, not a generic `|/-\` cycle.
 //!
 //! Three translations make that possible in a cell grid:
 //!
 //! 1. **Opacity becomes a blend.** A terminal has no alpha, but a cell's colour
 //!    mixed toward the pane background is visually the same thing, and
-//!    [`comet_proto::motion::pulse_opacity`] hands us exactly the coefficient.
+//!    [`nova_proto::motion::pulse_opacity`] hands us exactly the coefficient.
 //! 2. **The 2×3 mini spinner becomes one braille glyph.** Braille's dot matrix
 //!    *is* 2×3, so the ring chase maps cell-for-cell into a single character —
 //!    which is all the room a status dot has. Per-dot colour isn't possible, so
@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-use comet_proto::motion;
+use nova_proto::motion;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
@@ -60,12 +60,12 @@ pub fn phase(elapsed: Duration, period_ms: u64) -> f32 {
     (elapsed.as_millis() as f64 % period_ms as f64) as f32 / period_ms as f32
 }
 
-/// The comet wave loader: five cells pulsing 0.08 → 1 with a per-cell stagger,
+/// The nova wave loader: five cells pulsing 0.08 → 1 with a per-cell stagger,
 /// over a 2.4s period. comet's signature loader; used for the working strip,
 /// where there is room for the full thing.
-pub fn comet_wave(elapsed: Duration, color: Color) -> Vec<Span<'static>> {
-    let raw = phase(elapsed, motion::COMET_PULSE_MS);
-    (0..motion::COMET_CELLS)
+pub fn nova_wave(elapsed: Duration, color: Color) -> Vec<Span<'static>> {
+    let raw = phase(elapsed, motion::NOVA_PULSE_MS);
+    (0..motion::NOVA_CELLS)
         .map(|index| {
             let cell = motion::staggered_phase(raw, index, motion::PULSE_STAGGER);
             let opacity = motion::pulse_opacity(cell);
@@ -153,7 +153,7 @@ pub fn mini_spinner(elapsed: Duration) -> (String, Color) {
     (glyph.to_string(), color)
 }
 
-/// Columns and rows of the comet mark, at its 120-unit cell pitch.
+/// Columns and rows of the nova mark, at its 120-unit cell pitch.
 const MARK_COLS: usize = 7;
 const MARK_ROWS: usize = 8;
 /// Each logo pixel is two characters wide, so the mark keeps roughly its real
@@ -161,10 +161,10 @@ const MARK_ROWS: usize = 8;
 const MARK_CELL: &str = "██";
 const MARK_GAP: &str = "  ";
 
-/// The animated comet mark: the logo's pixel grid with a light wave sweeping
+/// The animated nova mark: the logo's pixel grid with a light wave sweeping
 /// tail → head, for the boot gate. 14 columns × 8 rows.
-pub fn comet_mark(elapsed: Duration, theme: &Theme) -> Vec<Line<'static>> {
-    let raw = phase(elapsed, motion::COMET_PULSE_MS);
+pub fn nova_mark(elapsed: Duration, theme: &Theme) -> Vec<Line<'static>> {
+    let raw = phase(elapsed, motion::NOVA_PULSE_MS);
     // Rasterize the sparse cell list into a grid so rows can be emitted in order.
     let mut grid = [[None::<f32>; MARK_COLS]; MARK_ROWS];
     for (x, y) in motion::MARK_CELLS {
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn phase_is_periodic_and_frame_rate_independent() {
-        let period = motion::COMET_PULSE_MS;
+        let period = motion::NOVA_PULSE_MS;
         assert_eq!(phase(Duration::ZERO, period), 0.0);
         assert!((phase(Duration::from_millis(1200), period) - 0.5).abs() < 1e-3);
         // A whole extra period lands in the same place — no accumulated drift.
@@ -234,9 +234,9 @@ mod tests {
     }
 
     #[test]
-    fn the_wave_has_one_cell_per_comet_cell_and_they_differ() {
-        let spans = comet_wave(Duration::from_millis(300), Color::Rgb(255, 255, 255));
-        assert_eq!(spans.len(), motion::COMET_CELLS);
+    fn the_wave_has_one_cell_per_nova_cell_and_they_differ() {
+        let spans = nova_wave(Duration::from_millis(300), Color::Rgb(255, 255, 255));
+        assert_eq!(spans.len(), motion::NOVA_CELLS);
         // Staggered, so at a given instant the cells are not all identical —
         // that difference is the wave.
         let colors: std::collections::HashSet<_> = spans.iter().map(|s| s.style.fg).collect();
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn the_mark_rasterizes_to_a_fixed_grid() {
         let theme = Theme::dark();
-        let lines = comet_mark(Duration::from_millis(500), &theme);
+        let lines = nova_mark(Duration::from_millis(500), &theme);
         assert_eq!(lines.len(), MARK_ROWS);
         for line in &lines {
             let width: usize = line
@@ -315,7 +315,7 @@ mod tests {
         // Neighbouring cells on the flight axis must differ, or the "sweep" is
         // just the whole logo flashing.
         let theme = Theme::dark();
-        let lines = comet_mark(Duration::from_millis(700), &theme);
+        let lines = nova_mark(Duration::from_millis(700), &theme);
         let colors: std::collections::HashSet<_> = lines
             .iter()
             .flat_map(|line| line.spans.iter())

@@ -1,12 +1,12 @@
 //! Generates a deterministic session-doc snapshot fixture for schema inspection.
-//! Usage: `cargo run -p comet-doc --example gen_fixture -- <out>`
+//! Usage: `cargo run -p nova-doc --example gen_fixture -- <out>`
 
-use comet_doc::{
+use nova_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
     fold_event_into_parts,
 };
-use comet_proto::{AgentEvent, ToolCall};
+use nova_proto::{AgentEvent, ToolCall};
 
 fn main() {
     let out = std::env::args()

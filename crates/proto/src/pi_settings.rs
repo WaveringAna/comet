@@ -1,4 +1,4 @@
-//! Device-local Pi runtime configuration exposed through Comet settings.
+//! Device-local Pi runtime configuration exposed through Nova settings.
 //!
 //! Secrets never cross the RPC boundary: provider rows report only the
 //! credential source/type. Settings and packages retain Pi's native global vs

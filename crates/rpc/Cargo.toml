@@ -1,12 +1,12 @@
 [package]
-name = "comet-rpc"
+name = "nova-rpc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-comet-proto.workspace = true
+nova-proto.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures.workspace = true

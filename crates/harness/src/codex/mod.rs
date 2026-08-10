@@ -42,7 +42,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use comet_proto::{
+use nova_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
     UserInputAnswer, UserInputQuestion,
 };
@@ -215,7 +215,7 @@ impl Harness for CodexHarness {
         // works). Escalate that exact shape instead of shipping a session
         // where nothing can run — parity note: the Claude adapter effectively
         // grants full access anyway (auto-approved can_use_tool).
-        if request.sandbox == comet_proto::SandboxLevel::WorkspaceWrite
+        if request.sandbox == nova_proto::SandboxLevel::WorkspaceWrite
             && worktree_on_slashed_branch(&request.cwd)
         {
             tracing::warn!(
@@ -223,7 +223,7 @@ impl Harness for CodexHarness {
                 "codex sandbox escalated to danger-full-access: linked worktree on a \
                  slash-named branch trips codex's worktree-mount derivation"
             );
-            request.sandbox = comet_proto::SandboxLevel::DangerFullAccess;
+            request.sandbox = nova_proto::SandboxLevel::DangerFullAccess;
         }
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
@@ -257,7 +257,7 @@ impl Harness for CodexHarness {
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "comet_harness::codex", "stderr: {line}");
+                    tracing::debug!(target: "nova_harness::codex", "stderr: {line}");
                     tail.push(&line);
                 }
             });
@@ -399,7 +399,7 @@ async fn run_session(session: Session) {
 
     // ---- wire params ------------------------------------------------------
     // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (comet sessions run unattended; the sandbox
+    // regardless of `auto_approve` (nova sessions run unattended; the sandbox
     // is the guardrail): never surface wire approvals. "on-request" turned
     // every command into a yes/no question (user report: "asking me for
     // approval at every step"). The approval-as-input plumbing below stays for
@@ -436,8 +436,8 @@ async fn run_session(session: Session) {
                 "initialize",
                 json!({
                     "clientInfo": {
-                        "name": "comet-native",
-                        "title": "Comet",
+                        "name": "nova-native",
+                        "title": "Nova",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                     "capabilities": { "experimentalApi": true },
@@ -454,7 +454,7 @@ async fn run_session(session: Session) {
                 // A missing/foreign rollout falls back to a fresh thread.
                 Err(e) => {
                     tracing::debug!(
-                        target: "comet_harness::codex",
+                        target: "nova_harness::codex",
                         "thread/resume failed (starting fresh): {e}"
                     );
                     client
@@ -825,7 +825,7 @@ async fn run_session(session: Session) {
                             // fallback for older Codex without steering).
                             Err(e) => {
                                 tracing::debug!(
-                                    target: "comet_harness::codex",
+                                    target: "nova_harness::codex",
                                     "turn/steer rejected (queued as next turn): {e}"
                                 );
                                 if router.active.as_deref() == Some(expected.as_str())
@@ -882,7 +882,7 @@ async fn run_session(session: Session) {
                             .await
                         {
                             tracing::debug!(
-                                target: "comet_harness::codex",
+                                target: "nova_harness::codex",
                                 "turn/interrupt failed (escalation will reap): {e}"
                             );
                         }
@@ -1013,7 +1013,7 @@ fn handle_server_request(
     );
     if !is_approval {
         tracing::debug!(
-            target: "comet_harness::codex",
+            target: "nova_harness::codex",
             "unhandled server request: {method}"
         );
         client.respond_error(&id, -32601, &format!("unsupported method: {method}"));

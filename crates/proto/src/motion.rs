@@ -1,7 +1,7 @@
 //! Loader motion — the pure math behind comet's loading indicators.
 //!
 //! These are the curves and constants the gpui viewport animates with
-//! (`comet-ui/src/motion.rs`, `comet-ui/src/loaders.rs`), lifted here so the
+//! (`nova-ui/src/motion.rs`, `nova-ui/src/loaders.rs`), lifted here so the
 //! terminal viewport animates the *same* loaders rather than inventing its own
 //! spinner. A loading indicator is a brand surface; two of them that disagree
 //! read as two products.
@@ -9,19 +9,19 @@
 //! Everything is a pure function of a phase in `0..1`, so a caller can drive it
 //! from a frame delta (gpui) or from wall-clock elapsed time (a terminal
 //! redraw) and get identical output. Opacity translates to a terminal as a
-//! blend toward the background — see `comet-tui`'s `loaders` module.
+//! blend toward the background — see `nova-tui`'s `loaders` module.
 
-/// Comet loader pulse period.
-pub const COMET_PULSE_MS: u64 = 2_400;
+/// Nova loader pulse period.
+pub const NOVA_PULSE_MS: u64 = 2_400;
 /// Gradient matrix spinner wave period.
 pub const GRADIENT_SPIN_MS: u64 = 750;
 
-/// Cells in the comet wave loader.
-pub const COMET_CELLS: usize = 5;
+/// Cells in the nova wave loader.
+pub const NOVA_CELLS: usize = 5;
 /// Side length of the gradient spinner matrix.
 pub const MATRIX_SIDE: usize = 3;
 
-/// Comet loader cells rest at this opacity between pulses.
+/// Nova loader cells rest at this opacity between pulses.
 pub const PULSE_MIN_OPACITY: f32 = 0.08;
 /// …and at this scale.
 pub const PULSE_MIN_SCALE: f32 = 0.9;
@@ -56,12 +56,12 @@ pub fn pulse_wave(phase: f32) -> f32 {
     0.5 - 0.5 * (phase * std::f32::consts::TAU).cos()
 }
 
-/// Comet loader cell opacity for a phase: 0.08 → 1 → 0.08.
+/// Nova loader cell opacity for a phase: 0.08 → 1 → 0.08.
 pub fn pulse_opacity(phase: f32) -> f32 {
     PULSE_MIN_OPACITY + (1.0 - PULSE_MIN_OPACITY) * pulse_wave(phase)
 }
 
-/// Comet loader cell scale for a phase: 0.9 → 1 → 0.9.
+/// Nova loader cell scale for a phase: 0.9 → 1 → 0.9.
 pub fn pulse_scale(phase: f32) -> f32 {
     PULSE_MIN_SCALE + (1.0 - PULSE_MIN_SCALE) * pulse_wave(phase)
 }
@@ -91,7 +91,7 @@ pub fn gspin_cell_phase(row: usize, col: usize) -> f32 {
     if max == 0.0 { 0.0 } else { d / (max + 1.0) }
 }
 
-/// The comet mark's pixels — `[x, y]` of each 100×100 cell on the 820×940
+/// The nova mark's pixels — `[x, y]` of each 100×100 cell on the 820×940
 /// canvas (comet's `logo.tsx` CELLS), shared by the static mark and the
 /// animated loader.
 #[rustfmt::skip]
@@ -156,7 +156,7 @@ mod tests {
         );
         // Always inside the unit interval, for any input.
         for raw in [-4.2f32, -0.1, 0.0, 0.5, 7.9] {
-            for index in 0..COMET_CELLS {
+            for index in 0..NOVA_CELLS {
                 let phase = staggered_phase(raw, index, PULSE_STAGGER);
                 assert!((0.0..1.0).contains(&phase), "{raw} {index} -> {phase}");
             }

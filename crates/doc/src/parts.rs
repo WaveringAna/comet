@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use comet_proto::{AgentEvent, ToolCall, UserInputQuestion};
+use nova_proto::{AgentEvent, ToolCall, UserInputQuestion};
 
 use crate::constants::MSG_INLINE_MAX;
 
@@ -379,7 +379,7 @@ mod tests {
         let reset = fold_event_into_parts(
             &parts,
             &AgentEvent::SessionStarted {
-                harness: comet_proto::HarnessId::Mock,
+                harness: nova_proto::HarnessId::Mock,
                 model: "m".into(),
                 tools: vec![],
                 cwd: "/".into(),

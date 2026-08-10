@@ -8,13 +8,13 @@
 
 use std::time::{Duration, Instant};
 
-use comet_proto::{
-    PiPackageInfo, PiProviderStatus, PiResourceInfo, PiSettingsScope, PiSettingsSnapshot,
-};
-use comet_rpc::methods;
 use gpui::{
     AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
+use nova_proto::{
+    PiPackageInfo, PiProviderStatus, PiResourceInfo, PiSettingsScope, PiSettingsSnapshot,
+};
+use nova_rpc::methods;
 
 use crate::composer::ComposerInput;
 use crate::popover::{self, Loadable};
@@ -940,7 +940,7 @@ impl PiSettingsPage {
 
         div().flex().flex_col()
             .child(crate::settings::widgets::section_card(theme).children(rows))
-            .child(crate::settings::widgets::warning_strip(theme, "Comet runs Pi in RPC mode. Tool and event extensions work; Pi TUI themes, custom editors, footers, and overlays do not render inside Comet."))
+            .child(crate::settings::widgets::warning_strip(theme, "Nova runs Pi in RPC mode. Tool and event extensions work; Pi TUI themes, custom editors, footers, and overlays do not render inside Nova."))
             .child(div().mt(px(24.0)).text_size(px(13.0)).font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child(SharedString::from("Effective settings")))
             .child(div().id("pi-effective-settings").mt(px(10.0)).max_h(px(360.0)).overflow_y_scroll().rounded(px(12.0)).border_1().border_color(theme.border).bg(theme.surface)
                 .p(px(16.0)).font_family(theme.font_mono.clone()).text_size(px(11.5)).line_height(px(18.0)).text_color(theme.text_muted)
@@ -1059,7 +1059,7 @@ impl PiSettingsPage {
 }
 
 fn decode_snapshot(
-    result: Result<serde_json::Value, comet_rpc::RpcError>,
+    result: Result<serde_json::Value, nova_rpc::RpcError>,
 ) -> Loadable<PiSettingsSnapshot> {
     match result {
         Ok(value) => serde_json::from_value(value)

@@ -12,14 +12,14 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use comet_doc::{CommandBasedOn, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
-use comet_engine::{EngineCore, HarnessRegistry};
-use comet_harness::{Harness, HarnessError, RunControls};
-use comet_proto::{
+use nova_doc::{CommandBasedOn, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
+use nova_engine::{EngineCore, HarnessRegistry};
+use nova_harness::{Harness, HarnessError, RunControls};
+use nova_proto::{
     AgentEvent, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode,
 };
-use comet_rpc::methods;
+use nova_rpc::methods;
 
 const VIEWER: &str = "viewer-device";
 
@@ -72,7 +72,7 @@ impl Harness for ScriptedHarness {
                 },
                 AgentEvent::ToolCall {
                     id: "t-1".into(),
-                    call: comet_proto::ToolCall::Exec {
+                    call: nova_proto::ToolCall::Exec {
                         command: "cargo test\n--workspace".into(),
                     },
                 },
@@ -225,8 +225,8 @@ async fn two_engines_share_a_workspace() {
 
     // CreateProject + CreateChat on A (Mutate over the real RPC surface), hosted
     // by dev-a via the project.
-    let client_a = comet_rpc::memory_client(a.rpc_service());
-    let client_b = comet_rpc::memory_client(b.rpc_service());
+    let client_a = nova_rpc::memory_client(a.rpc_service());
+    let client_b = nova_rpc::memory_client(b.rpc_service());
     client_a
         .call(
             methods::MUTATE,
@@ -456,7 +456,7 @@ async fn chat_config_selects_the_run_harness() {
         || {
             handle.doc().read_entries().unwrap_or_default().iter().any(|e| {
                 e.parts.iter().any(
-                    |p| matches!(p, comet_doc::MessagePart::Text { text, .. } if text == "From cursor"),
+                    |p| matches!(p, nova_doc::MessagePart::Text { text, .. } if text == "From cursor"),
                 )
             })
         },

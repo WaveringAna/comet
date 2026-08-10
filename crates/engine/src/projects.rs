@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 
-use comet_proto::Project;
+use nova_proto::Project;
 
 use crate::repos::Repos;
 use crate::workspace_host::WorkspaceHost;

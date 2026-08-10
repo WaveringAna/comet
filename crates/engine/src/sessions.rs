@@ -25,15 +25,15 @@ use futures::StreamExt;
 use serde::Deserialize as _;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use comet_doc::{
+use nova_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     fold_event_into_parts, sanitize_tool_call,
 };
-use comet_harness::{
+use nova_harness::{
     CancellationToken, CollaborationBridgeEvent, CollaborationCommand, Harness, RunControls,
     SteerMessage,
 };
-use comet_proto::{
+use nova_proto::{
     AgentEvent, ChatUsage, ChildAgent, ChildAgentStatus, CollaborationAction,
     CollaborationControlReply, CollaborationControlRequest, CollaborationMessage,
     CollaborationSession, CollaborationSpeaker, DoneStatus, HarnessId, RunRequest, Session,
@@ -107,7 +107,7 @@ struct Inner {
     last_requests: Mutex<HashMap<String, RunRequest>>,
     /// Harness-native session ids per chat (resume continuity across turns) —
     /// the live-process cache over the durable copy on the workspace chat row
-    /// (comet kept the same pair on `chats.harness_session_id`). An empty
+    /// (nova kept the same pair on `chats.harness_session_id`). An empty
     /// session id is the "do not resume" tombstone after a rejected resume.
     harness_sessions: Mutex<HashMap<String, HarnessSessionRef>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
@@ -470,7 +470,7 @@ impl SessionsEngine {
         lock(&self.inner.statuses).values().any(|s| {
             matches!(
                 s.status,
-                comet_proto::SessionStatus::Working | comet_proto::SessionStatus::AwaitingInput
+                nova_proto::SessionStatus::Working | nova_proto::SessionStatus::AwaitingInput
             )
         })
     }
@@ -512,7 +512,7 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         tool_id: &str,
-    ) -> Result<comet_proto::ToolOutputReply, EngineError> {
+    ) -> Result<nova_proto::ToolOutputReply, EngineError> {
         let replay = self.inner.journal.replay(chat_id, 0)?;
         for (_, event) in replay.iter().rev() {
             if let AgentEvent::ToolResult {
@@ -523,14 +523,14 @@ impl SessionsEngine {
             } = event
                 && id == tool_id
             {
-                return Ok(comet_proto::ToolOutputReply {
+                return Ok(nova_proto::ToolOutputReply {
                     found: true,
                     output: output.clone(),
                     truncated: *output_truncated,
                 });
             }
         }
-        Ok(comet_proto::ToolOutputReply {
+        Ok(nova_proto::ToolOutputReply {
             found: false,
             output: None,
             truncated: false,
@@ -544,7 +544,7 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         tool_id: &str,
-    ) -> Result<comet_proto::ToolDiffReply, EngineError> {
+    ) -> Result<nova_proto::ToolDiffReply, EngineError> {
         Ok(self.inner.ephemeral_diffs.load(chat_id, tool_id)?)
     }
 
@@ -901,7 +901,7 @@ impl SessionsEngine {
                             reasoning: None,
                             model_options: Default::default(),
                             cwd,
-                            sandbox: comet_proto::SandboxLevel::WorkspaceWrite,
+                            sandbox: nova_proto::SandboxLevel::WorkspaceWrite,
                             auto_approve: false,
                             attachments: Vec::new(),
                             resume: None,
@@ -1378,15 +1378,15 @@ async fn drive_collaboration_events(
                     continue;
                 };
                 inner.update_collaboration(&chat_id, |state| {
-                    if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
-                        if matches!(
+                    if let Some(child) = state.children.iter_mut().find(|child| child.id == id)
+                        && matches!(
                             child.status,
                             ChildAgentStatus::Working | ChildAgentStatus::Starting
-                        ) {
-                            child.status = ChildAgentStatus::Stopped;
-                            child.activity = None;
-                            child.updated_at = now_ms();
-                        }
+                        )
+                    {
+                        child.status = ChildAgentStatus::Stopped;
+                        child.activity = None;
+                        child.updated_at = now_ms();
                     }
                 });
             }
@@ -1553,12 +1553,12 @@ async fn drive_run(
     // so the gate still catches real crashes. touch_session throttles at 10s.
     let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // PERSISTENT SESSION (comet runsBySession): a completed turn on a
+    // PERSISTENT SESSION (nova runsBySession): a completed turn on a
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
     // routes into a live run) starts the next turn with zero respawn/resume
     // latency. `Some(when)` = idle since then; the 30-min reaper below ends
-    // a session nobody comes back to (comet SESSION_IDLE_MS).
+    // a session nobody comes back to (nova SESSION_IDLE_MS).
     const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     let mut idle_since: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
@@ -1595,7 +1595,7 @@ async fn drive_run(
                 inner.touch_session(&chat_id);
                 continue;
             }
-            // Idle reaper (comet SESSION_IDLE_MS): a parked persistent session
+            // Idle reaper (nova SESSION_IDLE_MS): a parked persistent session
             // nobody returned to in 30 minutes releases its child. The turn
             // was finalized at Done, so this end is clean — no aborted stamp.
             _ = tokio::time::sleep_until(

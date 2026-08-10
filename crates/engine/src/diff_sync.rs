@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
 
-use comet_proto::{Chat, CheckoutDiff, DiffFileSummary};
+use nova_proto::{Chat, CheckoutDiff, DiffFileSummary};
 
 use crate::EngineError;
 use crate::repos::{CheckoutIdentity, Repos};
@@ -655,7 +655,7 @@ pub async fn capture_diff(repos: &Repos, root: &Path) -> Result<DiffSnapshot, En
     if tracked.truncated {
         let boundary = patch.rfind('\n').unwrap_or(0);
         patch.truncate(boundary);
-        patch.push_str("\n# Comet diff truncated\n");
+        patch.push_str("\n# Nova diff truncated\n");
     }
 
     // `?? path` records; rename records (`R  new\0old`) consume their extra field.

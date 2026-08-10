@@ -15,7 +15,7 @@
 use super::*;
 use crate::motion::TAB_SLIDE;
 use crate::terminal::panel::{drop_index, reorder_tabs, slide_offset};
-use comet_proto::ChatIndicator;
+use nova_proto::ChatIndicator;
 
 /// Fixed tab width (terminal tabs use 118; session titles get a bit more).
 pub(super) const SESSION_TAB_WIDTH: f32 = 140.0;
@@ -200,7 +200,7 @@ impl Shell {
         let tabs: Vec<(
             String,
             SharedString,
-            Option<comet_proto::HarnessId>,
+            Option<nova_proto::HarnessId>,
             ChatIndicator,
         )> = {
             let state = self.state.read(cx);

@@ -13,13 +13,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
 
-use comet_engine::{
+use nova_engine::{
     AgentAccounts, AgentAccountsConfig, EngineCore, HarnessRegistry, Repos, Uploads,
     worktree_branch_from_title,
 };
-use comet_harness::mock::MockHarness;
-use comet_proto::{AgentAccountsSnapshot, AgentEvent, DoneStatus, HarnessId, SandboxLevel};
-use comet_rpc::methods;
+use nova_harness::mock::MockHarness;
+use nova_proto::{AgentAccountsSnapshot, AgentEvent, DoneStatus, HarnessId, SandboxLevel};
+use nova_rpc::methods;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -552,7 +552,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .set_chat_branch(chat_id, &worktree.branch)
         .expect("set branch");
 
-    let request = comet_proto::RunRequest {
+    let request = nova_proto::RunRequest {
         prompt: "please fix the login flow".into(),
         model: None,
         reasoning: None,
@@ -580,7 +580,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     .await;
     assert_eq!(chat.title.as_deref(), Some("Fix Login Flow"));
     // Branch renamed from the title, chat row updated to match.
-    assert_eq!(chat.branch.as_deref(), Some("comet/fix-login-flow"));
+    assert_eq!(chat.branch.as_deref(), Some("nova/fix-login-flow"));
     let head = tokio::process::Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(&worktree.path)
@@ -589,14 +589,14 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .expect("git");
     assert_eq!(
         String::from_utf8_lossy(&head.stdout).trim(),
-        "comet/fix-login-flow"
+        "nova/fix-login-flow"
     );
 
     // A titled chat is never re-titled: rename, run again, title sticks.
     core.workspace
         .rename_chat(chat_id, "My Custom Name")
         .expect("rename");
-    let request = comet_proto::RunRequest {
+    let request = nova_proto::RunRequest {
         prompt: "another request".into(),
         model: None,
         reasoning: None,
@@ -640,7 +640,7 @@ async fn rename_worktree_branch_guards_and_collisions() {
 
     // Guard: expected branch mismatch → no-op, returns the actual branch.
     let unchanged = repos
-        .rename_worktree_branch(wt_path, "comet/not-this-one", "Some Title")
+        .rename_worktree_branch(wt_path, "nova/not-this-one", "Some Title")
         .await
         .expect("guarded");
     assert_eq!(unchanged, wt.branch);
@@ -650,15 +650,15 @@ async fn rename_worktree_branch_guards_and_collisions() {
         .rename_worktree_branch(wt_path, &wt.branch, "Add Dark Mode!")
         .await
         .expect("renamed");
-    assert_eq!(renamed, "comet/add-dark-mode");
+    assert_eq!(renamed, "nova/add-dark-mode");
 
-    // Already renamed → the guard (branch no longer comet/<folder>) makes any
+    // Already renamed → the guard (branch no longer nova/<folder>) makes any
     // further title rename a no-op.
     let again = repos
-        .rename_worktree_branch(wt_path, "comet/add-dark-mode", "Different Title")
+        .rename_worktree_branch(wt_path, "nova/add-dark-mode", "Different Title")
         .await
         .expect("second rename");
-    assert_eq!(again, "comet/add-dark-mode");
+    assert_eq!(again, "nova/add-dark-mode");
 
     // Collision: a second worktree whose title slug already exists gets the
     // stable hash suffix.
@@ -671,20 +671,35 @@ async fn rename_worktree_branch_guards_and_collisions() {
         .await
         .expect("suffixed rename");
     assert!(
-        renamed2.starts_with("comet/add-dark-mode-")
-            && renamed2.len() == "comet/add-dark-mode-".len() + 6,
+        renamed2.starts_with("nova/add-dark-mode-")
+            && renamed2.len() == "nova/add-dark-mode-".len() + 6,
         "suffixed: {renamed2}"
     );
+
+    // Migration: worktrees created before the rename still pass the ownership
+    // guard and move onto the new prefix when they receive a title.
+    let wt3 = repos
+        .create_worktree(&repo_dir, "main")
+        .await
+        .expect("legacy worktree");
+    let wt3_path = Path::new(&wt3.path);
+    let legacy = format!("comet/{}", wt3.name);
+    git(wt3_path, &["branch", "-m", "--", &legacy]).await;
+    let migrated = repos
+        .rename_worktree_branch(wt3_path, &legacy, "Migrate Branch")
+        .await
+        .expect("legacy branch migrated");
+    assert_eq!(migrated, "nova/migrate-branch");
 
     // Slug edge cases.
     assert_eq!(
         worktree_branch_from_title("  Fix `Login` Flow!  "),
-        "comet/fix-login-flow"
+        "nova/fix-login-flow"
     );
-    assert_eq!(worktree_branch_from_title("***"), "comet/update");
+    assert_eq!(worktree_branch_from_title("***"), "nova/update");
     assert_eq!(
         worktree_branch_from_title("Cafe's Dark Mode"),
-        "comet/cafes-dark-mode"
+        "nova/cafes-dark-mode"
     );
 }
 
@@ -696,7 +711,7 @@ async fn rename_worktree_branch_guards_and_collisions() {
 async fn rpc_dispatch_for_m5c_methods() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let core = assemble_with_mock(&tmp.path().join("data"), Vec::new());
-    let client = comet_rpc::memory_client(core.rpc_service());
+    let client = nova_rpc::memory_client(core.rpc_service());
 
     // Uploads: chunk → commit → readback over the wire.
     let payload = b"fake png bytes".to_vec();

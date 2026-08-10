@@ -16,13 +16,13 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use comet_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
-use comet_proto::view::{
+use nova_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
+use nova_proto::view::{
     self, CheckoutKind, CheckoutPlan, ConnectionStatus, GatePhase, Indicator, display_status,
     format_time_ago,
 };
-use comet_proto::{Chat, ChatIndicator, Device, Project, RunRequest, SandboxLevel, Session};
-use comet_rpc::methods;
+use nova_proto::{Chat, ChatIndicator, Device, Project, RunRequest, SandboxLevel, Session};
+use nova_rpc::methods;
 
 use crate::composer::Composer;
 use crate::daemon::Attachment;
@@ -35,8 +35,8 @@ use crate::transcript::Transcript;
 pub type Effects = Vec<Command>;
 
 /// Human label for an effort level.
-pub fn reasoning_label(level: comet_proto::ReasoningLevel) -> &'static str {
-    use comet_proto::ReasoningLevel as R;
+pub fn reasoning_label(level: nova_proto::ReasoningLevel) -> &'static str {
+    use nova_proto::ReasoningLevel as R;
     match level {
         R::Minimal => "Minimal",
         R::Low => "Low",
@@ -87,9 +87,9 @@ const PENDING_CHAT_GRACE: std::time::Duration = std::time::Duration::from_secs(1
 
 /// One row of the flattened sidebar.
 ///
-/// This is comet-native's information architecture, not the original Electron
+/// This is nova-native's information architecture, not the original Electron
 /// app's: **two sections**, not one grouped list. The desktop shell
-/// (`comet-ui/src/shell.rs::render_chat_sidebar`) reads
+/// (`nova-ui/src/shell.rs::render_chat_sidebar`) reads
 ///
 /// - **Projects** — the (device, folder) pairs, each one line of "name · device",
 ///   carrying an aggregate attention dot so a live session is visible even when
@@ -199,15 +199,15 @@ pub struct Draft {
     pub picked_ref: Option<usize>,
     /// Branches for the project, once `ListRefs` answers. `None` while loading;
     /// empty for a project that is not a git checkout.
-    pub refs: Option<Vec<comet_proto::RepoRef>>,
+    pub refs: Option<Vec<nova_proto::RepoRef>>,
     /// Model and effort chosen before the session exists. Carried onto
     /// `createChat` so the first run starts on the right settings.
-    pub model: Option<comet_proto::Model>,
-    pub reasoning: Option<comet_proto::ReasoningLevel>,
+    pub model: Option<nova_proto::Model>,
+    pub reasoning: Option<nova_proto::ReasoningLevel>,
 }
 
 impl Draft {
-    pub fn selected_ref(&self) -> Option<&comet_proto::RepoRef> {
+    pub fn selected_ref(&self) -> Option<&nova_proto::RepoRef> {
         let refs = self.refs.as_ref()?;
         match self.picked_ref {
             Some(index) => refs.get(index),
@@ -258,13 +258,13 @@ pub enum Overlay {
     Checkout { active: usize },
     /// Effort picker, from the active model's levels.
     Reasoning {
-        levels: Vec<comet_proto::ReasoningLevel>,
+        levels: Vec<nova_proto::ReasoningLevel>,
         active: usize,
     },
     /// Model picker for the open session's harness.
     Models {
         /// `None` until `ListModels` answers.
-        models: Option<Vec<comet_proto::Model>>,
+        models: Option<Vec<nova_proto::Model>>,
         active: usize,
     },
     /// A single-line text prompt (rename).
@@ -343,7 +343,7 @@ pub struct App {
     pub attachment: Option<Attachment>,
     pub devices: Vec<Device>,
     pub projects: Vec<Project>,
-    /// Sorted by `comet_proto::view::sort_chats`; includes archived rows.
+    /// Sorted by `nova_proto::view::sort_chats`; includes archived rows.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
     pub local_device_id: Option<String>,
@@ -1207,8 +1207,8 @@ impl App {
 
         // The draft's model/effort become the chat's config, so the first run
         // starts on the settings you picked rather than the harness default.
-        let config = draft.model.as_ref().map(|model| comet_proto::ChatConfig {
-            harness: comet_proto::HarnessId::ClaudeCode,
+        let config = draft.model.as_ref().map(|model| nova_proto::ChatConfig {
+            harness: nova_proto::HarnessId::ClaudeCode,
             model: Some(model.id.clone()),
             reasoning: draft.reasoning,
             model_options: Default::default(),
@@ -1367,7 +1367,7 @@ impl App {
     }
 
     /// The selected project's non-archived sessions, as the tab strip above the
-    /// transcript. This is where a project's own sessions live in comet-native —
+    /// transcript. This is where a project's own sessions live in nova-native —
     /// the sidebar's Sessions list is global and answers a different question.
     ///
     /// Tab order is creation order (`sort_tabs`): activity must never reorder
@@ -1619,15 +1619,15 @@ impl App {
     }
 
     /// The project the sidebar has selected.
-    pub fn selected_project_row(&self) -> Option<&comet_proto::Project> {
+    pub fn selected_project_row(&self) -> Option<&nova_proto::Project> {
         let id = self.selected_project.as_deref()?;
         self.projects.iter().find(|project| project.id == id)
     }
 
     /// The effort levels the active model offers, or a sensible default set
     /// when no catalogue entry is known.
-    fn reasoning_levels(&self) -> Vec<comet_proto::ReasoningLevel> {
-        use comet_proto::ReasoningLevel as R;
+    fn reasoning_levels(&self) -> Vec<nova_proto::ReasoningLevel> {
+        use nova_proto::ReasoningLevel as R;
         if let Some(model) = self.draft.as_ref().and_then(|draft| draft.model.as_ref())
             && !model.reasoning_levels.is_empty()
         {
@@ -1683,7 +1683,7 @@ impl App {
     }
 
     /// True while something on screen is animating: a live session, or the boot
-    /// gate's comet mark. The event loop only arms its timer when this holds,
+    /// gate's nova mark. The event loop only arms its timer when this holds,
     /// so an idle, connected app costs zero wakeups.
     pub fn animating(&self) -> bool {
         if !matches!(self.gate(), GatePhase::Ready) {
@@ -1890,12 +1890,12 @@ impl App {
         // A draft has no chat row yet, but choosing its model is the whole
         // point of the canvas — so it is a valid target too.
         let harness = match (&self.draft, self.selected_chat_row()) {
-            (Some(_), _) => comet_proto::HarnessId::ClaudeCode,
+            (Some(_), _) => nova_proto::HarnessId::ClaudeCode,
             (None, Some(chat)) => chat
                 .config
                 .as_ref()
                 .map(|config| config.harness)
-                .unwrap_or(comet_proto::HarnessId::ClaudeCode),
+                .unwrap_or(nova_proto::HarnessId::ClaudeCode),
             (None, None) => {
                 self.notify("Open a session first.".into());
                 return Vec::new();
@@ -2084,13 +2084,13 @@ impl App {
     }
 
     /// Write an effort level onto the open session's config.
-    fn set_reasoning(&mut self, level: comet_proto::ReasoningLevel) -> Effects {
+    fn set_reasoning(&mut self, level: nova_proto::ReasoningLevel) -> Effects {
         let Some(chat) = self.selected_chat_row() else {
             return Vec::new();
         };
         let chat_id = chat.id.clone();
-        let mut config = chat.config.clone().unwrap_or(comet_proto::ChatConfig {
-            harness: comet_proto::HarnessId::ClaudeCode,
+        let mut config = chat.config.clone().unwrap_or(nova_proto::ChatConfig {
+            harness: nova_proto::HarnessId::ClaudeCode,
             model: None,
             reasoning: None,
             model_options: Default::default(),
@@ -2114,13 +2114,13 @@ impl App {
 
     /// Write a model onto the open session's config (a full-config LWW replace,
     /// as the desktop composer does).
-    fn set_model(&mut self, model: comet_proto::Model) -> Effects {
+    fn set_model(&mut self, model: nova_proto::Model) -> Effects {
         let Some(chat) = self.selected_chat_row() else {
             return Vec::new();
         };
         let chat_id = chat.id.clone();
-        let mut config = chat.config.clone().unwrap_or(comet_proto::ChatConfig {
-            harness: comet_proto::HarnessId::ClaudeCode,
+        let mut config = chat.config.clone().unwrap_or(nova_proto::ChatConfig {
+            harness: nova_proto::HarnessId::ClaudeCode,
             model: None,
             reasoning: None,
             model_options: Default::default(),
@@ -2277,7 +2277,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_proto::{SessionStatus, view::ConnectionStatus};
+    use nova_proto::{SessionStatus, view::ConnectionStatus};
 
     /// Long enough that it wraps differently at 60 and at 30 columns, which is
     /// what the resize-invalidation test actually needs to observe.
@@ -2332,7 +2332,7 @@ mod tests {
     /// An app with one project and two sessions, nothing selected yet.
     fn seeded() -> App {
         let mut app = App::with_theme(crate::theme::Theme::dark());
-        app.apply(Update::Projects(vec![project("s1", "/dev/comet", 0)]));
+        app.apply(Update::Projects(vec![project("s1", "/dev/nova", 0)]));
         app.apply(Update::Chats(vec![
             chat("c1", "s1", 1),
             chat("c2", "s1", 2),
@@ -2442,7 +2442,7 @@ mod tests {
         assert_eq!(command["kind"], "run", "an idle session starts a run");
         assert_eq!(command["request"]["prompt"], "ship it");
         // cwd falls back to the project's folder when the chat has none of its own.
-        assert_eq!(command["request"]["cwd"], "/dev/comet");
+        assert_eq!(command["request"]["cwd"], "/dev/nova");
         assert_eq!(command["messageId"], message_id.as_str());
 
         // The composer is cleared and the text now lives in the echo, so it is
@@ -2687,7 +2687,7 @@ mod tests {
 
     #[test]
     fn the_checkout_choice_drives_the_plan() {
-        use comet_proto::RepoRef;
+        use nova_proto::RepoRef;
         let mut app = seeded();
         app.apply(Update::Connection(ConnectionStatus::Ready));
         app.act(Action::NewSession);
@@ -2857,7 +2857,7 @@ mod tests {
     #[test]
     fn only_a_live_session_or_the_boot_gate_animates() {
         let mut app = seeded();
-        // The boot gate's comet mark animates while connecting…
+        // The boot gate's nova mark animates while connecting…
         assert!(app.animating(), "the boot splash animates");
         app.apply(Update::Connection(ConnectionStatus::Ready));
         // …but once connected and idle, nothing does, so the loop arms no timer.
@@ -2900,7 +2900,7 @@ mod tests {
         else {
             panic!("expected the project row");
         };
-        assert_eq!(label, "comet");
+        assert_eq!(label, "nova");
         assert_eq!(
             *attention,
             Some(ChatIndicator::AwaitingInput),

@@ -1,26 +1,36 @@
-# Nova
+# nova
 
-A fork of [https://github.com/zeronsh/comet](comet) where the backend will be replaced to hook into pi. many many thanks to zeronsh for the shell
+nova is a local-first, multi-device controller for coding agents, built around pi. it ships a native gpui desktop, a terminal viewport, a headless engine, direct encrypted nova-to-nova sync, and native parent/child agent collaboration.
 
-will be heavily vibed
+the interface began as a fork of [comet](https://github.com/zeronsh/comet). many thanks to zeronsh for the original shell.
 
 ## developing
 
-one command, no env vars:
+one command, no environment setup:
 
 ```sh
 scripts/nova-dev.sh
 ```
 
-starts the engine daemon (if it isn't already running), builds the gui, and opens a window. edit anything under `crates/ui` or `apps/comet` and save — the script rebuilds in the background and swaps the window in place once the new one reports ready. your chats, terminals, and agent sessions live in the daemon, so nothing is lost on swap. failed builds leave the old window alone.
+the script keeps the engine daemon alive, builds the desktop, and warm-swaps the window after successful ui rebuilds. chats, terminals, and agent sessions survive the swap.
 
-there's also a **settings → developer → hot reload** toggle that enables the same ready/restore contract for windows launched outside the script.
+direct commands are also available:
 
-todos
-- [] rip out claude code/codex support
-- [] theming + settings work + maybe atproto for settings storage? or not and let ↓ handle it
-- [] rip out daemons, have nova be able to connect to other novas with iroh + web support
-- [] compile list of good pi extensions 
-- [] reimplement them so we dont run risk of being npm wormed and clean up vibiness
-- [] install script to install pi, these extensions, nova
-- [] pi extension to have a discord thread per session where the agent can interact in
+```sh
+cargo run -p nova
+cargo run -p nova -- headless
+cargo run -p nova -- tui
+```
+
+nova uses `NOVA_DATA_DIR`, `NOVA_IPC_PORT`, and the other `NOVA_*` runtime settings. existing `.comet-native` data and core `COMET_*` settings are detected as migration fallbacks, so the rename does not strand prior chats or device state.
+
+## layout
+
+- `apps/nova` — desktop and headless command
+- `crates/engine` — sessions, repositories, terminals, local state, and peer sync
+- `crates/ui` — native gpui interface
+- `crates/tui` — terminal viewport
+- `crates/nova` — authenticated iroh transport and trust
+- `crates/harness` — pi and compatibility harness adapters
+
+see `ARCHITECTURE.md` for the active system boundary.

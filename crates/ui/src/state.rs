@@ -27,12 +27,12 @@ use gpui::{App, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
-use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
-use comet_engine::{Engine, EngineConfig, EngineRuntime};
-use comet_proto::{
+use nova_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use nova_engine::{Engine, EngineConfig, EngineRuntime};
+use nova_proto::{
     Chat, ChatIndicator, CollaborationSession, Device, HarnessId, Project, Session, SessionStatus,
 };
-use comet_rpc::{RpcClient, connect_ws, memory_client, methods};
+use nova_rpc::{RpcClient, connect_ws, memory_client, methods};
 
 // ---------------------------------------------------------------------------
 // Hot reload (dev-supervisor handoff). The Settings → Developer toggle or
@@ -72,7 +72,7 @@ pub fn live_tokens_per_sec(streamed_chars: u64, elapsed_secs: f32) -> Option<f32
 /// Everything needed to reach (or start) an engine.
 #[derive(Debug, Clone)]
 pub struct EngineBootConfig {
-    /// Data directory for the embedded engine (`~/.comet-native`).
+    /// Data directory for the embedded engine (`~/.nova-native`).
     pub data_dir: PathBuf,
     /// Localhost IPC port to probe / serve.
     pub ipc_port: u16,
@@ -202,7 +202,7 @@ impl EngineHandle {
         // attach to this window's engine with no setup.
         // Best-effort — losing the bind race with another engine costs other
         // viewports, not this one.
-        let ipc_task = match comet_engine::serve_ipc(engine_config.ipc_port, service).await {
+        let ipc_task = match nova_engine::serve_ipc(engine_config.ipc_port, service).await {
             Ok(task) => Some(task),
             Err(err) => {
                 tracing::warn!(
@@ -241,11 +241,11 @@ impl EngineHandle {
 // ---------------------------------------------------------------------------
 
 // The frontend-agnostic derivations (sort orders, staleness gating, sidebar
-// grouping, the boot gate, relative times) live in `comet_proto::view` so the
-// terminal viewport (`comet-tui`) shares one implementation and one test suite
+// grouping, the boot gate, relative times) live in `nova_proto::view` so the
+// terminal viewport (`nova-tui`) shares one implementation and one test suite
 // with this one — a sort order that differs per surface is a bug. Re-exported
 // here because every call site in this crate reads them as `state::…`.
-pub use comet_proto::view::{
+pub use nova_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
     project_label, sort_active, sort_chats, sort_projects, sort_tabs,
@@ -291,7 +291,7 @@ pub struct AppState {
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
     /// Latest `UpdateStatus` frame — drives the sidebar update strip.
-    pub update: Option<comet_update::UpdateStatus>,
+    pub update: Option<nova_update::UpdateStatus>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -382,7 +382,7 @@ impl AppState {
     /// Optimistic local echo of a `setChatConfig` mutate: stamp the row now so
     /// the chips update on click; the next chats watch frame carries the same
     /// value once the engine applies the LWW write.
-    pub fn apply_chat_config(&mut self, chat_id: &str, config: comet_proto::ChatConfig) {
+    pub fn apply_chat_config(&mut self, chat_id: &str, config: nova_proto::ChatConfig) {
         if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.config = Some(config);
         }
@@ -413,7 +413,7 @@ impl AppState {
         self.devices = merged;
     }
 
-    pub fn apply_update(&mut self, status: comet_update::UpdateStatus) {
+    pub fn apply_update(&mut self, status: nova_update::UpdateStatus) {
         self.update = Some(status);
     }
 
@@ -1074,10 +1074,10 @@ fn spawn_transcript_watch(
 mod tests {
     use super::*;
     use chrono::TimeDelta;
-    use comet_engine::{EngineCore, default_registry};
+    use nova_engine::{EngineCore, default_registry};
     // `SessionStatus` is only needed to build the fixtures below — the module
-    // itself derives everything through `comet_proto::view`.
-    use comet_proto::SessionStatus;
+    // itself derives everything through `nova_proto::view`.
+    use nova_proto::SessionStatus;
 
     /// A localhost port that was just free (bind :0, read, drop).
     async fn free_port() -> u16 {
@@ -1126,7 +1126,7 @@ mod tests {
         .unwrap();
         assert_eq!(handle.mode(), EngineMode::InProcess);
 
-        // Attach the way `comet-tui` does, and speak the same protocol.
+        // Attach the way `nova-tui` does, and speak the same protocol.
         let attached = connect_ws(&format!("ws://127.0.0.1:{port}"))
             .await
             .expect("a second viewport must be able to attach");
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_connects_when_daemon_is_listening() {
-        // Stand in for `comet headless`: an engine served over the WS IPC port.
+        // Stand in for `nova headless`: an engine served over the WS IPC port.
         let daemon_dir = tempfile::tempdir().unwrap();
         let core = EngineCore::assemble(
             daemon_dir.path(),
@@ -1192,7 +1192,7 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(comet_rpc::serve_ws_listener(listener, core.rpc_service()));
+        tokio::spawn(nova_rpc::serve_ws_listener(listener, core.rpc_service()));
 
         let ui_dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
@@ -1468,7 +1468,7 @@ mod tests {
                 }],
                 created_at: 0,
                 device_id: "d".into(),
-                status: streaming.then_some(comet_doc::MessageStatus::Streaming),
+                status: streaming.then_some(nova_doc::MessageStatus::Streaming),
                 continuation_of: None,
             }
         }
@@ -1495,7 +1495,7 @@ mod tests {
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Tool {
                     id: "a4-t".into(),
-                    call: comet_proto::ToolCall::ReadFile {
+                    call: nova_proto::ToolCall::ReadFile {
                         path: "/src/main.rs".into(),
                     },
                     is_error: false,
@@ -1508,7 +1508,7 @@ mod tests {
             },
         ];
         // Tool JSON is counted (exact serialized length), on top of the text.
-        let tool_json = serde_json::to_string(&comet_proto::ToolCall::ReadFile {
+        let tool_json = serde_json::to_string(&nova_proto::ToolCall::ReadFile {
             path: "/src/main.rs".into(),
         })
         .unwrap();
@@ -1579,12 +1579,12 @@ mod tests {
     fn apply_chat_config_stamps_the_row() {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
-        let config = comet_proto::ChatConfig {
+        let config = nova_proto::ChatConfig {
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
-            reasoning: Some(comet_proto::ReasoningLevel::XHigh),
+            reasoning: Some(nova_proto::ReasoningLevel::XHigh),
             model_options: serde_json::Map::new(),
-            sandbox: comet_proto::SandboxLevel::WorkspaceWrite,
+            sandbox: nova_proto::SandboxLevel::WorkspaceWrite,
         };
         state.apply_chat_config("a", config.clone());
         assert_eq!(
@@ -1603,12 +1603,12 @@ mod tests {
         // Unknown chat: no-op, no panic.
         state.apply_chat_config(
             "missing",
-            comet_proto::ChatConfig {
+            nova_proto::ChatConfig {
                 harness: HarnessId::ClaudeCode,
                 model: None,
                 reasoning: None,
                 model_options: serde_json::Map::new(),
-                sandbox: comet_proto::SandboxLevel::WorkspaceWrite,
+                sandbox: nova_proto::SandboxLevel::WorkspaceWrite,
             },
         );
     }
@@ -1629,7 +1629,7 @@ mod tests {
         state.selected_chat = Some("c1".into());
         let echo = SessionMessageEntry {
             id: "m1".into(),
-            role: comet_doc::MessageRole::User,
+            role: nova_doc::MessageRole::User,
             parts: vec![],
             created_at: 0,
             device_id: "local".into(),
@@ -1691,8 +1691,8 @@ mod tests {
 
     #[test]
     fn project_labels_from_cwd() {
-        assert_eq!(project_label(Some("/home/w/dev/comet")), "comet");
-        assert_eq!(project_label(Some("/home/w/dev/comet/")), "comet");
+        assert_eq!(project_label(Some("/home/w/dev/nova")), "nova");
+        assert_eq!(project_label(Some("/home/w/dev/nova/")), "nova");
         assert_eq!(project_label(None), "No project");
         assert_eq!(project_label(Some("   ")), "No project");
         assert_eq!(project_label(Some("/")), "/");
@@ -1702,22 +1702,22 @@ mod tests {
     fn grouped_sidebar_preserves_recency_order() {
         // Input is sidebar-sorted (most recent first).
         let chats = [
-            chat_with_cwd("a", 9, Some("/dev/comet")),
+            chat_with_cwd("a", 9, Some("/dev/nova")),
             chat_with_cwd("b", 8, Some("/dev/zed")),
-            chat_with_cwd("c", 7, Some("/dev/comet")),
+            chat_with_cwd("c", 7, Some("/dev/nova")),
             chat_with_cwd("d", 6, None),
         ];
         let groups = group_chats(chats.iter());
         let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
         // Groups ordered by their most recent chat; rows keep order.
-        assert_eq!(labels, ["comet", "zed", "No project"]);
-        let comet_ids: Vec<&str> = groups[0].chats.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(comet_ids, ["a", "c"]);
+        assert_eq!(labels, ["nova", "zed", "No project"]);
+        let nova_ids: Vec<&str> = groups[0].chats.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(nova_ids, ["a", "c"]);
         assert!(group_chats(std::iter::empty()).is_empty());
     }
 
     #[test]
-    fn relative_times_match_comet_format() {
+    fn relative_times_match_nova_format() {
         let now = Utc::now();
         let ago = |secs: i64| now - chrono::Duration::seconds(secs);
         assert_eq!(format_time_ago(ago(0), now), "now");
@@ -1742,10 +1742,10 @@ mod tests {
     #[test]
     fn chat_location_joins_project_and_branch() {
         let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/soccertcg"));
-        c.branch = Some("comet/rebalance".into());
+        c.branch = Some("nova/rebalance".into());
         assert_eq!(
             chat_location(&c).as_deref(),
-            Some("soccertcg · comet/rebalance")
+            Some("soccertcg · nova/rebalance")
         );
         c.branch = None;
         assert_eq!(chat_location(&c).as_deref(), Some("soccertcg"));

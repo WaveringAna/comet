@@ -11,15 +11,15 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use comet_doc::{MessagePart, SessionCommandPayload};
-use comet_engine::peer_sync::PeerSync;
-use comet_engine::{EngineCore, HarnessRegistry};
-use comet_harness::{Harness, HarnessError, RunControls};
-use comet_proto::{
+use nova_doc::{MessagePart, SessionCommandPayload};
+use nova_engine::peer_sync::PeerSync;
+use nova_engine::{EngineCore, HarnessRegistry};
+use nova_harness::{Harness, HarnessError, RunControls};
+use nova_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode,
 };
-use comet_rpc::methods;
+use nova_rpc::methods;
 
 // ---------------------------------------------------------------------------
 // Direct listener fixtures
@@ -36,7 +36,7 @@ async fn start_nova_listener(core: &EngineCore) -> (String, tokio::task::JoinHan
     let trust = core.nova.trust();
     let identity = core.nova.identity();
     let pairing = core.nova.pairing();
-    let task = tokio::spawn(comet_nova::transport::serve_iroh_endpoint(
+    let task = tokio::spawn(nova_network::transport::serve_iroh_endpoint(
         endpoint, service, trust, identity, pairing,
     ));
     (ticket, task)
@@ -155,7 +155,7 @@ async fn target_device_id_routes_over_paired_nova_engines() {
         .write_user_message("m-b-1", "hello from B", 1_000)
         .expect("write user message");
 
-    let client = comet_rpc::memory_client(core_a.rpc_service());
+    let client = nova_rpc::memory_client(core_a.rpc_service());
 
     // Our own id in targetDeviceId: handled locally, no forward.
     let local = client
@@ -176,7 +176,7 @@ async fn target_device_id_routes_over_paired_nova_engines() {
         .await
         .expect("direct call from A to B");
     assert!(remote.is_array());
-    let client_b = comet_rpc::memory_client(core_b.rpc_service());
+    let client_b = nova_rpc::memory_client(core_b.rpc_service());
     let reverse = client_b
         .call(
             methods::LIST_HARNESSES,
@@ -509,7 +509,7 @@ async fn terminal_stream_proxies_over_nova() {
     let (endpoint_a, listener_a) = start_nova_listener(&core_a).await;
     let (endpoint_b, listener_b) = start_nova_listener(&core_b).await;
     pair_engines(&core_a, &endpoint_a, &core_b, &endpoint_b).await;
-    let client = comet_rpc::memory_client(core_a.rpc_service());
+    let client = nova_rpc::memory_client(core_a.rpc_service());
 
     let session = client
         .call(
@@ -585,7 +585,7 @@ async fn terminal_stream_proxies_over_nova() {
 async fn unpaired_remote_target_fails_clearly() {
     let dirs = tempfile::tempdir().expect("tempdir");
     let core = assemble(&dirs.path().join("solo"), "device-solo");
-    let client = comet_rpc::memory_client(core.rpc_service());
+    let client = nova_rpc::memory_client(core.rpc_service());
     let err = client
         .call(
             methods::LIST_HARNESSES,

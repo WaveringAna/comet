@@ -2,9 +2,9 @@
 //! of them should own — sort orders, staleness gating, sidebar grouping, the
 //! boot gate, relative times.
 //!
-//! This lives in `proto` rather than in a viewport crate because comet-native
-//! has two of them (the gpui app in `comet-ui`, the terminal app in
-//! `comet-tui`) and a *divergent* sort order between them is a real bug: the
+//! This lives in `proto` rather than in a viewport crate because nova-native
+//! has two of them (the gpui app in `nova-ui`, the terminal app in
+//! `nova-tui`) and a *divergent* sort order between them is a real bug: the
 //! same workspace doc must produce the same row order on every surface. Both
 //! crates re-export from here, so there is exactly one implementation and one
 //! test suite per rule.
@@ -667,7 +667,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
 /// Colors live here rather than in either viewport because the *meaning* of a
 /// dot must not differ between surfaces — a session that reads "running" in the
 /// desktop app cannot read "error" in the terminal. Each frontend converts to
-/// its own color type; `comet-ui` has the oklch→sRGB math, `comet-tui` pins the
+/// its own color type; `nova-ui` has the oklch→sRGB math, `nova-tui` pins the
 /// converted values with a test.
 pub mod dot {
     /// Running. Pink, not amber: the harsh yellow read as a warning, and running
@@ -707,7 +707,7 @@ pub enum CheckoutPlan {
     CurrentCheckout,
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
-    /// `CreateWorktree` off `base` on send (the engine mints a `comet/<name>`
+    /// `CreateWorktree` off `base` on send (the engine mints a `nova/<name>`
     /// branch). `base: None` = refs never loaded — send falls back to the project
     /// folder rather than failing.
     NewWorktree { base: Option<String> },
@@ -826,7 +826,7 @@ mod command_names_tests {
     fn plain_commands_name_themselves() {
         assert_eq!(command_names("git log --oneline"), ["git"]);
         assert_eq!(command_names("/usr/bin/git status"), ["git"]);
-        assert_eq!(command_names("cargo test -p comet-ui"), ["cargo"]);
+        assert_eq!(command_names("cargo test -p nova-ui"), ["cargo"]);
     }
 
     #[test]

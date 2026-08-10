@@ -1,4 +1,4 @@
-//! comet-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket and
+//! nova-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket and
 //! in-memory transports.
 //!
 //! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on

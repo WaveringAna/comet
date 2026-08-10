@@ -6,13 +6,13 @@
 //! is `#[ignore]`d; run it with `--ignored --nocapture` and pipe to a renderer.
 
 use chrono::Utc;
-use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
-use comet_proto::view::ConnectionStatus;
-use comet_proto::{Chat, Project};
-use comet_tui::app::App;
-use comet_tui::link::Update;
-use comet_tui::render;
-use comet_tui::theme::Theme;
+use nova_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use nova_proto::view::ConnectionStatus;
+use nova_proto::{Chat, Project};
+use nova_tui::app::App;
+use nova_tui::link::Update;
+use nova_tui::render;
+use nova_tui::theme::Theme;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -74,7 +74,7 @@ fn scene() -> App {
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
     app.apply(Update::Projects(vec![
-        project("s1", "/home/w/comet-native"),
+        project("s1", "/home/w/nova-native"),
         project("s2", "/home/w/website"),
     ]));
     app.apply(Update::Chats(vec![
@@ -111,7 +111,7 @@ fn scene() -> App {
                     ),
                     MessagePart::Tool {
                         id: "p1".into(),
-                        call: comet_proto::ToolCall::Exec {
+                        call: nova_proto::ToolCall::Exec {
                             command: "cargo test --workspace".into(),
                         },
                         is_error: false,
@@ -119,7 +119,7 @@ fn scene() -> App {
                     },
                     MessagePart::Tool {
                         id: "p2".into(),
-                        call: comet_proto::ToolCall::Exec {
+                        call: nova_proto::ToolCall::Exec {
                             command: "git log -5 --oneline".into(),
                         },
                         is_error: false,

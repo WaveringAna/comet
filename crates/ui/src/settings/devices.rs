@@ -9,7 +9,7 @@ use gpui::{
 };
 use std::time::Duration;
 
-use comet_rpc::methods;
+use nova_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover;

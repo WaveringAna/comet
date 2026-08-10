@@ -5,12 +5,12 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use comet_doc::{MessagePart, MessageRole};
-use comet_proto::{
+use nova_doc::{MessagePart, MessageRole};
+use nova_proto::{
     ChildAgent, ChildAgentStatus, CollaborationAction, CollaborationControlReply,
     CollaborationControlRequest, CollaborationSpeaker,
 };
-use comet_rpc::methods;
+use nova_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
@@ -147,7 +147,7 @@ impl CollaborationPanel {
                 .await
                 .and_then(|value| {
                     serde_json::from_value::<CollaborationControlReply>(value)
-                        .map_err(|error| comet_rpc::RpcError::Transport(error.to_string()))
+                        .map_err(|error| nova_rpc::RpcError::Transport(error.to_string()))
                 });
             this.update(cx, |panel, cx| {
                 panel.busy = false;

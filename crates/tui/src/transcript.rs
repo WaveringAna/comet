@@ -26,8 +26,8 @@
 
 use std::hash::{Hash, Hasher};
 
-use comet_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use comet_proto::ToolCall;
+use nova_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use nova_proto::ToolCall;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -287,7 +287,7 @@ fn fingerprint(entry: &SessionMessageEntry, is_last: bool) -> u64 {
                 // flips without changing any length.
                 is_error.hash(&mut hasher);
                 resolved.hash(&mut hasher);
-                let (label, detail) = comet_proto::view::tool_chip_content(call);
+                let (label, detail) = nova_proto::view::tool_chip_content(call);
                 label.hash(&mut hasher);
                 hash_text(&detail, &mut hasher);
             }
@@ -664,7 +664,7 @@ fn render_tool_group(
         .iter()
         .map(|(call, is_error, _)| ((*call).clone(), *is_error))
         .collect();
-    let summary = comet_proto::view::tool_group_summary(&pairs);
+    let summary = nova_proto::view::tool_group_summary(&pairs);
     let chevron = if expanded { "⌄" } else { "›" };
     // Not a block. A tool run is the agent's own bookkeeping, not something it
     // said to you, and giving it a fill of its own made every reply look like it
@@ -682,7 +682,7 @@ fn render_tool_group(
     // Indented under the chevron rather than railed beside it: the summary above
     // already brackets the run, so a vertical stroke is a second bracket.
     for (call, is_error, resolved) in tools {
-        let (label, detail) = comet_proto::view::tool_chip_content(call);
+        let (label, detail) = nova_proto::view::tool_chip_content(call);
         let label_style = Style::default().fg(if *is_error {
             theme.danger
         } else if *resolved {
@@ -715,7 +715,7 @@ fn render_error(message: &str, width: usize, theme: &Theme, out: &mut Vec<Line<'
 }
 
 fn render_questions(
-    questions: &[comet_proto::UserInputQuestion],
+    questions: &[nova_proto::UserInputQuestion],
     resolved: bool,
     width: usize,
     theme: &Theme,

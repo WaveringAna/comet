@@ -1,4 +1,4 @@
-//! Loaders: the comet pulse loader, the gradient matrix spinner, and the boot
+//! Loaders: the nova pulse loader, the gradient matrix spinner, and the boot
 //! splash content. All motion routes through `crate::motion` pure helpers, so
 //! the math is unit-tested and these elements are testable-by-compile.
 //!
@@ -12,22 +12,20 @@
 use gpui::{AnyElement, IntoElement, ParentElement, SharedString, Styled, div, px};
 
 use crate::motion::{
-    self, AnimationExt as _, COMET_PULSE, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT,
+    self, AnimationExt as _, GRADIENT_SPIN, NOVA_PULSE, PULSE_STAGGER, SPLASH_OUT,
 };
 use crate::theme::Theme;
 
-// Shared with the terminal viewport (`comet_proto::motion`) so both animate the
+// Shared with the terminal viewport (`nova_proto::motion`) so both animate the
 // same loaders from the same numbers.
-pub use comet_proto::motion::{
-    COMET_CELLS, MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, mark_cell_stagger,
-};
+pub use nova_proto::motion::{MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, NOVA_CELLS, mark_cell_stagger};
 
-/// The animated comet mark (comet-loader.tsx `CometLoader`): the full logo
+/// The animated Nova mark, inherited from comet-loader.tsx `CometLoader`: the full logo
 /// pixel grid with a light wave sweeping tail→head. Each cell rests dim
 /// (opacity 0.08, scale 0.9) and flares to full as the crest passes; per-cell
 /// stagger follows the flight axis. `height_px` sets the mark's height (width
 /// follows the 820:940 canvas).
-pub fn comet_mark_loader(id: &'static str, theme: &Theme, height_px: f32) -> impl IntoElement {
+pub fn nova_mark_loader(id: &'static str, theme: &Theme, height_px: f32) -> impl IntoElement {
     let color = theme.text;
     let scale = height_px / 940.0;
     let cell = 100.0 * scale;
@@ -51,7 +49,7 @@ pub fn comet_mark_loader(id: &'static str, theme: &Theme, height_px: f32) -> imp
                         .rounded(px(16.0 * scale))
                         .bg(color)
                         .size(px(cell))
-                        .with_animation((id, i), COMET_PULSE.repeating(), move |el, delta| {
+                        .with_animation((id, i), NOVA_PULSE.repeating(), move |el, delta| {
                             // Negative CSS delay ⇒ the cell starts mid-cycle:
                             // the stagger ADDS phase (comet-loader.tsx delayFor).
                             let phase = (delta + stagger).rem_euclid(1.0);
@@ -62,12 +60,12 @@ pub fn comet_mark_loader(id: &'static str, theme: &Theme, height_px: f32) -> imp
         }))
 }
 
-/// The comet wave loader: a row of cells pulsing opacity 0.08→1 / scale 0.9→1
+/// The nova wave loader: a row of cells pulsing opacity 0.08→1 / scale 0.9→1
 /// over 2.4s with a 0.15s stagger per cell.
 ///
 /// `id` scopes the per-cell animation state — give each loader instance a
 /// distinct id.
-pub fn comet_loader(id: &'static str, theme: &Theme, cell_px: f32) -> impl IntoElement {
+pub fn nova_loader(id: &'static str, theme: &Theme, cell_px: f32) -> impl IntoElement {
     let color = theme.text;
     let slot = cell_px;
     div()
@@ -75,7 +73,7 @@ pub fn comet_loader(id: &'static str, theme: &Theme, cell_px: f32) -> impl IntoE
         .flex_row()
         .items_center()
         .gap(px(slot / 2.0))
-        .children((0..COMET_CELLS).map(move |i| {
+        .children((0..NOVA_CELLS).map(move |i| {
             // Fixed slot; the animated cell breathes inside it.
             div()
                 .size(px(slot))
@@ -87,7 +85,7 @@ pub fn comet_loader(id: &'static str, theme: &Theme, cell_px: f32) -> impl IntoE
                         .rounded(px(slot / 4.0))
                         .bg(color)
                         .size(px(slot))
-                        .with_animation((id, i), COMET_PULSE.repeating(), move |el, delta| {
+                        .with_animation((id, i), NOVA_PULSE.repeating(), move |el, delta| {
                             let phase = motion::staggered_phase(delta, i, PULSE_STAGGER);
                             el.opacity(motion::pulse_opacity(phase))
                                 .size(px(slot * motion::pulse_scale(phase)))
@@ -96,7 +94,7 @@ pub fn comet_loader(id: &'static str, theme: &Theme, cell_px: f32) -> impl IntoE
         }))
 }
 
-pub use comet_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
+pub use nova_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
 
 /// The gradient matrix spinner (WorkingIndicator), ported from comet's
 /// gradient-spin.tsx: a 3×3 grid of round cells tinted per row from the
@@ -194,7 +192,7 @@ pub fn splash_overlay(theme: &Theme, fading: bool) -> AnyElement {
         .items_center()
         .justify_center()
         .gap(px(28.0))
-        .child(comet_mark_loader("boot-splash", theme, 64.0))
+        .child(nova_mark_loader("boot-splash", theme, 64.0))
         .child(loading_word(theme));
     if fading {
         motion::splash_out("boot-splash-out", content).into_any_element()
@@ -218,7 +216,7 @@ pub fn loading_word(theme: &Theme) -> impl IntoElement {
 // Compile-time proof the specs referenced here stay wired to the catalog.
 const _: () = {
     assert!(SPLASH_OUT.delay_ms == 150);
-    assert!(COMET_PULSE.duration_ms == 2400);
+    assert!(NOVA_PULSE.duration_ms == 2400);
     assert!(GRADIENT_SPIN.duration_ms == 750);
 };
 

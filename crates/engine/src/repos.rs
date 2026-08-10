@@ -4,9 +4,9 @@
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere
 //! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
-//! created under `~/.comet-native/worktrees/<repoName>/<worktreeName>` (NOT the data
+//! created under `~/.nova-native/worktrees/<repoName>/<worktreeName>` (NOT the data
 //! dir — worktrees are user-facing working checkouts), with an auto-generated name +
-//! matching `comet/<name>` branch. `COMET_WORKTREES_DIR` overrides the root.
+//! matching `nova/<name>` branch. `NOVA_WORKTREES_DIR` overrides the root.
 //!
 //! All git access is via subprocess (`tokio::process`) — never libgit2.
 
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use comet_proto::{FolderEntry, FolderListing, Repo, RepoRef, Worktree};
+use nova_proto::{FolderEntry, FolderListing, Repo, RepoRef, Worktree};
 
 use crate::EngineError;
 
@@ -34,7 +34,7 @@ const ADJECTIVES: &[&str] = &[
     "sharp", "gentle", "vivid", "amber", "cobalt",
 ];
 const NOUNS: &[&str] = &[
-    "otter", "harbor", "falcon", "cedar", "meadow", "comet", "delta", "ember", "lynx", "maple",
+    "otter", "harbor", "falcon", "cedar", "meadow", "nova", "delta", "ember", "lynx", "maple",
     "onyx", "quartz", "raven", "summit", "willow", "aspen",
 ];
 
@@ -63,13 +63,23 @@ pub(crate) fn home_dir() -> PathBuf {
 }
 
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
-/// worktrees are user-facing working checkouts. `COMET_WORKTREES_DIR` overrides
+/// worktrees are user-facing working checkouts. `NOVA_WORKTREES_DIR` overrides
 /// (test isolation); empty reads as unset.
 fn default_worktrees_root() -> PathBuf {
-    std::env::var_os("COMET_WORKTREES_DIR")
+    std::env::var_os("NOVA_WORKTREES_DIR")
+        .or_else(|| std::env::var_os("COMET_WORKTREES_DIR"))
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".comet-native").join("worktrees"))
+        .unwrap_or_else(|| {
+            let home = home_dir();
+            let current = home.join(".nova-native").join("worktrees");
+            let legacy = home.join(".comet-native").join("worktrees");
+            if !current.exists() && legacy.exists() {
+                legacy
+            } else {
+                current
+            }
+        })
 }
 
 struct ReposInner {
@@ -85,7 +95,7 @@ pub struct Repos {
 
 impl Repos {
     /// `data_dir` holds `repos.json` + cloned/created repos; the worktree root
-    /// comes from `$COMET_WORKTREES_DIR` or `~/.comet-native/worktrees`.
+    /// comes from `$NOVA_WORKTREES_DIR` or `~/.nova-native/worktrees`.
     pub fn new(data_dir: &Path, device_id: &str) -> Self {
         Self::with_worktrees_root(data_dir, device_id, default_worktrees_root())
     }
@@ -476,7 +486,7 @@ impl Repos {
     // ── worktrees ───────────────────────────────────────────────────────────
 
     /// `git worktree add` an isolated checkout under
-    /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `comet/<name>`
+    /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `nova/<name>`
     /// branch off `branch`.
     pub async fn create_worktree(
         &self,
@@ -508,8 +518,7 @@ impl Repos {
                 ADJECTIVES[(seed % ADJECTIVES.len() as u64) as usize],
                 NOUNS[((seed / 31) % NOUNS.len() as u64) as usize]
             );
-            if !base.join(&candidate).exists() && !existing.contains(&format!("comet/{candidate}"))
-            {
+            if !base.join(&candidate).exists() && !existing.contains(&format!("nova/{candidate}")) {
                 name = Some(candidate);
                 break;
             }
@@ -517,7 +526,7 @@ impl Repos {
         let name =
             name.ok_or_else(|| EngineError::Other("Could not allocate a worktree name".into()))?;
         let path = base.join(&name);
-        let branch_name = format!("comet/{name}");
+        let branch_name = format!("nova/{name}");
         self.git(
             &[
                 "worktree",
@@ -554,10 +563,10 @@ impl Repos {
         .is_ok()
     }
 
-    /// Rename a comet-created worktree branch after its chat's generated title
+    /// Rename a nova-created worktree branch after its chat's generated title
     /// (port of comet's `renameWorktreeBranch`). Guards:
     /// - respect an external checkout/rename: only act while the worktree is still
-    ///   on `expected_branch` AND that branch is the original `comet/<folderName>`;
+    ///   on `expected_branch` AND that branch is the original `nova/<folderName>`;
     /// - a title-slug collision gets a stable 6-hex suffix (hash of the worktree
     ///   path); a collision on THAT too fails.
     ///
@@ -574,7 +583,9 @@ impl Repos {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        if current != expected_branch || expected_branch != format!("comet/{folder}") {
+        let generated = expected_branch == format!("nova/{folder}")
+            || expected_branch == format!("comet/{folder}");
+        if current != expected_branch || !generated {
             return Ok(current);
         }
         let preferred = worktree_branch_from_title(title);
@@ -603,7 +614,7 @@ impl Repos {
     }
 
     /// Best-effort worktree removal (if it still exists), then prune stale refs.
-    /// Deletes the worktree's branch ONLY when comet created it (`comet/…`) — the
+    /// Deletes the worktree's branch ONLY when nova created it (`nova/…`) — the
     /// user may have checked out their own branch inside the worktree.
     pub async fn delete_worktree(
         &self,
@@ -633,7 +644,7 @@ impl Repos {
             }
         }
         let _ = self.git(&["worktree", "prune"], Some(repo_path)).await;
-        if branch.starts_with("comet/") {
+        if branch.starts_with("nova/") || branch.starts_with("comet/") {
             let _ = self.git(&["branch", "-D", &branch], Some(repo_path)).await;
         }
         Ok(())
@@ -656,7 +667,7 @@ impl Repos {
     /// The walk runs on a DETACHED OS thread (not the tokio blocking pool): a
     /// readdir wedged in the kernel can't be cancelled, and a poisoned blocking
     /// pool — or a runtime shutdown waiting on it — must never be possible. On
-    /// timeout the thread is simply abandoned (the comet backend's disposable
+    /// timeout the thread is simply abandoned (the nova backend's disposable
     /// worker, minus the terminate()).
     #[doc(hidden)]
     pub async fn list_folders_with(
@@ -698,7 +709,7 @@ impl Repos {
 fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     let read = std::fs::read_dir(target).map_err(|e| match e.kind() {
         std::io::ErrorKind::PermissionDenied => {
-            EngineError::Other("Comet doesn't have access to this folder on the device.".into())
+            EngineError::Other("Nova doesn't have access to this folder on the device.".into())
         }
         _ => EngineError::Other(format!("could not read that folder: {e}")),
     })?;
@@ -731,7 +742,7 @@ fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     })
 }
 
-/// Turn a generated chat title into the semantic portion of a Comet branch
+/// Turn a generated chat title into the semantic portion of a Nova branch
 /// (port of comet's `worktreeBranchFromTitle`). Comet NFKD-normalizes accented
 /// letters first; native keeps it ASCII-only (generated titles are Title Case
 /// English), so non-ASCII characters collapse into the `-` separator.
@@ -749,7 +760,7 @@ pub fn worktree_branch_from_title(title: &str) -> String {
     }
     slug.truncate(48);
     let slug = slug.trim_matches('-');
-    format!("comet/{}", if slug.is_empty() { "update" } else { slug })
+    format!("nova/{}", if slug.is_empty() { "update" } else { slug })
 }
 
 /// Absolute form of a possibly-relative path (no filesystem access).

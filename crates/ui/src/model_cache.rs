@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use comet_engine::registry::HarnessDescriptor;
-use comet_proto::{HarnessId, Model};
+use nova_engine::registry::HarnessDescriptor;
+use nova_proto::{HarnessId, Model};
 
 const FILE_NAME: &str = "model-catalog-cache.json";
 
@@ -119,7 +119,7 @@ fn harness_key(harness: HarnessId) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_proto::ReasoningLevel;
+    use nova_proto::ReasoningLevel;
 
     fn model(id: &str, label: &str) -> Model {
         Model {
@@ -141,7 +141,7 @@ mod tests {
                 id: HarnessId::Pi,
                 name: "Pi".into(),
                 supports_steering: true,
-                steering_mode: comet_proto::SteeringMode::StepBoundary,
+                steering_mode: nova_proto::SteeringMode::StepBoundary,
                 reasoning_levels: vec![ReasoningLevel::Low, ReasoningLevel::High],
             }],
         ));

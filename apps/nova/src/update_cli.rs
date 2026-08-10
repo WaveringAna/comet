@@ -1,42 +1,42 @@
-//! `comet update` — check for and apply a newer release, natively (the same
+//! `nova update` — check for and apply a newer release, natively (the same
 //! managed install flow: download → verify → symlink swap →
 //! service restart). macOS app bundles swap the bundle instead; source builds
 //! are report-only.
 
 use anyhow::bail;
-use comet_update::{InstallKind, current_version, version_newer};
+use nova_update::{InstallKind, current_version, version_newer};
 
 /// `--check` prints the verdict and exits (nonzero when an update is available,
 /// so scripts can gate on it).
 pub async fn update(release_url: &str, check_only: bool) -> anyhow::Result<()> {
-    let manifest = comet_update::fetch_latest(release_url).await?;
+    let manifest = nova_update::fetch_latest(release_url).await?;
     let current = current_version();
     if !version_newer(&manifest.version, current) {
         println!(
-            "comet {current} is up to date (latest: {}).",
+            "nova {current} is up to date (latest: {}).",
             manifest.version
         );
         return Ok(());
     }
-    println!("comet {current} → {} available", manifest.version);
+    println!("nova {current} → {} available", manifest.version);
     if check_only {
         std::process::exit(1);
     }
 
-    match comet_update::detect_install() {
+    match nova_update::detect_install() {
         InstallKind::Managed { app_root } => {
             println!(
                 "downloading {}…",
-                comet_update::headless_artifact(&manifest.version)
+                nova_update::headless_artifact(&manifest.version)
             );
-            comet_update::stage_headless(release_url, &manifest, &app_root).await?;
-            comet_update::apply_headless(&app_root, &manifest.version)?;
+            nova_update::stage_headless(release_url, &manifest, &app_root).await?;
+            nova_update::apply_headless(&app_root, &manifest.version)?;
             println!(
                 "installed {} (current → {})",
                 app_root.join(&manifest.version).display(),
                 manifest.version
             );
-            match comet_update::restart_service() {
+            match nova_update::restart_service(&app_root) {
                 Ok(()) => println!("engine service restarted."),
                 Err(err) => println!(
                     "note: service restart failed ({err:#}) — restart the engine manually to finish."
@@ -47,21 +47,18 @@ pub async fn update(release_url: &str, check_only: bool) -> anyhow::Result<()> {
         InstallKind::MacApp { bundle } => {
             println!(
                 "downloading {}…",
-                comet_update::mac_app_artifact(&manifest.version)
+                nova_update::mac_app_artifact(&manifest.version)
             );
-            let data_dir = std::env::var_os("COMET_DATA_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(super::dirs_data_dir);
-            let staged = comet_update::stage_mac_app(release_url, &manifest, &data_dir).await?;
-            comet_update::apply_mac_app(&staged, &bundle)?;
-            println!("updated {} — relaunch Comet to finish.", bundle.display());
+            let data_dir = super::data_dir_from_env();
+            let staged = nova_update::stage_mac_app(release_url, &manifest, &data_dir).await?;
+            nova_update::apply_mac_app(&staged, &bundle)?;
+            println!("updated {} — relaunch Nova to finish.", bundle.display());
             Ok(())
         }
         InstallKind::Unmanaged => {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
-                 Linux: curl -fsSL https://comet.zeron.sh/install.sh | sh\n\
-                 macOS: download the new Comet.app dmg, or rebuild from source."
+                 Download the latest Nova release for this platform, or rebuild from source."
             )
         }
     }

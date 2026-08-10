@@ -1,4 +1,4 @@
-//! comet-proto — wire types shared by engine, UI, and RPC.
+//! nova-proto — wire types shared by engine, UI, and RPC.
 //!
 //! Ported from comet's `packages/control/src/wire.ts` + `packages/harness/src/types.ts`.
 //! Token-usage *display* types are excluded by design; the `Usage` agent event is kept as a

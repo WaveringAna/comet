@@ -9,7 +9,7 @@
 //!   latest value). Deserializing into typed rows here keeps the render loop's
 //!   only work layout and diffing — it never touches serde.
 //! - **The daemon is a separate process.** It can be restarted under us
-//!   (`comet daemon restart`, an upgrade, a crash). The supervisor notices the
+//!   (`nova daemon restart`, an upgrade, a crash). The supervisor notices the
 //!   streams ending, reconnects with backoff, and resubscribes; the app just
 //!   sees `Connection` updates and keeps its own state. Nothing in the
 //!   viewport needs to know a reconnect happened.
@@ -19,10 +19,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use comet_doc::SessionMessageEntry;
-use comet_proto::view::ConnectionStatus;
-use comet_proto::{Chat, Device, Project, Session};
-use comet_rpc::{RpcClient, methods};
+use nova_doc::SessionMessageEntry;
+use nova_proto::view::ConnectionStatus;
+use nova_proto::{Chat, Device, Project, Session};
+use nova_rpc::{RpcClient, methods};
 use tokio::sync::mpsc;
 
 use crate::daemon::{Attachment, DaemonConfig};
@@ -46,9 +46,9 @@ pub enum Update {
     /// This engine's device id — the host for projects we create.
     LocalDevice(String),
     /// The model catalogue for a harness, answering [`Command::ListModels`].
-    Models(Vec<comet_proto::Model>),
+    Models(Vec<nova_proto::Model>),
     /// A project's branches, answering [`Command::ListRefs`].
-    Refs(Vec<comet_proto::RepoRef>),
+    Refs(Vec<nova_proto::RepoRef>),
     /// A drafted session became real: the chat exists and its prompt is queued.
     SessionStarted {
         chat_id: String,
@@ -86,7 +86,7 @@ pub enum Command {
     },
     /// Fetch the model catalogue for a harness. Unlike [`Command::Call`] this
     /// one's *reply* is wanted, so it comes back as [`Update::Models`].
-    ListModels { harness: comet_proto::HarnessId },
+    ListModels { harness: nova_proto::HarnessId },
     /// Fetch a project's branches, for the ref picker.
     ListRefs {
         repo_path: String,
@@ -115,7 +115,7 @@ pub struct StartSession {
     pub project_id: String,
     pub repo_path: String,
     pub target_device: Option<String>,
-    pub plan: comet_proto::view::CheckoutPlan,
+    pub plan: nova_proto::view::CheckoutPlan,
     pub config: Option<serde_json::Value>,
     pub message_id: String,
     /// The already-encoded `SessionCommandPayload::Run`.
@@ -144,7 +144,7 @@ impl Drop for EngineLink {
     }
 }
 
-/// Reconnect backoff: quick first retries (a `comet daemon restart` is back in
+/// Reconnect backoff: quick first retries (a `nova daemon restart` is back in
 /// well under a second) flattening to a 5s poll so a long-down engine costs
 /// nothing.
 const BACKOFF_MS: [u64; 6] = [200, 400, 800, 1_600, 3_200, 5_000];
@@ -298,7 +298,7 @@ async fn session(
                     if *transcript_target != target {
                         *transcript_target = target.clone();
                         // Dropping the receiver cancels the stream server-side
-                        // (comet-rpc sends `{id, cancel}` on the next frame),
+                        // (nova-rpc sends `{id, cancel}` on the next frame),
                         // so the engine stops serializing the old doc.
                         transcript = match target {
                             Some(chat_id) => open_transcript(client, chat_id).await,
@@ -446,7 +446,7 @@ fn spawn_call(
 fn spawn_models(
     client: Arc<RpcClient>,
     updates: mpsc::UnboundedSender<Update>,
-    harness: comet_proto::HarnessId,
+    harness: nova_proto::HarnessId,
 ) {
     tokio::spawn(async move {
         match client
@@ -456,7 +456,7 @@ fn spawn_models(
             )
             .await
         {
-            Ok(value) => match serde_json::from_value::<Vec<comet_proto::Model>>(value) {
+            Ok(value) => match serde_json::from_value::<Vec<nova_proto::Model>>(value) {
                 Ok(models) => {
                     let _ = updates.send(Update::Models(models));
                 }
@@ -484,7 +484,7 @@ fn spawn_refs(
             object.insert("targetDeviceId".into(), serde_json::Value::String(device));
         }
         match client.call(methods::LIST_REFS, params).await {
-            Ok(value) => match serde_json::from_value::<Vec<comet_proto::RepoRef>>(value) {
+            Ok(value) => match serde_json::from_value::<Vec<nova_proto::RepoRef>>(value) {
                 Ok(refs) => {
                     let _ = updates.send(Update::Refs(refs));
                 }
@@ -506,7 +506,7 @@ fn spawn_start_session(
     updates: mpsc::UnboundedSender<Update>,
     start: StartSession,
 ) {
-    use comet_proto::view::CheckoutPlan;
+    use nova_proto::view::CheckoutPlan;
     tokio::spawn(async move {
         let mut cwd: Option<String> = None;
         let mut branch: Option<String> = None;
@@ -530,7 +530,7 @@ fn spawn_start_session(
                         object.insert("targetDeviceId".into(), serde_json::Value::String(device));
                     }
                     match client.call(methods::CREATE_WORKTREE, params).await {
-                        Ok(value) => match serde_json::from_value::<comet_proto::Worktree>(value) {
+                        Ok(value) => match serde_json::from_value::<nova_proto::Worktree>(value) {
                             Ok(worktree) => cwd = Some(worktree.path),
                             Err(err) => {
                                 let _ = updates.send(Update::Notice(format!(

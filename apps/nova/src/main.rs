@@ -1,4 +1,4 @@
-//! nova — headed by default; `comet headless` runs the local engine alone.
+//! nova — headed by default; `nova headless` runs the local engine alone.
 
 mod daemon;
 mod update_cli;
@@ -6,7 +6,7 @@ mod update_cli;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "comet", about = "Multi-device controller for coding agents")]
+#[command(name = "nova", about = "Multi-device controller for coding agents")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -16,7 +16,7 @@ struct Cli {
 enum Command {
     /// Run the engine without a UI (VPS / remote device mode).
     Headless,
-    /// Manage `comet headless` as a background service (launchd / systemd --user).
+    /// Manage `nova headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
@@ -29,12 +29,12 @@ enum Command {
     },
     /// Terminal viewport over the same engine — attaches to a running app or
     /// daemon, or starts one, and detaches (leaving work running) when it exits.
-    Tui(comet_tui::cli::TuiArgs),
+    Tui(nova_tui::cli::TuiArgs),
 }
 
 #[derive(Subcommand)]
 enum DaemonCommand {
-    /// Install, enable, and start the service (captures COMET_* env).
+    /// Install, enable, and start the service (captures NOVA_* env).
     Install,
     /// Stop and remove the service.
     Uninstall,
@@ -49,9 +49,17 @@ enum DaemonCommand {
 }
 
 fn update_url_from_env() -> Option<String> {
-    std::env::var("NOVA_UPDATE_URL")
+    env_var("NOVA_UPDATE_URL", "COMET_UPDATE_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
+}
+
+fn env_var(primary: &str, legacy: &str) -> Result<String, std::env::VarError> {
+    std::env::var(primary).or_else(|_| std::env::var(legacy))
+}
+
+fn env_os(primary: &str, legacy: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(primary).or_else(|| std::env::var_os(legacy))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -78,11 +86,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Command::Tui(args)) => comet_tui::cli::run(args),
+        Some(Command::Tui(args)) => nova_tui::cli::run(args),
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                let engine = comet_engine::Engine::new(engine_config_from_env());
+                let engine = nova_engine::Engine::new(engine_config_from_env());
                 engine.run().await
             })
         }
@@ -101,19 +109,17 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Status => daemon::status(),
         },
         None => {
-            // Headed: the UI probes COMET_IPC_PORT and connects to a running
+            // Headed: the UI probes NOVA_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
-            comet_ui::run_app(comet_ui::UiConfig {
-                data_dir: std::env::var_os("COMET_DATA_DIR")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(dirs_data_dir),
-                ipc_port: std::env::var("COMET_IPC_PORT")
+            nova_ui::run_app(nova_ui::UiConfig {
+                data_dir: data_dir_from_env(),
+                ipc_port: env_var("NOVA_IPC_PORT", "COMET_IPC_PORT")
                     .ok()
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(27654),
                 nova_port: nova_port_from_env(),
                 update_url: update_url_from_env(),
-                default_harness: comet_ui::HarnessId::Pi,
+                default_harness: nova_ui::HarnessId::Pi,
             });
             Ok(())
         }
@@ -121,13 +127,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Environment-resolved configuration shared by headed and headless engines.
-fn engine_config_from_env() -> comet_engine::EngineConfig {
-    comet_engine::EngineConfig {
-        data_dir: std::env::var_os("COMET_DATA_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(dirs_data_dir),
+fn engine_config_from_env() -> nova_engine::EngineConfig {
+    nova_engine::EngineConfig {
+        data_dir: data_dir_from_env(),
         update_url: update_url_from_env(),
-        ipc_port: std::env::var("COMET_IPC_PORT")
+        ipc_port: env_var("NOVA_IPC_PORT", "COMET_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(27654),
@@ -143,19 +147,59 @@ fn nova_port_from_env() -> u16 {
         .unwrap_or(27655)
 }
 
-/// `COMET_HARNESS` (kebab-case id) picks the default harness for chats without a
-/// config row — `mock` powers the e2e smoke; default `claude-code`.
-fn harness_from_env() -> comet_engine::HarnessId {
-    match std::env::var("COMET_HARNESS").as_deref().map(str::trim) {
-        Ok("mock") => comet_engine::HarnessId::Mock,
-        Ok("pi") => comet_engine::HarnessId::Pi,
-        Ok("codex") => comet_engine::HarnessId::Codex,
-        Ok("cursor") => comet_engine::HarnessId::Cursor,
-        _ => comet_engine::HarnessId::Pi,
+/// `NOVA_HARNESS` (kebab-case id) picks the default harness for chats without a
+/// config row — `mock` powers the e2e smoke; default `pi`.
+fn harness_from_env() -> nova_engine::HarnessId {
+    match env_var("NOVA_HARNESS", "COMET_HARNESS")
+        .as_deref()
+        .map(str::trim)
+    {
+        Ok("mock") => nova_engine::HarnessId::Mock,
+        Ok("pi") => nova_engine::HarnessId::Pi,
+        Ok("codex") => nova_engine::HarnessId::Codex,
+        Ok("cursor") => nova_engine::HarnessId::Cursor,
+        _ => nova_engine::HarnessId::Pi,
     }
+}
+
+fn data_dir_from_env() -> std::path::PathBuf {
+    env_os("NOVA_DATA_DIR", "COMET_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(dirs_data_dir)
 }
 
 fn dirs_data_dir() -> std::path::PathBuf {
     let home = std::env::var_os("HOME").expect("HOME not set");
-    std::path::PathBuf::from(home).join(".comet-native")
+    preferred_data_dir(&std::path::PathBuf::from(home))
+}
+
+fn preferred_data_dir(home: &std::path::Path) -> std::path::PathBuf {
+    let current = home.join(".nova-native");
+    let legacy = home.join(".comet-native");
+    if !current.exists() && legacy.exists() {
+        legacy
+    } else {
+        current
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preferred_data_dir;
+
+    #[test]
+    fn existing_legacy_data_survives_the_product_rename() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".comet-native")).unwrap();
+        assert_eq!(
+            preferred_data_dir(home.path()),
+            home.path().join(".comet-native")
+        );
+
+        std::fs::create_dir(home.path().join(".nova-native")).unwrap();
+        assert_eq!(
+            preferred_data_dir(home.path()),
+            home.path().join(".nova-native")
+        );
+    }
 }

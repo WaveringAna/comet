@@ -1,4 +1,4 @@
-//! `comet daemon …` — install/manage `comet headless` as a background service:
+//! `nova daemon …` — install/manage `nova headless` as a background service:
 //! a systemd **user** unit on Linux (the VPS deployment target), a launchd
 //! LaunchAgent on macOS. The unit runs the current executable with the
 //! small Nova runtime environment captured at install time.
@@ -10,26 +10,32 @@ use std::process::Command;
 
 use anyhow::{Context, bail};
 
-const LAUNCHD_LABEL: &str = "sh.zeron.comet";
-const SYSTEMD_UNIT: &str = "comet-native.service";
+const LAUNCHD_LABEL: &str = "sh.zeron.nova";
+const SYSTEMD_UNIT: &str = "nova-native.service";
 
 /// Environment captured into the unit file. `PATH` is always included (the
 /// engine spawns harness CLIs like `claude`, which service managers' minimal
-/// default PATH won't find); the `COMET_*`/logging vars only when set.
+/// default PATH won't find); the `NOVA_*`/logging vars only when set.
 const CAPTURED_ENV: &[&str] = &[
     "PATH",
-    "COMET_DATA_DIR",
-    "COMET_IPC_PORT",
+    "NOVA_DATA_DIR",
+    "NOVA_IPC_PORT",
     "NOVA_PORT",
     "NOVA_IROH_RELAY_URL",
     "NOVA_UPDATE_URL",
+    "NOVA_HARNESS",
+    "NOVA_DEVICE_NAME",
+    // Read-only migration aliases. New installs write NOVA_* values, but
+    // capturing these keeps an existing shell configuration working.
+    "COMET_DATA_DIR",
+    "COMET_IPC_PORT",
     "COMET_HARNESS",
     "COMET_DEVICE_NAME",
     "RUST_LOG",
 ];
 
 pub fn install(data_dir: &Path) -> anyhow::Result<()> {
-    let exe = std::env::current_exe().context("resolving the comet executable path")?;
+    let exe = std::env::current_exe().context("resolving the nova executable path")?;
     let env = captured_env();
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
@@ -60,7 +66,7 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
             "For start-at-boot without an active login session (VPS): loginctl enable-linger $USER"
         );
     } else {
-        bail!("comet daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("nova daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!(
         "Logs: {}",
@@ -98,7 +104,7 @@ pub fn uninstall() -> anyhow::Result<()> {
             Err(err) => return Err(err.into()),
         }
     } else {
-        bail!("comet daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("nova daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     Ok(())
 }
@@ -107,7 +113,7 @@ pub fn start() -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
         if !plist.exists() {
-            bail!("not installed — run `comet daemon install` first");
+            bail!("not installed — run `nova daemon install` first");
         }
         // `stop` boots the job out of the domain, so start = bootstrap; already
         // loaded is fine, then kickstart guarantees a running process either way.
@@ -119,7 +125,7 @@ pub fn start() -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         run("systemctl", &["--user", "start", SYSTEMD_UNIT])?;
     } else {
-        bail!("comet daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("nova daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!("Started.");
     Ok(())
@@ -132,7 +138,7 @@ pub fn stop() -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         run("systemctl", &["--user", "stop", SYSTEMD_UNIT])?;
     } else {
-        bail!("comet daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("nova daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!("Stopped.");
     Ok(())
@@ -156,7 +162,7 @@ pub fn restart() -> anyhow::Result<()> {
         println!("Restarted.");
         Ok(())
     } else {
-        bail!("comet daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("nova daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
 }
 
@@ -170,9 +176,9 @@ pub fn status() -> anyhow::Result<()> {
             println!(
                 "{LAUNCHD_LABEL}: not loaded{}",
                 if launchd_plist_path()?.exists() {
-                    " (installed — `comet daemon start`)"
+                    " (installed — `nova daemon start`)"
                 } else {
-                    " (not installed — `comet daemon install`)"
+                    " (not installed — `nova daemon install`)"
                 }
             );
             return Ok(());
@@ -199,7 +205,7 @@ pub fn status() -> anyhow::Result<()> {
             .context("running systemctl")?;
         Ok(())
     } else {
-        bail!("comet daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("nova daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
 }
 
@@ -218,7 +224,7 @@ fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
     // The start limit must actually trip on repeated startup failures
     // (5 × RestartSec=5 lands inside the 60s window).
     let mut unit = String::from(
-        "[Unit]\nDescription=Comet native headless engine\nAfter=network-online.target\n\
+        "[Unit]\nDescription=Nova native headless engine\nAfter=network-online.target\n\
          StartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\n",
     );
     for (key, value) in env {
@@ -227,13 +233,13 @@ fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
         unit.push_str(&format!("Environment=\"{key}={value}\"\n"));
     }
     unit.push_str(&format!(
-        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.comet-native/env\n\n[Install]\nWantedBy=default.target\n",
+        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.nova-native/env\n\n[Install]\nWantedBy=default.target\n",
         systemd_exec_path(exe)
     ));
     unit
 }
 
-/// The ExecStart binary path. An exe under `~/.comet-native/app/` came from the
+/// The ExecStart binary path. An exe under `~/.nova-native/app/` came from the
 /// curl|sh installer, whose upgrades relink `app/current` — point the unit at
 /// the symlink (as the installer's own unit does) so it never pins one version.
 /// (`current_exe` resolves symlinks, so the versioned dir is what we see here.)
@@ -243,10 +249,10 @@ fn systemd_exec_path(exe: &Path) -> String {
 
 fn exec_path_for(exe: &Path, home: Option<&Path>) -> String {
     let installed = home
-        .map(|home| home.join(".comet-native/app"))
+        .map(|home| home.join(".nova-native/app"))
         .is_some_and(|app_root| exe.starts_with(app_root));
     if installed {
-        "%h/.comet-native/app/current/comet".to_string()
+        "%h/.nova-native/app/current/nova".to_string()
     } else {
         format!("{}", exe.display())
     }
@@ -373,20 +379,20 @@ mod tests {
     #[test]
     fn systemd_unit_shape() {
         let unit = render_systemd_unit(
-            Path::new("/usr/local/bin/comet"),
+            Path::new("/usr/local/bin/nova"),
             &[
                 ("PATH".into(), "/usr/bin:/bin".into()),
                 ("NOVA_UPDATE_URL".into(), "https://updates.example".into()),
-                ("RUST_LOG".into(), "info,comet=\"debug\"".into()),
+                ("RUST_LOG".into(), "info,nova=\"debug\"".into()),
             ],
         );
-        assert!(unit.contains("ExecStart=/usr/local/bin/comet headless\n"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/nova headless\n"));
         assert!(unit.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
         assert!(unit.contains("Environment=\"NOVA_UPDATE_URL=https://updates.example\"\n"));
         // Inner quotes escaped so systemd re-parses the value verbatim.
-        assert!(unit.contains("Environment=\"RUST_LOG=info,comet=\\\"debug\\\"\"\n"));
+        assert!(unit.contains("Environment=\"RUST_LOG=info,nova=\\\"debug\\\"\"\n"));
         assert!(unit.contains("Restart=on-failure"));
-        assert!(unit.contains("EnvironmentFile=-%h/.comet-native/env"));
+        assert!(unit.contains("EnvironmentFile=-%h/.nova-native/env"));
         assert!(unit.contains("WantedBy=default.target"));
     }
 
@@ -396,36 +402,36 @@ mod tests {
         // the versioned dir): the unit must point back at the symlink.
         assert_eq!(
             exec_path_for(
-                Path::new("/home/u/.comet-native/app/0.3.0/comet"),
+                Path::new("/home/u/.nova-native/app/0.3.0/nova"),
                 Some(Path::new("/home/u")),
             ),
-            "%h/.comet-native/app/current/comet"
+            "%h/.nova-native/app/current/nova"
         );
         // Source build: literal path.
         assert_eq!(
             exec_path_for(
-                Path::new("/src/target/debug/comet"),
+                Path::new("/src/target/debug/nova"),
                 Some(Path::new("/home/u"))
             ),
-            "/src/target/debug/comet"
+            "/src/target/debug/nova"
         );
     }
 
     #[test]
     fn launchd_plist_shape() {
         let plist = render_launchd_plist(
-            Path::new("/Users/x/comet & co/comet"),
+            Path::new("/Users/x/nova & co/nova"),
             &[("NOVA_UPDATE_URL".into(), "https://e?a=1&b=2".into())],
-            Path::new("/Users/x/.comet-native/daemon.log"),
+            Path::new("/Users/x/.nova-native/daemon.log"),
         );
-        assert!(plist.contains("<key>Label</key><string>sh.zeron.comet</string>"));
+        assert!(plist.contains("<key>Label</key><string>sh.zeron.nova</string>"));
         // XML-escaped exe path and env value.
-        assert!(plist.contains("<string>/Users/x/comet &amp; co/comet</string>"));
+        assert!(plist.contains("<string>/Users/x/nova &amp; co/nova</string>"));
         assert!(plist.contains("<string>https://e?a=1&amp;b=2</string>"));
         assert!(plist.contains("<string>headless</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(plist.contains(
-            "<key>StandardOutPath</key><string>/Users/x/.comet-native/daemon.log</string>"
+            "<key>StandardOutPath</key><string>/Users/x/.nova-native/daemon.log</string>"
         ));
     }
 }

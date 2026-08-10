@@ -1,16 +1,16 @@
-//! comet-tui — the terminal viewport.
+//! nova-tui — the terminal viewport.
 //!
-//! A peer of the gpui app in `comet-ui`, not a subset of it: both are thin
+//! A peer of the gpui app in `nova-ui`, not a subset of it: both are thin
 //! clients over the same typed RPC (ARCHITECTURE §1), and both derive their row
 //! order, status dots and gates from the same pure functions in
-//! `comet_proto::view`. What differs is the renderer and one deliberate
+//! `nova_proto::view`. What differs is the renderer and one deliberate
 //! architectural choice — **the TUI never embeds an engine**.
 //!
 //! ## Why the engine is always a separate process
 //!
 //! The gpui app embeds an engine when no daemon is listening, because a desktop
 //! window and the work it drives have the same lifetime. A terminal does not:
-//! you close it, the SSH session drops, the laptop lid shuts. So `comet-tui`
+//! you close it, the SSH session drops, the laptop lid shuts. So `nova-tui`
 //! attaches to a daemon and starts a detached one if there isn't one
 //! ([`daemon`]). Quitting the viewport is then genuinely *detaching* — agents
 //! keep running and paired Nova documents keep converging — and
@@ -64,8 +64,8 @@ use crate::link::EngineLink;
 pub struct Config {
     pub data_dir: PathBuf,
     pub ipc_port: u16,
-    /// Explicit `comet` binary for the daemon we may start.
-    pub comet_bin: Option<PathBuf>,
+    /// Explicit `nova` binary for the daemon we may start.
+    pub nova_bin: Option<PathBuf>,
     /// Start a daemon when none is listening.
     pub spawn_daemon: bool,
     /// Report scroll-wheel events. Costs drag-to-select.
@@ -81,7 +81,7 @@ impl Config {
         DaemonConfig {
             data_dir: self.data_dir.clone(),
             ipc_port: self.ipc_port,
-            comet_bin: self.comet_bin.clone(),
+            nova_bin: self.nova_bin.clone(),
             spawn: self.spawn_daemon,
         }
     }
@@ -111,11 +111,11 @@ impl Outcome {
             }
             None => return "Exited without reaching an engine.\n".to_string(),
         }
-        out.push_str("  reattach   comet-tui\n");
+        out.push_str("  reattach   nova-tui\n");
         if let Some(log) = &self.daemon_log {
             out.push_str(&format!("  logs       {}\n", log.display()));
         }
-        out.push_str("  stop       comet daemon stop\n");
+        out.push_str("  stop       nova daemon stop\n");
         out
     }
 }

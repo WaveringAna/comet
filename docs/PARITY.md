@@ -37,13 +37,13 @@ not built yet).
 | DataRpc watches + QueueCommand | done | — |
 | Mutate ops | done | Project/chat create, rename, archive, delete, host/cwd/branch/config updates, device rename, and seen-state writes are exposed. |
 | Hosted AuthRpc | removed | Nova starts its pi-coupled local engine immediately; WorkOS and organization bootstrap RPCs are not served. |
-| Wire types | done | `comet-proto`: AgentEvent, ToolCall kinds, models/options, and local workspace entities. Hosted auth wire types are removed. |
+| Wire types | done | `nova-proto`: AgentEvent, ToolCall kinds, models/options, and local workspace entities. Hosted auth wire types are removed. |
 
 ## §3 Backend engine
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| 3.1 Lifecycle | partial | Local engine starts without authentication, direct Nova listener starts beside IPC, stale-session recovery and single-instance data-dir lock remain. `comet daemon install/start/stop/restart/status/uninstall` manages launchd / systemd `--user` units. Gaps: login-shell PATH capture, crash shield, parent-PID watchdog. |
+| 3.1 Lifecycle | partial | Local engine starts without authentication, direct Nova listener starts beside IPC, stale-session recovery and single-instance data-dir lock remain. `nova daemon install/start/stop/restart/status/uninstall` manages launchd / systemd `--user` units. Gaps: login-shell PATH capture, crash shield, parent-PID watchdog. |
 | 3.2 Sessions engine | partial | Run journal on disk with crash recovery (aborted stamps), steering mailbox at step boundaries, doc hooks at boundaries, streamed part folding at STREAM_COMMIT_MS. Gaps: idle reaper + 10-min stall watchdog for persistent harness sessions. |
 | 3.3 Session-docs host | done | docs.sqlite snapshots + processed-command ledger, mark-BEFORE-execute, and on-demand chat handles. Paired engines exchange transcript updates directly through `NovaSyncApply`; imported commands wake the owning executor without a room or nudge service. |
 | 3.4 Terminals | done | PTYs, 1MB bounded replay + `afterSeq` resume, 32 max, exited 30-min TTL, live shells survive detach. |

@@ -23,15 +23,15 @@ nova is a local-first controller for pi. each device runs one nova engine that o
 
 ### headed desktop
 
-`comet` probes `ws://127.0.0.1:27654`. if a daemon answers with the comet rpc protocol, the desktop attaches to it. otherwise it embeds an engine in-process and best-effort serves that same engine on the ipc port for other local viewports.
+`nova` probes `ws://127.0.0.1:27654`. if a daemon answers with the nova rpc protocol, the desktop attaches to it. otherwise it embeds an engine in-process and best-effort serves that same engine on the ipc port for other local viewports.
 
 ### headless engine
 
-`comet headless` owns the data directory, runs sessions and terminals, listens on local ipc, listens for paired nova engines, and runs the peer convergence loop. launchd and systemd user-service helpers live in `apps/comet/src/daemon.rs`.
+`nova headless` owns the data directory, runs sessions and terminals, listens on local ipc, listens for paired nova engines, and runs the peer convergence loop. launchd and systemd user-service helpers live in `apps/nova/src/daemon.rs`.
 
 ### terminal viewport
 
-`comet-tui` always attaches to a separate engine. it may start a detached headless engine when none is available, so quitting the terminal only detaches the viewport and does not kill runs or ptys.
+`nova-tui` always attaches to a separate engine. it may start a detached headless engine when none is available, so quitting the terminal only detaches the viewport and does not kill runs or ptys.
 
 ## 3. engine responsibilities
 

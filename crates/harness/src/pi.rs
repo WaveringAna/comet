@@ -22,7 +22,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
-use comet_proto::{
+use nova_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
     TOOL_OUTPUT_MAX_BYTES, ToolCall, UserInputQuestion,
 };
@@ -33,6 +33,15 @@ use crate::{
 };
 
 const COLLABORATION_BRIDGE_SOURCE: &str = include_str!("pi_collaboration_bridge.mjs");
+type InputRequester = Arc<
+    Box<
+        dyn Fn(
+                Vec<UserInputQuestion>,
+            ) -> tokio::sync::oneshot::Receiver<Vec<nova_proto::UserInputAnswer>>
+            + Send
+            + Sync,
+    >,
+>;
 
 struct CollaborationEndpoint {
     listener: TcpListener,
@@ -138,10 +147,10 @@ impl PiHarness {
         if let Some(model) = request.model.as_deref().filter(|model| !model.is_empty()) {
             command.args(["--model", model]);
         }
-        if let Some(thinking) = request.reasoning {
-            if let Some(level) = pi_thinking_level(thinking) {
-                command.args(["--thinking", level]);
-            }
+        if let Some(thinking) = request.reasoning
+            && let Some(level) = pi_thinking_level(thinking)
+        {
+            command.args(["--thinking", level]);
         }
         if let Some(session_id) = request.resume.as_deref().filter(|id| !id.is_empty()) {
             command.args(["--session-id", session_id]);
@@ -265,7 +274,7 @@ impl Harness for PiHarness {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "comet_harness::pi", "stderr: {line}");
+                    tracing::debug!(target: "nova_harness::pi", "stderr: {line}");
                     tail.push(&line);
                 }
             });
@@ -506,7 +515,7 @@ async fn run_session(session: PiSession) {
                     let value: Value = match serde_json::from_str(line) {
                         Ok(value) => value,
                         Err(error) => {
-                            tracing::debug!(target: "comet_harness::pi", "skipping invalid rpc line: {error}");
+                            tracing::debug!(target: "nova_harness::pi", "skipping invalid rpc line: {error}");
                             continue;
                         }
                     };
@@ -548,13 +557,13 @@ async fn run_session(session: PiSession) {
                                     break 'main;
                                 }
                             }
-                        } else if value.get("success").and_then(Value::as_bool) == Some(false) {
-                            if id == prompt_id {
-                                let error = value.get("error").and_then(Value::as_str).unwrap_or("pi rejected the prompt").to_owned();
-                                let _ = send_event(&event_tx, AgentEvent::Error { message: error.clone() }).await;
-                                let _ = send_event(&event_tx, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: Some(error), session_id: (!session_id.is_empty()).then_some(session_id.clone()) }).await;
-                                break 'main;
-                            }
+                        } else if value.get("success").and_then(Value::as_bool) == Some(false)
+                            && id == prompt_id
+                        {
+                            let error = value.get("error").and_then(Value::as_str).unwrap_or("pi rejected the prompt").to_owned();
+                            let _ = send_event(&event_tx, AgentEvent::Error { message: error.clone() }).await;
+                            let _ = send_event(&event_tx, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: Some(error), session_id: (!session_id.is_empty()).then_some(session_id.clone()) }).await;
+                            break 'main;
                         }
                         continue;
                     }
@@ -624,7 +633,9 @@ async fn run_session(session: PiSession) {
                                         if !send_event(&event_tx, AgentEvent::TextDelta { text: text.into() }).await { break 'main; }
                                     }
                                 }
-                                "thinking_delta" => if let Some(text) = event.get("delta").and_then(Value::as_str).filter(|text| !text.is_empty()) { if !send_event(&event_tx, AgentEvent::ReasoningDelta { text: text.into() }).await { break 'main; } },
+                                "thinking_delta" => if let Some(text) = event.get("delta").and_then(Value::as_str).filter(|text| !text.is_empty())
+                                    && !send_event(&event_tx, AgentEvent::ReasoningDelta { text: text.into() }).await
+                                { break 'main; },
                                 "error" => { let message = event.get("error").and_then(|e| e.get("errorMessage")).and_then(Value::as_str).or_else(|| event.get("errorMessage").and_then(Value::as_str)).unwrap_or("pi assistant error").to_owned(); last_error = Some(message.clone()); if !send_event(&event_tx, AgentEvent::Error { message }).await { break 'main; } }
                                 _ => {}
                             }
@@ -634,16 +645,21 @@ async fn run_session(session: PiSession) {
                             let id = message.get("id").and_then(Value::as_str).unwrap_or(&assistant_message_id).to_owned();
                             if message.get("role").and_then(Value::as_str) == Some("assistant") {
                                 let duration_ms = assistant_started.take().map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
-                                if !assistant_text_emitted {
-                                    if let Some(text) = message_text(message) { if !send_event(&event_tx, AgentEvent::TextDelta { text }).await { break 'main; } }
+                                if !assistant_text_emitted
+                                    && let Some(text) = message_text(message)
+                                    && !send_event(&event_tx, AgentEvent::TextDelta { text }).await
+                                {
+                                    break 'main;
                                 }
                                 assistant_text_emitted = false;
                                 if let Some(error) = message_error(message) {
                                     last_error = Some(error.clone());
                                     if !send_event(&event_tx, AgentEvent::Error { message: error }).await { break 'main; }
                                 } else if !send_event(&event_tx, AgentEvent::AssistantMessageCompleted { assistant_message_id: id }).await { break 'main; }
-                                if let Some((input_tokens, output_tokens, context_tokens)) = message.get("usage").and_then(parse_pi_usage) {
-                                    if !send_event(&event_tx, AgentEvent::Usage { input_tokens, output_tokens, context_tokens, context_window, duration_ms }).await { break 'main; }
+                                if let Some((input_tokens, output_tokens, context_tokens)) = message.get("usage").and_then(parse_pi_usage)
+                                    && !send_event(&event_tx, AgentEvent::Usage { input_tokens, output_tokens, context_tokens, context_window, duration_ms }).await
+                                {
+                                    break 'main;
                                 }
                             }
                         }
@@ -697,7 +713,7 @@ async fn run_session(session: PiSession) {
             }
         }
     }
-    if !child.id().is_none() {
+    if child.id().is_some() {
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
@@ -963,16 +979,7 @@ fn pi_tool_call(name: &str, args: &Value) -> ToolCall {
 async fn handle_extension_request(
     stdin: &mut ChildStdin,
     request: &Value,
-    request_input: &Arc<
-        Box<
-            dyn Fn(
-                    Vec<UserInputQuestion>,
-                )
-                    -> tokio::sync::oneshot::Receiver<Vec<comet_proto::UserInputAnswer>>
-                + Send
-                + Sync,
-        >,
-    >,
+    request_input: &InputRequester,
     event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
 ) -> bool {
     let id = request

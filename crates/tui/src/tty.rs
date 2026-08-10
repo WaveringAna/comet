@@ -94,7 +94,7 @@ fn install_panic_hook(mouse: bool) {
 /// drains it in one pass per frame.
 pub fn spawn_reader(events: mpsc::UnboundedSender<Event>) {
     let spawned = std::thread::Builder::new()
-        .name("comet-tui-input".into())
+        .name("nova-tui-input".into())
         .spawn(move || {
             loop {
                 match ratatui::crossterm::event::read() {

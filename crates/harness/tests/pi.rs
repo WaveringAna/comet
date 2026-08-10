@@ -6,8 +6,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use comet_harness::{CancellationToken, Harness, PiHarness, RunControls, SteerMessage};
-use comet_proto::{AgentEvent, RunRequest, SandboxLevel, UserInputAnswer};
+use nova_harness::{CancellationToken, Harness, PiHarness, RunControls, SteerMessage};
+use nova_proto::{AgentEvent, RunRequest, SandboxLevel, UserInputAnswer};
 
 fn fixture_path() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -79,7 +79,7 @@ async fn spawns_one_pi_process_in_the_session_folder_and_maps_rpc_events() {
         }
     }
 
-    assert!(events.iter().any(|event| matches!(event, AgentEvent::SessionStarted { harness, session_id, .. } if *harness == comet_proto::HarnessId::Pi && session_id == "pi-session-1")));
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::SessionStarted { harness, session_id, .. } if *harness == nova_proto::HarnessId::Pi && session_id == "pi-session-1")));
     let text_events: Vec<&str> = events
         .iter()
         .filter_map(|event| match event {
@@ -97,7 +97,7 @@ async fn spawns_one_pi_process_in_the_session_folder_and_maps_rpc_events() {
     assert!(matches!(
         events.last(),
         Some(AgentEvent::Done {
-            status: comet_proto::DoneStatus::Completed,
+            status: nova_proto::DoneStatus::Completed,
             ..
         })
     ));
@@ -197,7 +197,7 @@ async fn assistant_message_errors_are_not_reported_as_empty_successes() {
     assert!(matches!(
         events.last(),
         Some(AgentEvent::Done {
-            status: comet_proto::DoneStatus::Errored,
+            status: nova_proto::DoneStatus::Errored,
             error: Some(error),
             ..
         }) if error == "the selected pi model is unavailable"

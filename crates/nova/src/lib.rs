@@ -1,4 +1,4 @@
-//! comet-nova — the Nova Engine peer networking layer.
+//! nova-network — the Nova Engine peer networking layer.
 //!
 //! Nova Engine is the device-local backend (formerly "the daemon"/"the engine"). This
 //! crate adds the transport that connects Nova Engines without a hosted application
@@ -10,7 +10,7 @@
 //! - [`authz`] — method-level authorization (IPC-only surfaces stay local).
 //! - [`discovery`] — bounded, cancellable, deduplicated LAN scanning.
 //! - [`transport`] — encrypted, mutually authenticated iroh QUIC RPC on top of
-//!   the transport-independent `comet-rpc` seam.
+//!   the transport-independent `nova-rpc` seam.
 //!
 //! Workspace and transcript convergence also run over authenticated Nova RPC; no hosted
 //! room or application-level relay can read or mutate them. See `docs/ARCHITECTURE-Nova.md`.
@@ -24,7 +24,7 @@ pub mod trust;
 
 /// Nova Engine RPC method names (served by the engine, surfaced in Settings).
 ///
-/// These are separate from comet-rpc's harness/chat surface: they configure the peer
+/// These are separate from nova-rpc's harness/chat surface: they configure the peer
 /// network itself. They are always IPC-only (never relay-forwarded) — the settings UI
 /// talks to the local engine.
 pub mod methods {

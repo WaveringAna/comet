@@ -22,8 +22,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use tokio::sync::mpsc;
 
-use comet_doc::TERMINAL_OUTPUT_BATCH_MS;
-use comet_proto::{TerminalEvent, TerminalSession};
+use nova_doc::TERMINAL_OUTPUT_BATCH_MS;
+use nova_proto::{TerminalEvent, TerminalSession};
 
 use crate::{EngineError, new_id};
 
@@ -177,7 +177,7 @@ impl Terminals {
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "Comet");
+        cmd.env("TERM_PROGRAM", "Nova");
         let mut child = pair
             .slave
             .spawn_command(cmd)

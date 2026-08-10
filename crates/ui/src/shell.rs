@@ -21,8 +21,8 @@ use gpui::{
     Task, Window, WindowControlArea, actions, div, prelude::*, px,
 };
 
-use comet_rpc::methods;
 use gpui_tokio::Tokio;
+use nova_rpc::methods;
 
 use crate::changes::Changes;
 use crate::collaboration::CollaborationPanel;
@@ -344,6 +344,10 @@ impl NavHistory {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// Sidebar resort glide (feature-inventory §1.6): 260ms
@@ -547,7 +551,7 @@ pub struct Shell {
     update_dismissed: Option<String>,
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
-    install: comet_update::InstallKind,
+    install: nova_update::InstallKind,
     mutate_task: Option<Task<()>>,
     /// Kept for the failed-gate "Retry" action.
     boot: EngineBootConfig,
@@ -567,7 +571,7 @@ pub struct Shell {
     /// Keys that just appeared in a live list (fade in, no glide).
     sidebar_new_keys: std::collections::HashSet<String>,
     resort_epoch: usize,
-    /// Dev/testing knobs (`COMET_OPEN_DIALOG`, `COMET_FORCE_GATE`) — see
+    /// Dev/testing knobs (`NOVA_OPEN_DIALOG`, `NOVA_FORCE_GATE`) — see
     /// [`Shell::new`].
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
@@ -683,10 +687,10 @@ impl Shell {
         Theme::install(cx, theme_config.build(system_scheme));
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
-        // Dev/testing knob: `COMET_OPEN_ROUTE=settings[/<section>]` boots
+        // Dev/testing knob: `NOVA_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
-        let route = match std::env::var("COMET_OPEN_ROUTE").ok().as_deref() {
+        let route = match std::env::var("NOVA_OPEN_ROUTE").ok().as_deref() {
             Some("settings") | Some("settings/appearance") => {
                 Route::Settings(SettingsSection::Appearance)
             }
@@ -707,18 +711,18 @@ impl Shell {
             }
             _ => Route::Chat,
         };
-        // More capture knobs of the same kind: `COMET_OPEN_DIALOG=rename|delete`
+        // More capture knobs of the same kind: `NOVA_OPEN_DIALOG=rename|delete`
         // opens that dialog for the first chat once chats land; `=model` pops
         // the combined harness/model menu once the shell is Ready;
-        // `COMET_FORCE_GATE=failed` renders the engine failure gate for styling.
-        let debug_dialog = std::env::var("COMET_OPEN_DIALOG").ok();
-        let debug_gate = match std::env::var("COMET_FORCE_GATE").ok().as_deref() {
+        // `NOVA_FORCE_GATE=failed` renders the engine failure gate for styling.
+        let debug_dialog = std::env::var("NOVA_OPEN_DIALOG").ok();
+        let debug_gate = match std::env::var("NOVA_FORCE_GATE").ok().as_deref() {
             Some("failed") => Some(GatePhase::Failed(
-                "Could not reach the comet engine on port 27901".into(),
+                "Could not reach the nova engine on port 27901".into(),
             )),
             _ => None,
         };
-        let debug_right_panel = match std::env::var("COMET_OPEN_RIGHT_PANEL").ok().as_deref() {
+        let debug_right_panel = match std::env::var("NOVA_OPEN_RIGHT_PANEL").ok().as_deref() {
             Some("agents") => Some(RightPanelTab::Agents),
             Some("review") => Some(RightPanelTab::Review),
             Some("terminal") => Some(RightPanelTab::Terminal),
@@ -770,7 +774,7 @@ impl Shell {
             update_flow: UpdateFlow::Idle,
             update_task: None,
             update_dismissed: None,
-            install: comet_update::detect_install(),
+            install: nova_update::detect_install(),
             mutate_task: None,
             boot,
             data_dir,
@@ -1246,7 +1250,7 @@ impl Shell {
     ) {
         let viewport = f32::from(window.viewport_size().width);
         let width = viewport - f32::from(event.event.position.x);
-        // comet caps the pane at 52% of the window on top of the absolute range.
+        // nova caps the pane at 52% of the window on top of the absolute range.
         let max = RIGHT_PANE_MAX.min(viewport * 0.52);
         self.settings.right_pane_width = width.clamp(RIGHT_PANE_MIN, max.max(RIGHT_PANE_MIN));
         self.right_tween = None;
@@ -1570,7 +1574,7 @@ impl Shell {
     /// Evaluate a width tween at "now" (manual drive — see [`WidthTween`]).
     /// Mid-flight: eased 200ms lerp, and `motion_active` is flagged so render
     /// schedules the next animation frame. Finished, stale, absent, or under
-    /// reduced motion: exactly `target`. Honors `COMET_MOTION_SCALE`.
+    /// reduced motion: exactly `target`. Honors `NOVA_MOTION_SCALE`.
     fn eval_tween(&self, tween: Option<WidthTween>, target: f32) -> f32 {
         let Some(WidthTween { from, to, started }) = tween else {
             return target;
@@ -1625,7 +1629,7 @@ impl Shell {
     /// `style={{ paddingLeft: headerInset }}`: on sidebar toggles (and macOS
     /// fullscreen flips) the SAME element's padding tweens, so the title
     /// glides to its new x-position. Route changes SNAP: the tween is killed
-    /// by every route transition (comet remounts the keyed header variants —
+    /// by every route transition (nova remounts the keyed header variants —
     /// instant swap, zero horizontal motion).
     /// Where unified-titlebar content (tabs / the settings label) starts: past
     /// the traffic lights + control cluster, riding the fullscreen inset tween.
@@ -1991,8 +1995,8 @@ impl Shell {
         project_name: SharedString,
         branch: Option<SharedString>,
         last_command: Option<SharedString>,
-        harness: Option<comet_proto::HarnessId>,
-        status: comet_proto::ChatIndicator,
+        harness: Option<nova_proto::HarnessId>,
+        status: nova_proto::ChatIndicator,
         selected: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -2001,7 +2005,7 @@ impl Shell {
         // so rows align and state changes read in place. Working animates (the
         // composer-strip spinner, miniaturized); every other status is a faint dot.
         let dot_color = projects::status_dot_color(status, theme);
-        let status_rail: AnyElement = if status == comet_proto::ChatIndicator::Working {
+        let status_rail: AnyElement = if status == nova_proto::ChatIndicator::Working {
             div()
                 .w(px(6.0))
                 .flex_none()
@@ -2397,7 +2401,7 @@ impl Shell {
     /// UpdateStatus stream reports a newer release. On a macOS bundle install
     /// it drives the whole flow — click to download, then click to restart into
     /// the staged bundle. Elsewhere (managed/source installs) it is advisory
-    /// (`comet update`); click dismisses it for that version.
+    /// (`nova update`); click dismisses it for that version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.state.read(cx).update.clone()?;
         if !status.update_available {
@@ -2407,7 +2411,7 @@ impl Shell {
         if self.update_dismissed.as_deref() == Some(latest.as_str()) {
             return None;
         }
-        let mac_app = matches!(self.install, comet_update::InstallKind::MacApp { .. });
+        let mac_app = matches!(self.install, nova_update::InstallKind::MacApp { .. });
 
         let (label, clickable): (SharedString, bool) = if mac_app {
             match &self.update_flow {
@@ -2418,7 +2422,7 @@ impl Shell {
             }
         } else {
             (
-                format!("Update available — v{latest} · run `comet update`").into(),
+                format!("Update available — v{latest} · run `nova update`").into(),
                 true,
             )
         };
@@ -2471,7 +2475,7 @@ impl Shell {
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
     /// installs → dismiss for this version.
     fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.install, comet_update::InstallKind::MacApp { .. }) {
+        if !matches!(self.install, nova_update::InstallKind::MacApp { .. }) {
             self.update_dismissed = self
                 .state
                 .read(cx)
@@ -2488,7 +2492,7 @@ impl Shell {
         }
     }
 
-    /// Fetch the manifest and stage the new `Comet.app` under the data dir
+    /// Fetch the manifest and stage the new `Nova.app` under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let Some(update_url) = self.boot.update_url.clone() else {
@@ -2499,8 +2503,8 @@ impl Shell {
         let data_dir = self.data_dir.clone();
         self.update_flow = UpdateFlow::Downloading;
         let download = Tokio::spawn(cx, async move {
-            let manifest = comet_update::fetch_latest(&update_url).await?;
-            comet_update::stage_mac_app(&update_url, &manifest, &data_dir).await
+            let manifest = nova_update::fetch_latest(&update_url).await?;
+            nova_update::stage_mac_app(&update_url, &manifest, &data_dir).await
         });
         self.update_task = Some(cx.spawn(async move |this, cx| {
             let outcome = match download.await {
@@ -2527,12 +2531,12 @@ impl Shell {
     /// relauncher, and quit — the relauncher `open`s the new bundle once this
     /// process (and its engine lock / IPC port) is gone.
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
-        let comet_update::InstallKind::MacApp { bundle } = self.install.clone() else {
+        let nova_update::InstallKind::MacApp { bundle } = self.install.clone() else {
             return;
         };
-        match comet_update::apply_mac_app(&staged, &bundle) {
+        match nova_update::apply_mac_app(&staged, &bundle) {
             Ok(()) => {
-                comet_update::relaunch_app_after_exit(&bundle);
+                nova_update::relaunch_app_after_exit(&bundle);
                 cx.quit();
             }
             Err(err) => {
@@ -2933,7 +2937,7 @@ impl Shell {
                         .flex_col()
                         .items_center()
                         .child(
-                            icon(icons::COMET_LOGO)
+                            icon(icons::NOVA_LOGO)
                                 .w(px(41.9))
                                 .h(px(48.0))
                                 .text_color(theme.text.opacity(0.09)),
@@ -2986,7 +2990,7 @@ impl Shell {
                         .flex_col()
                         .items_center()
                         .child(
-                            icon(icons::COMET_LOGO)
+                            icon(icons::NOVA_LOGO)
                                 .w(px(41.9))
                                 .h(px(48.0))
                                 .text_color(theme.text.opacity(0.09)),
@@ -3509,7 +3513,7 @@ impl Shell {
     fn render_gate_card(&mut self, phase: &GatePhase, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let content: AnyElement = match phase {
-            // Backend unreachable: quiet centered copy (comet Gate `Failed`),
+            // Backend unreachable: quiet centered copy (nova Gate `Failed`),
             // plus a Retry affordance (the native engine doesn't self-redial).
             GatePhase::Failed(error) => div()
                 .flex()
@@ -3890,7 +3894,7 @@ impl Render for Shell {
                             .update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
                     }
                 }
-                // Capture knob: `COMET_OPEN_DIALOG=model` pops the combined
+                // Capture knob: `NOVA_OPEN_DIALOG=model` pops the combined
                 // harness/model menu (needs `window`, so it fires here rather
                 // than in `on_state_changed`).
                 if self.debug_dialog.as_deref() == Some("model") {
@@ -3987,7 +3991,7 @@ impl Render for Shell {
                     .ml(px(8.0))
                     .rounded(px(12.0))
                     .into_any_element();
-                // The whole app page is one keyed `animate-in` entrance (comet
+                // The whole app page is one keyed `animate-in` entrance (nova
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
                 // arriving from the splash or any gate fades the page in; the
                 // splash-out crossfades over it on boot.
@@ -4069,7 +4073,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn titlebar_cluster_matches_comet_window_controls() {
+    fn titlebar_cluster_matches_nova_window_controls() {
         // comet window-controls.tsx: `left: fullscreen ? 12 : 88` — the
         // cluster clears the {14,15} traffic lights, and reclaims the inset
         // when fullscreen hides them.
@@ -4110,7 +4114,7 @@ mod tests {
         );
     }
 
-    // ---- per-session panel state (§1.10/1.11 parity: comet sessionPanels) ----
+    // ---- per-session panel state (§1.10/1.11 parity: nova sessionPanels) ----
 
     #[test]
     fn session_panels_default_closed_per_chat() {

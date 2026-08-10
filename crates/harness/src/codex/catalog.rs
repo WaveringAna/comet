@@ -7,7 +7,7 @@
 //! short-lived `codex app-server` + `model/list` pagination can later be
 //! spliced in (same call t3code's Codex provider makes).
 
-use comet_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel, SandboxLevel};
+use nova_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel, SandboxLevel};
 
 /// The unified reasoning ladder Codex accepts (`minimal` is offered but clamped
 /// on the wire — see [`to_effort`]).
@@ -56,7 +56,7 @@ pub(crate) fn sandbox_policy_type(sandbox: SandboxLevel) -> &'static str {
 }
 
 /// `turn/start`'s full `sandboxPolicy` object. Workspace-write keeps network
-/// access: comet agents fetch deps and hit APIs unattended, and with the
+/// access: nova agents fetch deps and hit APIs unattended, and with the
 /// approval policy pinned to "never" a network-less sandbox would fail those
 /// commands with no escalation path.
 pub(crate) fn sandbox_policy_value(sandbox: SandboxLevel) -> serde_json::Value {

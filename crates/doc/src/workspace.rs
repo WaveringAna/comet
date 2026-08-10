@@ -20,13 +20,13 @@
 //! overlaid by the engine in process memory so presence never grows the oplog.
 //!
 //! Timestamps are stored as epoch millis (the session-doc convention) and surface as
-//! `chrono::DateTime<Utc>` through the `comet_proto` entity types.
+//! `chrono::DateTime<Utc>` through the `nova_proto` entity types.
 
 use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use comet_proto::{Chat, ChatConfig, ChatUsage, Device, Project, Session, SessionStatus};
+use nova_proto::{Chat, ChatConfig, ChatUsage, Device, Project, Session, SessionStatus};
 
 use crate::schema::DocError;
 
@@ -368,7 +368,7 @@ impl WorkspaceDoc {
     }
 
     /// Host-side resume continuity: the harness-native session id of the chat's
-    /// latest run and the cwd it was created under (comet stored the same pair
+    /// latest run and the cwd it was created under (nova stored the same pair
     /// on the chats table). An empty
     /// `session_id` is the explicit "do not resume" tombstone written after a
     /// harness rejects a resume. `false` when no such row.
@@ -659,7 +659,7 @@ struct RawChat {
     #[serde(default)]
     last_seen_at: Option<i64>,
     #[serde(default)]
-    usage: Option<comet_proto::ChatUsage>,
+    usage: Option<nova_proto::ChatUsage>,
 }
 
 impl From<RawChat> for Chat {
@@ -713,7 +713,7 @@ impl From<RawSession> for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_proto::{HarnessId, SandboxLevel};
+    use nova_proto::{HarnessId, SandboxLevel};
 
     fn ts(ms: i64) -> DateTime<Utc> {
         dt(ms)
@@ -806,7 +806,7 @@ mod tests {
         let config = ChatConfig {
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
-            reasoning: Some(comet_proto::ReasoningLevel::XHigh),
+            reasoning: Some(nova_proto::ReasoningLevel::XHigh),
             model_options: options,
             sandbox: SandboxLevel::WorkspaceWrite,
         };

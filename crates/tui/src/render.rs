@@ -1,7 +1,7 @@
 //! Drawing.
 //!
-//! The information architecture is comet-native's, read from the desktop shell
-//! (`comet-ui/src/shell.rs::render_chat_sidebar`, `shell/projects.rs`,
+//! The information architecture is nova-native's, read from the desktop shell
+//! (`nova-ui/src/shell.rs::render_chat_sidebar`, `shell/projects.rs`,
 //! `shell/tabs.rs`) — **not** the original Electron app's single grouped list:
 //!
 //! - the sidebar has **two sections**, Projects and a *flat global* Sessions list;
@@ -27,14 +27,14 @@
 //!
 //! ```text
 //!  Projects                +     ● Ratatui terminal…    ● Diff sidebar…    +
-//!  ▪ comet-native  this dev
+//!  ▪ nova-native  this dev
 //!  ▪ soccertcg     this dev                            the user's prompt
 //!                                                                  14:32
 //!  Sessions
 //!  ● Ratatui terminal…  now    The assistant replies as plain text.
-//!    comet-native · comet/…
+//!    nova-native · nova/…
 //!  ● Rebalance player…   2h    ⌄ Ran 2 commands
-//!    soccertcg · comet/re…       Run   cargo test --workspace
+//!    soccertcg · nova/re…       Run   cargo test --workspace
 //!
 //!                              ◜ Working · 11s · Ctrl-X to interrupt
 //!                              Do anything…
@@ -59,7 +59,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
-use comet_proto::view::{ConnectionStatus, ContextGauge, GatePhase};
+use nova_proto::view::{ConnectionStatus, ContextGauge, GatePhase};
 
 use crate::app::{App, ChipKind, Hit, Overlay, Row};
 use crate::keys::{Focus, HELP};
@@ -156,12 +156,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// one braille cell, the same ring chase the desktop session rows animate —
 /// while every other state is the static dot, coloured by meaning.
 fn status_dot(
-    status: comet_proto::ChatIndicator,
+    status: nova_proto::ChatIndicator,
     app: &App,
     theme: &Theme,
     base: Style,
 ) -> (String, Style) {
-    if status == comet_proto::ChatIndicator::Working {
+    if status == nova_proto::ChatIndicator::Working {
         let (glyph, tint) = loaders::mini_spinner(app.elapsed());
         return (glyph, base.patch(Style::default().fg(tint)));
     }
@@ -466,20 +466,20 @@ pub fn context_gauge_bar(gauge: ContextGauge) -> (&'static str, Color) {
 }
 
 /// The status strip's right cluster: the last reply's speed and the context
-/// gauge, both derived in `comet_proto::view` so this reads exactly what the
+/// gauge, both derived in `nova_proto::view` so this reads exactly what the
 /// gpui strip reads. Empty until a turn has been measured.
 fn cost_spans<'a>(app: &App, theme: &Theme) -> Vec<Span<'a>> {
     let Some(usage) = app.selected_chat_row().and_then(|chat| chat.usage) else {
         return Vec::new();
     };
     let mut spans: Vec<Span<'a>> = Vec::new();
-    if let Some(rate) = comet_proto::view::tokens_per_sec(&usage) {
+    if let Some(rate) = nova_proto::view::tokens_per_sec(&usage) {
         spans.push(Span::styled(
-            comet_proto::view::format_rate(rate),
+            nova_proto::view::format_rate(rate),
             theme.hint(),
         ));
     }
-    if let Some(gauge) = comet_proto::view::context_gauge(&usage) {
+    if let Some(gauge) = nova_proto::view::context_gauge(&usage) {
         let (bar, tint) = context_gauge_bar(gauge);
         if !spans.is_empty() {
             spans.push(Span::styled(" · ", theme.hint()));
@@ -1148,7 +1148,7 @@ fn draw_gate(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, phase: Gat
     lines.push(Line::default());
     if matches!(app.connection, ConnectionStatus::Connecting) {
         let mut spans = vec![Span::raw("  ".to_string())];
-        spans.extend(loaders::comet_wave(app.elapsed(), theme.text));
+        spans.extend(loaders::nova_wave(app.elapsed(), theme.text));
         lines.push(Line::from(spans));
         lines.push(Line::default());
     }
@@ -1158,10 +1158,10 @@ fn draw_gate(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, phase: Gat
     )));
     frame.render_widget(Paragraph::new(lines), area);
 
-    // While connecting, the animated comet mark sits above the message — the
+    // While connecting, the animated nova mark sits above the message — the
     // desktop app's boot splash, at terminal resolution.
     if matches!(app.connection, ConnectionStatus::Connecting) {
-        let mark = loaders::comet_mark(app.elapsed(), theme);
+        let mark = loaders::nova_mark(app.elapsed(), theme);
         let height = mark.len() as u16;
         let width = 14u16;
         if area.height > height + 8 && area.width > width + 4 {
@@ -1327,8 +1327,8 @@ fn draw_overlay(
                 .draft
                 .as_ref()
                 .and_then(|draft| draft.selected_ref().cloned());
-            let local = comet_proto::view::checkout_label(
-                comet_proto::view::CheckoutKind::Local,
+            let local = nova_proto::view::checkout_label(
+                nova_proto::view::CheckoutKind::Local,
                 picked.as_ref(),
             );
             let rows = vec![
@@ -1410,7 +1410,7 @@ fn draw_overlay(
 }
 
 /// The draft's branches, if a draft is open.
-fn app_refs(app: &App) -> Option<Vec<comet_proto::RepoRef>> {
+fn app_refs(app: &App) -> Option<Vec<nova_proto::RepoRef>> {
     app.draft.as_ref().and_then(|draft| draft.refs.clone())
 }
 

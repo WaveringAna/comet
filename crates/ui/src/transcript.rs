@@ -35,8 +35,8 @@ use gpui::{
     list, prelude::*, px,
 };
 
-use comet_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use comet_proto::{ToolCall, ToolDiffReply};
+use nova_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use nova_proto::{ToolCall, ToolDiffReply};
 
 use crate::markdown::highlight::{Lang, LineCarry, Token, lang_for_tag, tokenize_line};
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
@@ -64,14 +64,14 @@ pub const GAP_BLOCK: f32 = 8.0;
 /// agent said — it needs more room than the gap between paragraphs, not
 /// less, or the reply reads as one undifferentiated column.
 pub const GAP_TOOLS: f32 = 14.0;
-/// Transcript column max width (comet 46rem).
+/// Transcript column max width (nova 46rem).
 pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 /// One tool line: plain text, no card — the summary and each call under it
 /// are single truncated lines of this height, stacked with no gap, so this IS
 /// the spacing of a run. Snug: consecutive calls are one thought, and at body
 /// leading they read as separate paragraphs. (Cards and pills made every reply
 /// look interrupted by a panel; the terminal viewport reached the same
-/// conclusion, see `comet_tui`.)
+/// conclusion, see `nova_tui`.)
 pub const TOOL_LINE_HEIGHT: f32 = 20.0;
 /// The summary sits in the reply's own flow, so it reads at body size; the
 /// call lines under it step down once, and no further — they are quiet, not
@@ -559,23 +559,23 @@ pub fn rows_for_entry(
     rows
 }
 
-/// `COMET_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
+/// `NOVA_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
 /// over rolling windows of [`FRAME_STATS_WINDOW`] samples) at `warn` level —
 /// the smoothness measurement knob. Off by default; zero cost when off.
 fn frame_stats_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
-        .get_or_init(|| std::env::var("COMET_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
+        .get_or_init(|| std::env::var("NOVA_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 const FRAME_STATS_WINDOW: usize = 240;
 
-/// `COMET_NO_RENDER_CACHE=1` bypasses the cross-frame flatten cache — the
+/// `NOVA_NO_RENDER_CACHE=1` bypasses the cross-frame flatten cache — the
 /// A/B knob for the frame-cost measurement above.
 fn render_cache_disabled() -> bool {
     static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DISABLED.get_or_init(|| {
-        std::env::var("COMET_NO_RENDER_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
+        std::env::var("NOVA_NO_RENDER_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
     })
 }
 
@@ -844,11 +844,11 @@ pub fn latest_running(tools: &[ToolItem]) -> Option<&ToolItem> {
 }
 
 /// The collapsed group's one line — "Ran cargo, git · edited 2 files". Shared
-/// with the terminal viewport (`comet_proto::view`): a run must summarize
+/// with the terminal viewport (`nova_proto::view`): a run must summarize
 /// identically on every surface.
 pub fn group_summary(tools: &[ToolItem]) -> String {
     let pairs: Vec<(ToolCall, bool)> = tools.iter().map(|t| (t.call.clone(), t.is_error)).collect();
-    comet_proto::view::tool_group_summary(&pairs)
+    nova_proto::view::tool_group_summary(&pairs)
 }
 
 /// The row index of the group that called `tool_id` — where the agent
@@ -863,11 +863,11 @@ pub fn group_row_for_tool(rows: &[Row], tool_id: &str) -> Option<usize> {
 }
 
 // `single_line` and the per-kind chip label/detail are shared with the terminal
-// viewport (`comet_proto::view`): a tool must be named identically on every
+// viewport (`nova_proto::view`): a tool must be named identically on every
 // surface, and the one-line collapse is needed for the same reason in both (a
 // literal newline breaks gpui's ellipsis logic and would be a cursor move in a
 // cell grid).
-pub use comet_proto::view::{single_line, tool_chip_content};
+pub use nova_proto::view::{single_line, tool_chip_content};
 
 // ---------------------------------------------------------------------------
 // Working indicator flavour (pure; rendered by the shell strip)
@@ -1853,7 +1853,7 @@ impl Transcript {
                     .bg(crate::theme::white_alpha(0.055))
                     .with_animation(
                         SharedString::from(format!("{row_id}#att-pulse{aix}")),
-                        motion::COMET_PULSE.repeating(),
+                        motion::NOVA_PULSE.repeating(),
                         move |el, delta| el.opacity(0.35 + 0.4 * motion::pulse_wave(delta)),
                     )
                     .into_any_element(),
@@ -2114,28 +2114,27 @@ impl Transcript {
             .map(|(_, ix)| *ix);
         let row_key = row_id.clone();
         let entity = cx.weak_entity();
-        let handler: Rc<dyn Fn(usize, SharedString, &mut Window, &mut gpui::App)> =
-            Rc::new(move |ix, code, _window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
-                let row_key = row_key.clone();
-                entity
-                    .update(cx, |this, cx| {
-                        this.copied_code = Some((row_key, ix));
-                        this.copied_clear = Some(cx.spawn(async move |this, cx| {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(1200))
-                                .await;
-                            this.update(cx, |this, cx| {
-                                this.copied_code = None;
-                                this.copied_clear = None;
-                                cx.notify();
-                            })
-                            .ok();
-                        }));
-                        cx.notify();
-                    })
-                    .ok();
-            });
+        let handler: render::CopyHandler = Rc::new(move |ix, code, _window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+            let row_key = row_key.clone();
+            entity
+                .update(cx, |this, cx| {
+                    this.copied_code = Some((row_key, ix));
+                    this.copied_clear = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1200))
+                            .await;
+                        this.update(cx, |this, cx| {
+                            this.copied_code = None;
+                            this.copied_clear = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    }));
+                    cx.notify();
+                })
+                .ok();
+        });
         render::CopyUi { handler, copied_ix }
     }
 
@@ -2396,7 +2395,7 @@ impl Transcript {
                 }
                 let reply = engine
                     .client()
-                    .call_as::<ToolDiffReply>(comet_rpc::methods::TOOL_DIFF, params)
+                    .call_as::<ToolDiffReply>(nova_rpc::methods::TOOL_DIFF, params)
                     .await;
                 this.update(cx, |this, cx| {
                     this.tool_diff_loads.remove(&tool_id);
@@ -2798,7 +2797,7 @@ fn run_line(
     cx: &mut Context<Transcript>,
 ) -> AnyElement {
     let details: Vec<String> = run.items.iter().map(|i| i.detail.clone()).collect();
-    let mut detail = comet_proto::view::coalesce_paths(&details);
+    let mut detail = nova_proto::view::coalesce_paths(&details);
     let failures = run.failures();
     if failures > 0 {
         // Failures never recolor the line — a red row is an alarm, and a
@@ -2963,7 +2962,7 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_doc::MessagePart;
+    use nova_doc::MessagePart;
 
     // ---- streaming parse wiring (the transcript side, not the parser) ----
 
@@ -3905,11 +3904,11 @@ mod tests {
         );
         let todo = ToolCall::Todo {
             items: vec![
-                comet_proto::TodoItem {
+                nova_proto::TodoItem {
                     text: "a".into(),
                     done: true,
                 },
-                comet_proto::TodoItem {
+                nova_proto::TodoItem {
                     text: "b".into(),
                     done: false,
                 },

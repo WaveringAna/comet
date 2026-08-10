@@ -16,9 +16,9 @@ use chrono::Utc;
 use loro::{ExportMode, VersionVector};
 use tokio::sync::watch;
 
-use comet_doc::{DeletedProject, WorkspaceDoc};
-use comet_proto::{Chat, ChatConfig, ChatUsage, Device, Project, Session};
-use comet_sync::DocsStore;
+use nova_doc::{DeletedProject, WorkspaceDoc};
+use nova_proto::{Chat, ChatConfig, ChatUsage, Device, Project, Session};
+use nova_sync::DocsStore;
 
 use crate::{EngineError, now_ms};
 
@@ -385,7 +385,7 @@ impl WorkspaceHost {
     }
 
     /// Resume continuity: stamp the chat row with the harness-native session id
-    /// of its latest run and the cwd it was created under (comet
+    /// of its latest run and the cwd it was created under (nova
     /// sessions.ts:1039). An empty `session_id`
     /// tombstones the row ("do not resume" after a rejected resume). Best-effort:
     /// a missing chat row (claim happens on first command) just returns.

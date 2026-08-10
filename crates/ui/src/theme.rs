@@ -895,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_numbers_match_comet() {
+    fn layout_numbers_match_nova() {
         assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
         assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
         assert_eq!(Theme::BUBBLE_RADIUS, 16.0);

@@ -1,4 +1,4 @@
-"""Shared pty driver and terminal emulator for the `comet-tui` scripts.
+"""Shared pty driver and terminal emulator for the `nova-tui` scripts.
 
 Used by `tui-smoke.py` (assert on what the frame says) and `tui-screenshots.py`
 (render the frame to an image). Both need the same thing: run the real binary
@@ -295,7 +295,7 @@ def char_width(char: str) -> int:
 
 
 class Tui:
-    """The `comet-tui` binary under a pty."""
+    """The `nova-tui` binary under a pty."""
 
     def __init__(self, binary: str, env: dict, rows: int, cols: int, args: list[str] | None = None):
         self.screen = Screen(rows, cols)

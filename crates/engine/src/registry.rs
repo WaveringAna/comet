@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use comet_harness::{Harness, HarnessError, mock::MockHarness};
-use comet_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use nova_harness::{Harness, HarnessError, mock::MockHarness};
+use nova_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,7 +133,7 @@ pub fn default_registry() -> HarnessRegistry {
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-1".into(),
-                call: comet_proto::ToolCall::Exec {
+                call: nova_proto::ToolCall::Exec {
                     command: "cargo test --workspace".into(),
                 },
             },
@@ -148,7 +148,7 @@ pub fn default_registry() -> HarnessRegistry {
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-2".into(),
-                call: comet_proto::ToolCall::Exec {
+                call: nova_proto::ToolCall::Exec {
                     command: "git log -5 --oneline --decorate && git merge-base HEAD origin/main"
                         .into(),
                 },
@@ -188,7 +188,7 @@ pub fn default_registry() -> HarnessRegistry {
                 ReasoningLevel::Max,
             ],
         },
-        Box::new(|| Ok(Arc::new(comet_harness::PiHarness::new()) as Arc<dyn Harness>)),
+        Box::new(|| Ok(Arc::new(nova_harness::PiHarness::new()) as Arc<dyn Harness>)),
     );
     registry
 }

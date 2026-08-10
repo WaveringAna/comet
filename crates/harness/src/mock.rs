@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use comet_proto::{
+use nova_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
     UserInputQuestion,
 };
@@ -15,7 +15,7 @@ pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }
 
-/// The scripted question set for the `COMET_MOCK_QUESTION` variant (exercises
+/// The scripted question set for the `NOVA_MOCK_QUESTION` variant (exercises
 /// the QuestionPanel end-to-end: single-select page, multi-select page).
 fn question_script() -> Vec<UserInputQuestion> {
     vec![
@@ -91,30 +91,30 @@ impl Harness for MockHarness {
         _request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        // Optional pacing knob for demos/manual testing: `COMET_MOCK_DELAY_MS`
+        // Optional pacing knob for demos/manual testing: `NOVA_MOCK_DELAY_MS`
         // spaces the scripted events out so live-run UI states (working
         // indicator, streaming fade, trailing tool-group auto-open) are
         // observable. Unset (the default, and in tests) streams instantly.
-        let delay_ms = std::env::var("COMET_MOCK_DELAY_MS")
+        let delay_ms = std::env::var("NOVA_MOCK_DELAY_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         let delay = std::time::Duration::from_millis(delay_ms);
-        // Dev/testing knob: `COMET_MOCK_CONTEXT_PCT=N` (0..=100, default 31) sets
+        // Dev/testing knob: `NOVA_MOCK_CONTEXT_PCT=N` (0..=100, default 31) sets
         // the simulated context window fullness reported in the pre-Done Usage event
         // as a percentage of a 200,000 context_window.
-        let mock_context_pct = std::env::var("COMET_MOCK_CONTEXT_PCT")
+        let mock_context_pct = std::env::var("NOVA_MOCK_CONTEXT_PCT")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .map(|v| v.min(100))
             .unwrap_or(31);
 
-        // Dev/testing knob: `COMET_MOCK_QUESTION=1` swaps in a run that asks
+        // Dev/testing knob: `NOVA_MOCK_QUESTION=1` swaps in a run that asks
         // the user questions mid-stream via `controls.request_input` (the
         // engine mints the request id, emits `InputRequested`, and resolves it
         // from the `RespondInput` doc command) — the only data-side way to put
         // the QuestionPanel on screen.
-        let question_mode = std::env::var("COMET_MOCK_QUESTION")
+        let question_mode = std::env::var("NOVA_MOCK_QUESTION")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0");
         if question_mode {
@@ -169,26 +169,26 @@ impl Harness for MockHarness {
             return Ok(stream.boxed());
         }
 
-        // Dev/testing knob: `COMET_MOCK_REPEAT=N` loops the script body N times
+        // Dev/testing knob: `NOVA_MOCK_REPEAT=N` loops the script body N times
         // before the final Done — long single-reply streams for frame-cost /
         // smoothness measurement (the terminal `Done` is emitted exactly once,
         // at the very end).
-        let repeat = std::env::var("COMET_MOCK_REPEAT")
+        let repeat = std::env::var("NOVA_MOCK_REPEAT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1)
             .max(1);
-        // Dev/testing knob: `COMET_MOCK_ERROR=1` appends a scripted error
+        // Dev/testing knob: `NOVA_MOCK_ERROR=1` appends a scripted error
         // before the terminal Done — the only data-side way to put the
         // transcript ErrorChip on screen with the mock harness.
-        let mock_error = std::env::var("COMET_MOCK_ERROR")
+        let mock_error = std::env::var("NOVA_MOCK_ERROR")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0");
-        // Dev/testing knob: `COMET_MOCK_TABLE=1` appends scripted GFM tables
+        // Dev/testing knob: `NOVA_MOCK_TABLE=1` appends scripted GFM tables
         // before the terminal Done — a plain 3-column grid plus a wide/uneven
         // one (long prose cell beside short cells, mixed alignment) for
         // table-styling checks against the reference app.
-        let mock_table = std::env::var("COMET_MOCK_TABLE")
+        let mock_table = std::env::var("NOVA_MOCK_TABLE")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0");
         let done_ix = self
@@ -200,10 +200,10 @@ impl Harness for MockHarness {
         let error_event = mock_error.then(|| AgentEvent::Error {
             message: "Claude usage limit reached — try again after the limit resets.".into(),
         });
-        // Dev/testing knob: `COMET_MOCK_CODE=1` appends rust + ts code blocks
+        // Dev/testing knob: `NOVA_MOCK_CODE=1` appends rust + ts code blocks
         // (keywords, strings, numbers, comments) plus inline code — for
         // syntax-palette and inline-code styling checks against the reference.
-        let mock_code = std::env::var("COMET_MOCK_CODE")
+        let mock_code = std::env::var("NOVA_MOCK_CODE")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0");
         let code_event = mock_code.then(|| AgentEvent::TextDelta {
@@ -243,11 +243,11 @@ impl Harness for MockHarness {
                 | Sync | Direct Nova peer fan-out | 18ms |\n\n"
                 .into(),
         });
-        // Dev/testing knob: `COMET_MOCK_MEND=1` appends a link/list-heavy
+        // Dev/testing knob: `NOVA_MOCK_MEND=1` appends a link/list-heavy
         // passage — bold-led list items, inline links, emphasis, strikethrough
         // — the shapes whose half-streamed markers the display mend
         // (crates/ui markdown/mend.rs) must hold steady while streaming.
-        let mock_mend = std::env::var("COMET_MOCK_MEND")
+        let mock_mend = std::env::var("NOVA_MOCK_MEND")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0");
         let mend_event = mock_mend.then(|| AgentEvent::TextDelta {
@@ -269,7 +269,7 @@ impl Harness for MockHarness {
         // "Edit c" · "Read d", every run one hard-truncated 30px line.
         let code_tool_events = mock_code
             .then(|| {
-                let call = |id: &str, call: comet_proto::ToolCall| AgentEvent::ToolCall {
+                let call = |id: &str, call: nova_proto::ToolCall| AgentEvent::ToolCall {
                     id: id.into(),
                     call,
                 };
@@ -280,7 +280,7 @@ impl Harness for MockHarness {
                     output_truncated: false,
                 };
                 let read = |id: &str, path: &str| {
-                    call(id, comet_proto::ToolCall::ReadFile { path: path.into() })
+                    call(id, nova_proto::ToolCall::ReadFile { path: path.into() })
                 };
                 [
                     read("mock-read-1", "crates/ui/src/transcript.rs"),
@@ -289,15 +289,15 @@ impl Harness for MockHarness {
                     ok("mock-read-2", "…"),
                     call(
                         "mock-code-tool",
-                        comet_proto::ToolCall::Exec {
+                        nova_proto::ToolCall::Exec {
                             command: "set -e\nfixture_in_original=0\ngrep -rn \"veil\" crates/ui/src | wc -l".into(),
                         },
                     ),
                     ok("mock-code-tool", "3"),
                     call(
                         "mock-exec-2",
-                        comet_proto::ToolCall::Exec {
-                            command: "cargo test -p comet-ui".into(),
+                        nova_proto::ToolCall::Exec {
+                            command: "cargo test -p nova-ui".into(),
                         },
                     ),
                     AgentEvent::ToolResult {
@@ -308,7 +308,7 @@ impl Harness for MockHarness {
                     },
                     call(
                         "mock-edit-1",
-                        comet_proto::ToolCall::EditFile {
+                        nova_proto::ToolCall::EditFile {
                             path: "crates/ui/src/theme.rs".into(),
                             old_string: None,
                             new_string: None,
@@ -355,12 +355,12 @@ impl Harness for MockHarness {
             .chain(tail.iter().cloned())
             .map(Ok)
             .collect();
-        // Dev/testing knob: `COMET_MOCK_CHARS=N` re-chunks every TextDelta
-        // into N-char deltas, so `COMET_MOCK_DELAY_MS` paces *characters*
+        // Dev/testing knob: `NOVA_MOCK_CHARS=N` re-chunks every TextDelta
+        // into N-char deltas, so `NOVA_MOCK_DELAY_MS` paces *characters*
         // instead of whole scripted blocks — delta boundaries then land inside
         // inline markers and links, which is the streaming shape real
         // harnesses produce and the display mend exists for.
-        let chunk_chars = std::env::var("COMET_MOCK_CHARS")
+        let chunk_chars = std::env::var("NOVA_MOCK_CHARS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&n| n > 0);

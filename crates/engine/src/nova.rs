@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use comet_nova::cidr::CidrRange;
-use comet_nova::discovery::{NovaProbe, Probe, ScanOptions, candidate_addresses, scan};
-use comet_nova::identity::DeviceIdentityRecord;
-use comet_nova::trust::{PairingState, Role, Trust};
-use comet_rpc::{RpcClient, RpcError};
 use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
+use nova_network::cidr::CidrRange;
+use nova_network::discovery::{NovaProbe, Probe, ScanOptions, candidate_addresses, scan};
+use nova_network::identity::DeviceIdentityRecord;
+use nova_network::trust::{PairingState, Role, Trust};
+use nova_rpc::{RpcClient, RpcError};
 use tokio::sync::{Mutex, watch};
 
 #[derive(Clone)]
@@ -23,7 +23,7 @@ struct Inner {
     trust: Arc<Trust>,
     pairing: Arc<PairingState>,
     clients: Mutex<HashMap<String, Arc<RpcClient>>>,
-    endpoint: OnceLock<comet_nova::transport::NovaEndpoint>,
+    endpoint: OnceLock<nova_network::transport::NovaEndpoint>,
     listener_port: u16,
 }
 
@@ -91,11 +91,11 @@ impl NovaHost {
     pub async fn bind_endpoint(
         &self,
         overlay: bool,
-    ) -> Result<comet_nova::transport::NovaEndpoint, RpcError> {
+    ) -> Result<nova_network::transport::NovaEndpoint, RpcError> {
         if let Some(endpoint) = self.inner.endpoint.get() {
             return Ok(endpoint.clone());
         }
-        let endpoint = comet_nova::transport::bind_endpoint(
+        let endpoint = nova_network::transport::bind_endpoint(
             &self.inner.identity,
             self.inner.listener_port,
             overlay,
@@ -111,10 +111,10 @@ impl NovaHost {
             .endpoint
             .get()
             .ok_or_else(|| RpcError::Failed("iroh endpoint is not ready".into()))?;
-        comet_nova::transport::endpoint_ticket(endpoint)
+        nova_network::transport::endpoint_ticket(endpoint)
     }
 
-    fn endpoint(&self) -> Result<&comet_nova::transport::NovaEndpoint, RpcError> {
+    fn endpoint(&self) -> Result<&nova_network::transport::NovaEndpoint, RpcError> {
         self.inner
             .endpoint
             .get()
@@ -139,7 +139,7 @@ impl NovaHost {
         endpoint: &str,
         code: &str,
     ) -> Result<serde_json::Value, RpcError> {
-        let peer = comet_nova::transport::pair_nova(
+        let peer = nova_network::transport::pair_nova(
             endpoint,
             self.endpoint()?,
             &self.inner.identity,
@@ -238,7 +238,7 @@ impl NovaHost {
             .filter(|peer| !peer.revoked)
             .ok_or_else(|| RpcError::Failed(format!("nova device {device_id} is not paired")))?;
         let client = Arc::new(
-            comet_nova::transport::connect_nova(
+            nova_network::transport::connect_nova(
                 &peer.endpoint,
                 self.endpoint()?,
                 &self.inner.identity,
@@ -322,7 +322,7 @@ pub fn normalize_endpoint(input: &str) -> Result<String, RpcError> {
     if input.is_empty() {
         return Err(RpcError::BadParams("iroh ticket is empty".into()));
     }
-    comet_nova::transport::decode_ticket(input)?;
+    nova_network::transport::decode_ticket(input)?;
     Ok(input.to_string())
 }
 

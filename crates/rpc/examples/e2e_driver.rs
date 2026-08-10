@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use comet_rpc::{RpcClient, connect_ws, methods};
+use nova_rpc::{RpcClient, connect_ws, methods};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(90);
 const MOCK_TEXT: &str = "Mock harness reporting in.";

@@ -15,7 +15,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use comet_proto::{ToolCall, ToolDiffReply};
+use nova_proto::{ToolCall, ToolDiffReply};
 
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_DIFF_BYTES: usize = 48 * 1024;

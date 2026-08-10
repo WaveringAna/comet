@@ -42,7 +42,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use comet_proto::{
+use nova_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode,
     AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, HarnessId,
 };
@@ -858,7 +858,7 @@ impl AgentAccounts {
         }
     }
 
-    /// Lazy TTL sweep (comet uses a background fiber; native reaps on the next
+    /// Lazy TTL sweep (nova uses a background fiber; native reaps on the next
     /// accounts call — same bound, no standing task).
     fn sweep_flows(&self) {
         let stale: Vec<String> = lock(&self.inner.flows)
@@ -940,7 +940,7 @@ impl AgentAccounts {
         }
         #[cfg(target_os = "macos")]
         {
-            return keychain::read_credentials().await;
+            keychain::read_credentials().await
         }
         #[cfg(not(target_os = "macos"))]
         (None, None)

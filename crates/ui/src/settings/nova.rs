@@ -181,7 +181,7 @@ impl NovaPage {
                 let devices = peers
                     .iter()
                     .filter(|peer| !peer.revoked)
-                    .map(|peer| comet_proto::Device {
+                    .map(|peer| nova_proto::Device {
                         id: peer.device_id.clone(),
                         name: peer.name.clone(),
                         platform: peer.platform.clone(),

@@ -1,7 +1,7 @@
 //! Attach to a running engine, or start one that outlives us.
 //!
 //! This is the module that makes the terminal viewport *detachable*. The engine
-//! already knows how to run without a UI (`comet headless`, ARCHITECTURE §1
+//! already knows how to run without a UI (`nova headless`, ARCHITECTURE §1
 //! "Headed / headless"), so the TUI never embeds one the way the gpui app can:
 //! it is always a thin client over localhost RPC. That single decision buys the
 //! herdr property — agents keep running and paired Nova Engines keep syncing
@@ -11,9 +11,9 @@
 //! Two paths:
 //!
 //! - **Attach.** A daemon is already listening on the IPC port (started by
-//!   `comet daemon install`, by a previous `comet-tui`, or by the headed app).
+//!   `nova daemon install`, by a previous `nova-tui`, or by the headed app).
 //!   We dial it and are done.
-//! - **Spawn.** Nothing is listening, so we start `comet headless` in its own
+//! - **Spawn.** Nothing is listening, so we start `nova headless` in its own
 //!   session ([`libc::setsid`]) with stdio redirected to the daemon log. A new
 //!   session means it has no controlling terminal, so the SIGHUP the kernel
 //!   sends when the terminal window closes never reaches it, and when we exit
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use comet_rpc::{RpcClient, connect_ws};
+use nova_rpc::{RpcClient, connect_ws};
 
 /// How long a single TCP probe of the IPC port may take before we call it dead.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(750);
@@ -40,13 +40,13 @@ const SPAWN_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
-    /// Engine data directory (`~/.comet-native`).
+    /// Engine data directory (`~/.nova-native`).
     pub data_dir: PathBuf,
     /// Localhost IPC port to probe and, if we spawn, to serve.
     pub ipc_port: u16,
-    /// Explicit path to the `comet` binary hosting `headless`. `None` resolves
-    /// it (see [`resolve_comet_bin`]).
-    pub comet_bin: Option<PathBuf>,
+    /// Explicit path to the `nova` binary hosting `headless`. `None` resolves
+    /// it (see [`resolve_nova_bin`]).
+    pub nova_bin: Option<PathBuf>,
     /// When false, a missing daemon is an error instead of something we start.
     /// (`--no-spawn`: for attaching to a service-managed engine only.)
     pub spawn: bool,
@@ -107,7 +107,7 @@ pub async fn connect(config: &DaemonConfig) -> anyhow::Result<Connection> {
 
     if !config.spawn {
         bail!(
-            "no engine listening on 127.0.0.1:{} — start one with `comet daemon start` \
+            "no engine listening on 127.0.0.1:{} — start one with `nova daemon start` \
              (or drop --no-spawn to have the TUI start it)",
             config.ipc_port
         );
@@ -146,7 +146,7 @@ fn describe_daemon_failure(config: &DaemonConfig) -> String {
     match log_tail(&log, 12) {
         Some(tail) => format!("Last lines of {}:\n{tail}", log.display()),
         None => format!(
-            "No log at {} either — check that `comet headless` runs in the foreground.",
+            "No log at {} either — check that `nova headless` runs in the foreground.",
             log.display()
         ),
     }
@@ -169,13 +169,13 @@ pub fn log_tail(path: &Path, lines: usize) -> Option<String> {
     )
 }
 
-/// Start `comet headless` in its own session, stdio to the daemon log.
+/// Start `nova headless` in its own session, stdio to the daemon log.
 fn spawn_detached(config: &DaemonConfig) -> anyhow::Result<u32> {
-    let bin = match &config.comet_bin {
+    let bin = match &config.nova_bin {
         Some(path) => path.clone(),
-        None => resolve_comet_bin().context(
-            "could not find the `comet` binary to run the engine — put it on PATH \
-             or set COMET_BIN",
+        None => resolve_nova_bin().context(
+            "could not find the `nova` binary to run the engine — put it on PATH \
+             or set NOVA_BIN",
         )?,
     };
     std::fs::create_dir_all(&config.data_dir)
@@ -198,10 +198,10 @@ fn spawn_detached(config: &DaemonConfig) -> anyhow::Result<u32> {
         .stderr(log)
         // Pin the two settings that must agree with what this client resolved;
         // everything else (NOVA_PORT, NOVA_UPDATE_URL, PATH, …) is
-        // inherited from our environment exactly as `comet daemon install`
+        // inherited from our environment exactly as `nova daemon install`
         // captures it.
-        .env("COMET_DATA_DIR", &config.data_dir)
-        .env("COMET_IPC_PORT", config.ipc_port.to_string());
+        .env("NOVA_DATA_DIR", &config.data_dir)
+        .env("NOVA_IPC_PORT", config.ipc_port.to_string());
 
     #[cfg(unix)]
     {
@@ -226,18 +226,21 @@ fn spawn_detached(config: &DaemonConfig) -> anyhow::Result<u32> {
     Ok(child.id())
 }
 
-/// Find the `comet` binary. Checked in order of "most likely to be the one the
+/// Find the `nova` binary. Checked in order of "most likely to be the one the
 /// user means": an explicit override, the binary sitting next to this one (a
 /// cargo target dir or an installed `app/current/`), PATH, then the installer's
 /// well-known location.
-pub fn resolve_comet_bin() -> anyhow::Result<PathBuf> {
-    let exe_name = if cfg!(windows) { "comet.exe" } else { "comet" };
+pub fn resolve_nova_bin() -> anyhow::Result<PathBuf> {
+    let exe_name = if cfg!(windows) { "nova.exe" } else { "nova" };
 
-    if let Some(explicit) = std::env::var_os("COMET_BIN").map(PathBuf::from) {
+    if let Some(explicit) = std::env::var_os("NOVA_BIN")
+        .or_else(|| std::env::var_os("COMET_BIN"))
+        .map(PathBuf::from)
+    {
         if explicit.is_file() {
             return Ok(explicit);
         }
-        bail!("COMET_BIN={} is not a file", explicit.display());
+        bail!("NOVA_BIN={} is not a file", explicit.display());
     }
 
     if let Ok(self_exe) = std::env::current_exe()
@@ -259,15 +262,18 @@ pub fn resolve_comet_bin() -> anyhow::Result<PathBuf> {
     }
 
     if let Some(home) = std::env::var_os("HOME") {
-        let installed = PathBuf::from(home)
-            .join(".comet-native/app/current")
-            .join(exe_name);
+        let home = PathBuf::from(home);
+        let installed = home.join(".nova-native/app/current").join(exe_name);
         if installed.is_file() {
             return Ok(installed);
         }
+        let legacy = home.join(".comet-native/app/current/comet");
+        if legacy.is_file() {
+            return Ok(legacy);
+        }
     }
 
-    bail!("`{exe_name}` not found next to this binary, on PATH, or under ~/.comet-native/app")
+    bail!("`{exe_name}` not found next to this binary, on PATH, or under ~/.nova-native/app")
 }
 
 /// Poll the IPC port until something answers, or the budget runs out.
@@ -306,18 +312,18 @@ mod tests {
     }
 
     #[test]
-    fn explicit_comet_bin_must_exist() {
-        // A bogus COMET_BIN is a hard error rather than a silent fallthrough to
+    fn explicit_nova_bin_must_exist() {
+        // A bogus NOVA_BIN is a hard error rather than a silent fallthrough to
         // PATH — otherwise a typo'd override starts the wrong engine.
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("comet");
-        let err = with_env("COMET_BIN", Some(missing.as_os_str()), resolve_comet_bin)
-            .expect_err("a nonexistent COMET_BIN should fail");
+        let missing = dir.path().join("nova");
+        let err = with_env("NOVA_BIN", Some(missing.as_os_str()), resolve_nova_bin)
+            .expect_err("a nonexistent NOVA_BIN should fail");
         assert!(err.to_string().contains("is not a file"), "{err}");
 
         std::fs::write(&missing, b"#!/bin/sh\n").unwrap();
         let found =
-            with_env("COMET_BIN", Some(missing.as_os_str()), resolve_comet_bin).expect("now valid");
+            with_env("NOVA_BIN", Some(missing.as_os_str()), resolve_nova_bin).expect("now valid");
         assert_eq!(found, missing);
     }
 
@@ -339,7 +345,7 @@ mod tests {
         let result = connect(&DaemonConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            comet_bin: None,
+            nova_bin: None,
             spawn: false,
         })
         .await;

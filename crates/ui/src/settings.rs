@@ -1,5 +1,5 @@
 //! UI settings persisted to a small JSON file in the data dir — pane widths and
-//! collapse flags (comet persisted the same set in localStorage).
+//! collapse flags (nova persisted the same set in localStorage).
 //!
 //! Loaded once at boot; saved debounced by the shell ([`SAVE_DEBOUNCE_MS`]).
 //! Corrupt or missing files fall back to defaults; loaded values are clamped so a
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_comet() {
+    fn defaults_match_nova() {
         let d = UiSettings::default();
         assert_eq!(d.sidebar_width, 256.0);
         assert_eq!(d.right_pane_width, 520.0);

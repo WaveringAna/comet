@@ -12,7 +12,7 @@
 //!    retrying on comet's short backoff ladder; fall back to the prompt's first
 //!    words when every attempt produces nothing;
 //! 4. re-check the title (a user rename during generation wins);
-//! 5. when the chat sits in a comet worktree (`comet/<name>` branch), rename the
+//! 5. when the chat sits in a nova worktree (`nova/<name>` branch), rename the
 //!    branch from the title and update the chat's branch row;
 //! 6. `rename_chat` in the workspace doc.
 
@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use comet_harness::{CancellationToken, RunControls, SteerMessage};
-use comet_proto::{
+use nova_harness::{CancellationToken, RunControls, SteerMessage};
+use nova_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     UserInputAnswer, UserInputQuestion,
 };
@@ -115,9 +115,9 @@ impl TitleGenerator {
         }
 
         // Rename the worktree branch when the chat still sits on its original
-        // comet/<name> branch (guards live inside rename_worktree_branch).
+        // nova/<name> branch (guards live inside rename_worktree_branch).
         if let (Some(chat_cwd), Some(branch)) = (&latest.cwd, &latest.branch)
-            && branch.starts_with("comet/")
+            && branch.starts_with("nova/")
         {
             match self
                 .inner
@@ -223,7 +223,7 @@ fn clean_title(raw: &str) -> String {
 /// Drive one titling run through the harness: no steering, questions resolved
 /// empty immediately (a titling prompt must never block on input).
 async fn collect_text(
-    harness: &dyn comet_harness::Harness,
+    harness: &dyn nova_harness::Harness,
     request: RunRequest,
 ) -> Result<String, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
@@ -265,7 +265,7 @@ async fn collect_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_proto::Model;
+    use nova_proto::Model;
 
     fn model(id: &str, label: &str) -> Model {
         Model {

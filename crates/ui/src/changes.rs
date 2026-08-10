@@ -24,8 +24,8 @@ use gpui::{
     Window, div, font, list, prelude::*, px,
 };
 
-use comet_proto::{Chat, CheckoutDiff};
-use comet_rpc::methods;
+use nova_proto::{Chat, CheckoutDiff};
+use nova_rpc::methods;
 
 use crate::markdown::highlight::{Lang, LineCarry, Token, lang_for_tag, tokenize_line};
 use crate::markdown::render;
@@ -1086,7 +1086,7 @@ impl Changes {
         let adds = file.additions;
         let dels = file.deletions;
 
-        // Chevron (comet checkout-diff-sidebar): chevron-right closed,
+        // Chevron (nova checkout-diff-sidebar): chevron-right closed,
         // chevron-down open; gpui divs have no rotation transform at the
         // pinned rev, so the glyph swap crossfades over the same 200 ms.
         let chevron_icon = if collapsed {
@@ -1328,7 +1328,7 @@ fn diff_token_color(class: crate::markdown::highlight::TokenClass, theme: &Theme
 
 /// The expanded body of one file section: notices, hunk headers, +/-/context
 /// lines with a coloured accent bar, dual line-number gutters, a marker
-/// column, and paint-only syntax runs (comet checkout-diff-sidebar).
+/// column, and paint-only syntax runs (nova checkout-diff-sidebar).
 fn render_file_body(
     file: &FileDiff,
     highlight: Option<Arc<Vec<Vec<Token>>>>,
@@ -1913,7 +1913,7 @@ diff --git a/out.rs b/out.rs
         assert_eq!(diff_phase(Some(&full)), DiffPhase::List);
         // Engine may report files without patch text (truncation edge).
         let mut summarized = diff("co", "d", "/w", "");
-        summarized.files.push(comet_proto::DiffFileSummary {
+        summarized.files.push(nova_proto::DiffFileSummary {
             path: "x".into(),
             old_path: None,
             status: "modified".into(),

@@ -1,5 +1,5 @@
 [package]
-name = "comet-sync"
+name = "nova-sync"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ rusqlite.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-comet-doc.workspace = true
+nova-doc.workspace = true
 loro.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

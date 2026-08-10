@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture `comet-tui` frames as PNGs.
+"""Capture `nova-tui` frames as PNGs.
 
 Drives the real binary against a seeded throwaway daemon, reconstructs each frame
 with the emulator in `tui_capture` (colors and attributes included), renders it to
@@ -9,7 +9,7 @@ mockup, and not a lossy text dump.
 
     scripts/tui-screenshots.py [--out DIR] [--keep]
 
-Requires: cargo build -p comet -p comet-tui-bin, and Google Chrome.
+Requires: cargo build -p nova -p nova-tui-bin, and Google Chrome.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tui_capture import Screen, Style, Tui  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(ROOT, "target", "debug", "comet-tui")
-COMET = os.path.join(ROOT, "target", "debug", "comet")
-DATA_DIR = "/tmp/comet-tui-shots/daemon"
+BIN = os.path.join(ROOT, "target", "debug", "nova-tui")
+NOVA = os.path.join(ROOT, "target", "debug", "nova")
+DATA_DIR = "/tmp/nova-tui-shots/daemon"
 IPC = "27934"
 ROWS, COLS = 36, 116
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -44,11 +44,11 @@ FONT_PX = 14
 
 ENV = dict(
     os.environ,
-    COMET_DATA_DIR=DATA_DIR,
-    COMET_IPC_PORT=IPC,
-    COMET_HARNESS="mock",
+    NOVA_DATA_DIR=DATA_DIR,
+    NOVA_IPC_PORT=IPC,
+    NOVA_HARNESS="mock",
     # Pace the mock stream so a mid-run frame is catchable.
-    COMET_MOCK_DELAY_MS="420",
+    NOVA_MOCK_DELAY_MS="420",
     RUST_LOG="warn",
     TERM="xterm-256color",
 )
@@ -182,7 +182,7 @@ def text_frame(lines: list[str], title: str) -> tuple[str, Screen]:
 def rpc(method: str, params: str) -> str:
     result = subprocess.run(
         [
-            "cargo", "run", "-q", "-p", "comet-rpc", "--example", "rpc_probe", "--",
+            "cargo", "run", "-q", "-p", "nova-rpc", "--example", "rpc_probe", "--",
             f"ws://127.0.0.1:{IPC}", method, params,
         ],
         cwd=ROOT,
@@ -199,7 +199,7 @@ def seed(device_id: str) -> str:
     """A workspace that looks like real use: three spaces, several sessions."""
     home = os.environ.get("HOME", "/home/w")
     spaces = {}
-    for project in ("comet-native", "soccertcg", "aether"):
+    for project in ("nova-native", "soccertcg", "aether"):
         space_id = str(uuid.uuid4())
         rpc(
             "Mutate",
@@ -216,10 +216,10 @@ def seed(device_id: str) -> str:
 
     focus = None
     rows = [
-        ("comet-native", "Ratatui terminal frontend", "comet/high-performance-tui", 0, True),
-        ("comet-native", "Diff sidebar reconciler", "comet-native/main", 3, False),
-        ("soccertcg", "Rebalance player stat caps", "comet/rebalance-stat-caps", 2, True),
-        ("soccertcg", "Craft premium TCG experience", "comet/craft-premium-exp", 26, False),
+        ("nova-native", "Ratatui terminal frontend", "nova/high-performance-tui", 0, True),
+        ("nova-native", "Diff sidebar reconciler", "nova-native/main", 3, False),
+        ("soccertcg", "Rebalance player stat caps", "nova/rebalance-stat-caps", 2, True),
+        ("soccertcg", "Craft premium TCG experience", "nova/craft-premium-exp", 26, False),
         ("aether", "Initial context exploration", "aether/main", 48, False),
     ]
     for project, title, branch, age_hours, run in rows:
@@ -294,19 +294,19 @@ def daemon_pid() -> int | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", default="/tmp/comet-tui-shots/png")
+    parser.add_argument("--out", default="/tmp/nova-tui-shots/png")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
 
-    for binary in (BIN, COMET, CHROME):
+    for binary in (BIN, NOVA, CHROME):
         if not os.path.exists(binary):
             print(f"missing {binary}")
             return 2
 
-    subprocess.run(["rm", "-rf", "/tmp/comet-tui-shots"], check=False)
+    subprocess.run(["rm", "-rf", "/tmp/nova-tui-shots"], check=False)
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(args.out, exist_ok=True)
-    scratch = "/tmp/comet-tui-shots/html"
+    scratch = "/tmp/nova-tui-shots/html"
     os.makedirs(scratch, exist_ok=True)
 
     shots: list[tuple[str, str]] = []
@@ -338,39 +338,39 @@ def main() -> int:
         tui.send(b"j", 0.4)
         tui.send(b"j", 0.4)
         screen = tui.send(b"\r", 3.0)      # open the session
-        shoot("01-overview", screen, "comet-tui — overview")
+        shoot("01-overview", screen, "nova-tui — overview")
 
         # 2. Help overlay.
         tui.send(b"\x1b", 0.5)             # out of the composer
         screen = tui.send(b"?", 1.0)
-        shoot("02-keys", screen, "comet-tui — key map")
+        shoot("02-keys", screen, "nova-tui — key map")
         tui.send(b"\x1b", 0.5)
 
         # 3. Streaming: send a prompt and catch it mid-run (the mock harness is
-        #    paced by COMET_MOCK_DELAY_MS so this is reliable).
+        #    paced by NOVA_MOCK_DELAY_MS so this is reliable).
         tui.send(b"i", 0.4)
         tui.send(b"how does the transcript cache stay O(changed)?", 0.6)
         tui.send(b"\r", 0.2)
         screen = tui.settle(2.2, quiet=0.15)
-        shoot("03-streaming", screen, "comet-tui — streaming")
+        shoot("03-streaming", screen, "nova-tui — streaming")
 
         # 4. Scrolled back: the follow banner, and history above the live tail.
         tui.settle(14, quiet=1.0)
         tui.send(b"\x1b", 0.4)
         tui.send(b"k" * 8, 1.0)
         screen = tui.settle(1.0, quiet=0.3)
-        shoot("04-scrolled", screen, "comet-tui — scrolled back")
+        shoot("04-scrolled", screen, "nova-tui — scrolled back")
 
         # 5. Detaching: the shell after Ctrl-C, plus proof the engine is up.
         code, farewell = tui.quit()
         probe = subprocess.run([BIN, "--probe"], env=ENV, capture_output=True, text=True)
-        lines = ["$ comet-tui"]
+        lines = ["$ nova-tui"]
         lines += [line for line in farewell.splitlines() if line.strip()]
-        lines += ["", f"$ comet-tui --probe    # exit {probe.returncode}"]
+        lines += ["", f"$ nova-tui --probe    # exit {probe.returncode}"]
         lines += [line for line in probe.stdout.splitlines() if line.strip()]
-        lines += ["", "$ # the agents are still running; run comet-tui again to reattach"]
+        lines += ["", "$ # the agents are still running; run nova-tui again to reattach"]
         path = os.path.join(args.out, "05-detach.png")
-        html, frame = text_frame(lines, "comet-tui — detaching")
+        html, frame = text_frame(lines, "nova-tui — detaching")
         render_png(html, path, scratch, frame)
         print(f"  ✓ 05-detach.png  ({os.path.getsize(path) // 1024} KB)  [exit {code}]")
         shots.append(("05-detach", path))

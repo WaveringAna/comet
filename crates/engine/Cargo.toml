@@ -1,18 +1,18 @@
 [package]
-name = "comet-engine"
+name = "nova-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-comet-proto.workspace = true
-comet-doc.workspace = true
-comet-sync.workspace = true
-comet-harness.workspace = true
-comet-rpc.workspace = true
-comet-nova.workspace = true
-comet-update.workspace = true
+nova-proto.workspace = true
+nova-doc.workspace = true
+nova-sync.workspace = true
+nova-harness.workspace = true
+nova-rpc.workspace = true
+nova-network.workspace = true
+nova-update.workspace = true
 loro.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

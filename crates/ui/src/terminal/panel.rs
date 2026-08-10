@@ -23,9 +23,9 @@ use gpui::{
     actions, div, prelude::*, px,
 };
 
-use comet_doc::MessagePart;
-use comet_proto::{Chat, HarnessId, TerminalEvent, TerminalSession, ToolOutputReply};
-use comet_rpc::methods;
+use nova_doc::MessagePart;
+use nova_proto::{Chat, HarnessId, TerminalEvent, TerminalSession, ToolOutputReply};
+use nova_rpc::methods;
 
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
 use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
@@ -88,7 +88,7 @@ pub enum FeedStatus {
 /// `live` is the session's staleness-gated indicator (`effective_indicator`
 /// != None): an unresolved call only reads as running while the session that
 /// launched it is actually alive.
-pub fn tool_feed(entries: &[comet_doc::SessionMessageEntry], live: bool) -> Vec<FeedEntry> {
+pub fn tool_feed(entries: &[nova_doc::SessionMessageEntry], live: bool) -> Vec<FeedEntry> {
     entries
         .iter()
         .flat_map(|entry| entry.parts.iter())
@@ -99,7 +99,7 @@ pub fn tool_feed(entries: &[comet_doc::SessionMessageEntry], live: bool) -> Vec<
                 is_error,
                 resolved,
             } => {
-                let (label, detail) = comet_proto::view::tool_chip_content(call);
+                let (label, detail) = nova_proto::view::tool_chip_content(call);
                 Some(FeedEntry {
                     id: id.clone(),
                     kind: crate::transcript::lower_label(label),
@@ -182,7 +182,7 @@ pub fn short_model_name(model: &str) -> &str {
 /// The name the pinned tab is titled after: the chat's model (provider
 /// prefix stripped), falling back to the harness name, then "agent" before
 /// config lands.
-pub fn agent_tab_name(config: Option<&comet_proto::ChatConfig>) -> &str {
+pub fn agent_tab_name(config: Option<&nova_proto::ChatConfig>) -> &str {
     config
         .map(|config| {
             config
@@ -397,7 +397,7 @@ pub fn output_display_lines(output: &str, truncated: bool) -> Vec<String> {
     if truncated {
         out.push(format!(
             "… truncated to the last {} KB",
-            comet_proto::TOOL_OUTPUT_MAX_BYTES / 1024
+            nova_proto::TOOL_OUTPUT_MAX_BYTES / 1024
         ));
     }
     if hidden > 0 {
@@ -1282,8 +1282,8 @@ impl TerminalPanel {
         let feed = {
             let state = self.state.read(cx);
             let live =
-                comet_proto::view::effective_indicator(state.session_for(chat), chrono::Utc::now())
-                    != comet_proto::view::Indicator::None;
+                nova_proto::view::effective_indicator(state.session_for(chat), chrono::Utc::now())
+                    != nova_proto::view::Indicator::None;
             tool_feed(&state.transcript, live)
         };
 
@@ -1501,8 +1501,8 @@ impl TerminalPanel {
             .map(|config| config.harness)
             .unwrap_or(HarnessId::Pi);
         let session_live =
-            comet_proto::view::effective_indicator(state.session_for(chat), chrono::Utc::now())
-                != comet_proto::view::Indicator::None;
+            nova_proto::view::effective_indicator(state.session_for(chat), chrono::Utc::now())
+                != nova_proto::view::Indicator::None;
         let agent_running = tool_feed(&state.transcript, session_live)
             .iter()
             .any(|e| e.status == FeedStatus::Running);
@@ -1584,7 +1584,7 @@ impl TerminalPanel {
                         let chat_close2 = chat_owned.clone();
                         let chat_drag = chat_owned.clone();
                         let ghost_title = title.clone();
-                        // Comet tab: `h-7 rounded-lg pl-2 pr-1 gap-1.5 text-xs`,
+                        // Nova tab: `h-7 rounded-lg pl-2 pr-1 gap-1.5 text-xs`,
                         // terminal glyph + label + close; active = white/8 wash.
                         let (text_color, bg, glyph_alpha) = if selected {
                             (theme.text, crate::theme::white_alpha(0.08), 0.8)
@@ -1752,7 +1752,7 @@ impl TerminalPanel {
                             .text_color(theme.text_muted.opacity(0.6)),
                     ),
             )
-            // Collapse chevron pinned right (comet "Hide terminal" ⌘J).
+            // Collapse chevron pinned right (nova "Hide terminal" ⌘J).
             .child(div().flex_1())
             .child(
                 div()
@@ -2004,7 +2004,7 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_proto::ToolCall;
+    use nova_proto::ToolCall;
 
     #[test]
     fn output_display_lines_tail_caps_with_markers() {
@@ -2028,10 +2028,10 @@ mod tests {
         command: &str,
         is_error: bool,
         resolved: bool,
-    ) -> comet_doc::SessionMessageEntry {
-        comet_doc::SessionMessageEntry {
+    ) -> nova_doc::SessionMessageEntry {
+        nova_doc::SessionMessageEntry {
             id: id.into(),
-            role: comet_doc::MessageRole::Assistant,
+            role: nova_doc::MessageRole::Assistant,
             parts: vec![MessagePart::Tool {
                 id: format!("tool-{id}"),
                 call: ToolCall::Exec {
@@ -2162,7 +2162,7 @@ mod tests {
 
     #[test]
     fn agent_tab_name_rules() {
-        use comet_proto::{ChatConfig, ReasoningLevel, SandboxLevel};
+        use nova_proto::{ChatConfig, ReasoningLevel, SandboxLevel};
         let config = |harness, model: Option<&str>| ChatConfig {
             harness,
             model: model.map(str::to_string),

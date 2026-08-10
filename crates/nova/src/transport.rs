@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
-use comet_rpc::{RpcError, RpcReply, RpcService, serve_connection};
 use futures::SinkExt as _;
 use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey};
+use nova_rpc::{RpcError, RpcReply, RpcService, serve_connection};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -517,7 +517,7 @@ pub async fn connect_nova(
     endpoint: &NovaEndpoint,
     local: &DeviceIdentityRecord,
     peer: &TrustedPeer,
-) -> Result<comet_rpc::RpcClient, RpcError> {
+) -> Result<nova_rpc::RpcClient, RpcError> {
     let target = decode_ticket(ticket)?;
     let target_id = target.id;
     let connection = endpoint
@@ -570,7 +570,7 @@ pub async fn connect_nova(
     let (out_tx, out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
     tokio::spawn(pump_stream(connection, send, recv, out_rx, in_tx));
-    Ok(comet_rpc::RpcClient::new(out_tx, in_rx))
+    Ok(nova_rpc::RpcClient::new(out_tx, in_rx))
 }
 
 async fn pump_stream(
@@ -781,10 +781,10 @@ mod tests {
     impl RpcService for Svc {
         async fn handle(&self, method: &str, _p: serde_json::Value) -> Result<RpcReply, RpcError> {
             match method {
-                comet_rpc::methods::LIST_MODELS => {
+                nova_rpc::methods::LIST_MODELS => {
                     Ok(RpcReply::Value(serde_json::json!({"ok": true})))
                 }
-                comet_rpc::methods::SET_PI_CREDENTIAL => {
+                nova_rpc::methods::SET_PI_CREDENTIAL => {
                     Ok(RpcReply::Value(serde_json::json!({"ok": true})))
                 }
                 _ => Err(RpcError::UnknownMethod(method.into())),
@@ -887,14 +887,14 @@ mod tests {
         .unwrap();
         assert!(
             client
-                .call(comet_rpc::methods::LIST_MODELS, serde_json::Value::Null)
+                .call(nova_rpc::methods::LIST_MODELS, serde_json::Value::Null)
                 .await
                 .is_ok()
         );
         assert!(
             client
                 .call(
-                    comet_rpc::methods::SET_PI_CREDENTIAL,
+                    nova_rpc::methods::SET_PI_CREDENTIAL,
                     serde_json::Value::Null,
                 )
                 .await
@@ -903,7 +903,7 @@ mod tests {
 
         server_trust.revoke(&client_identity.device_id).unwrap();
         let error = client
-            .call(comet_rpc::methods::LIST_MODELS, serde_json::Value::Null)
+            .call(nova_rpc::methods::LIST_MODELS, serde_json::Value::Null)
             .await
             .expect_err("revocation must affect an already-open connection");
         assert!(error.to_string().contains("trust changed or was revoked"));

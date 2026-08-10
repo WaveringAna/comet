@@ -19,16 +19,16 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use comet_doc::{
+use nova_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionDoc, SessionMessageEntry,
 };
-use comet_engine::{EngineCore, HarnessRegistry, RunJournal};
-use comet_harness::{Harness, HarnessError, RunControls};
-use comet_proto::{
+use nova_engine::{EngineCore, HarnessRegistry, RunJournal};
+use nova_harness::{Harness, HarnessError, RunControls};
+use nova_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
-use comet_sync::DocsStore;
+use nova_sync::DocsStore;
 
 const CHAT: &str = "chat-restart";
 
@@ -526,7 +526,7 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
     )
     .await;
 
-    // The session PARKS (comet runsBySession): the second message routes into
+    // The session PARKS (nova runsBySession): the second message routes into
     // the live child instead of spawning a new one.
     queue_run(&core, "second", "/tmp", "msg-user-2");
     wait_for(
@@ -770,7 +770,7 @@ async fn rejected_resume_retries_as_fresh_session() {
 /// the codeword back — the reply can only contain it if the second run resumed
 /// the first run's harness session. Ignored by default: needs an installed,
 /// authenticated `claude` CLI and spends real tokens (haiku, two tiny turns).
-/// Run with: `cargo test -p comet-engine --test restart_resume -- --ignored`
+/// Run with: `cargo test -p nova-engine --test restart_resume -- --ignored`
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed+authenticated claude CLI; spends tokens"]
 async fn real_claude_remembers_codeword_across_engine_restart() {
@@ -794,7 +794,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
     let assemble_real = || {
         EngineCore::assemble(
             &dir,
-            Arc::new(comet_engine::default_registry()),
+            Arc::new(nova_engine::default_registry()),
             HarnessId::ClaudeCode,
         )
         .expect("engine core assembles")

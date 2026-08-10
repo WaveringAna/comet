@@ -24,7 +24,7 @@ use gpui::{
 };
 
 use crate::state::EngineHandle;
-use comet_rpc::methods;
+use nova_rpc::methods;
 
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;

@@ -8,8 +8,8 @@ use super::*;
 use crate::motion::TAB_SLIDE;
 use crate::pickers::{breadcrumbs, browser_rows, parent_path};
 use crate::terminal::panel::{drop_index, reorder_tabs, slide_offset};
-use comet_proto::{ChatIndicator, Device, FolderListing, Project};
 use gpui::FocusHandle;
+use nova_proto::{ChatIndicator, Device, FolderListing, Project};
 
 /// Project-row slot height for drag drop-index math: py(6)×2 + 17px line ≈ 29,
 /// plus the 2px column gap.
@@ -615,7 +615,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Vec<(String, f32, AnyElement)> {
         let now = Utc::now();
-        let rows: Vec<(ChatIndicator, comet_proto::Chat, String, Option<String>)> = {
+        let rows: Vec<(ChatIndicator, nova_proto::Chat, String, Option<String>)> = {
             let state = self.state.read(cx);
             let show_hosts = state.devices.len() > 1;
             state
@@ -737,7 +737,7 @@ impl Shell {
 
     /// The current listing's folder rows filtered by the search query
     /// (prefix matches first — `popover::filter_indices`).
-    fn add_project_filtered(&self, cx: &App) -> Vec<comet_proto::FolderEntry> {
+    fn add_project_filtered(&self, cx: &App) -> Vec<nova_proto::FolderEntry> {
         let Some(flow) = self.add_project.as_ref() else {
             return Vec::new();
         };

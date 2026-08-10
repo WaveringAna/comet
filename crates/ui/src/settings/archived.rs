@@ -5,8 +5,8 @@ use gpui::{
     AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
 
-use comet_proto::Chat;
-use comet_rpc::methods;
+use nova_proto::Chat;
+use nova_rpc::methods;
 
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -94,7 +94,7 @@ impl Render for ArchivedPage {
                     .clone()
                     .unwrap_or_else(|| "Untitled session".into())
                     .into();
-                // Unknown device → no fragment at all (comet renders the
+                // Unknown device → no fragment at all (nova renders the
                 // device span only when the name resolves).
                 let device: Option<SharedString> =
                     device_names.get(&chat.device_id).cloned().map(Into::into);

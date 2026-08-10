@@ -9,7 +9,7 @@
 //! curated list directly; `ClaudeHarness::models` is the single seam where
 //! dynamic discovery can later be spliced in.
 
-use comet_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
+use nova_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 
 /// The ultrathink directive rides every user message as a prompt prefix — that
 /// is how the mode actually works in Claude Code (a prompt convention, not an

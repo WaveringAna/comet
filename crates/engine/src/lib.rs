@@ -1,4 +1,4 @@
-//! comet-engine — the headless backend: sessions engine, doc host + command executor,
+//! nova-engine — the headless backend: sessions engine, doc host + command executor,
 //! run journal + crash recovery, and the IPC RPC server.
 //!
 //! Spec: ARCHITECTURE.md §5 and docs/research/feature-inventory.md §3. M2 surface:
@@ -8,9 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use comet_proto::HarnessId;
+pub use nova_proto::HarnessId;
 
-use comet_sync::DocsStore;
+use nova_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod diff_sync;
@@ -53,13 +53,13 @@ pub use workspace_host::{
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("doc: {0}")]
-    Doc(#[from] comet_doc::DocError),
+    Doc(#[from] nova_doc::DocError),
     #[error("journal: {0}")]
     Journal(#[from] run_journal::JournalError),
     #[error("store: {0}")]
-    Store(#[from] comet_sync::StoreError),
+    Store(#[from] nova_sync::StoreError),
     #[error("harness: {0}")]
-    Harness(#[from] comet_harness::HarnessError),
+    Harness(#[from] nova_harness::HarnessError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -77,7 +77,7 @@ pub(crate) fn new_id() -> String {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// Data directory (default `~/.comet-native`, dev `~/.comet-native-dev`).
+    /// Data directory (default `~/.nova-native`, dev `~/.nova-native-dev`).
     pub data_dir: PathBuf,
     /// Optional Nova release server. No network update check runs when absent.
     pub update_url: Option<String>,
@@ -108,7 +108,7 @@ pub struct EngineCore {
     pub nova: nova::NovaHost,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
-    updater: std::sync::Mutex<Option<comet_update::Updater>>,
+    updater: std::sync::Mutex<Option<nova_update::Updater>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -208,14 +208,14 @@ impl EngineCore {
     }
 
     /// Attach the release checker (before building the RPC service).
-    pub fn set_updater(&self, updater: comet_update::Updater) {
+    pub fn set_updater(&self, updater: nova_update::Updater) {
         *self
             .updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(updater);
     }
 
-    pub fn updater(&self) -> Option<comet_update::Updater> {
+    pub fn updater(&self) -> Option<nova_update::Updater> {
         self.updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -293,15 +293,15 @@ impl Engine {
             config.nova_port,
         )?;
         // Optional release checker: polls the configured server on a 6h cadence; headless
-        // installs with COMET_AUTO_UPDATE=1 apply + restart themselves — gated
+        // installs with NOVA_AUTO_UPDATE=1 apply + restart themselves — gated
         // on quiescence so a restart never lands under a live run or open PTY.
-        let quiescent: comet_update::QuiescentCheck = {
+        let quiescent: nova_update::QuiescentCheck = {
             let sessions = core.sessions.clone();
             let terminals = core.terminals.clone();
             Arc::new(move || !sessions.any_active() && !terminals.any_open())
         };
         if let Some(update_url) = config.update_url.clone() {
-            core.set_updater(comet_update::Updater::spawn(update_url, Some(quiescent)));
+            core.set_updater(nova_update::Updater::spawn(update_url, Some(quiescent)));
         }
         tracing::info!(device_id = %core.device_id, "engine core assembled");
 
@@ -324,12 +324,12 @@ impl Engine {
         let nova_identity = core.nova.identity();
         let nova_pairing = core.nova.pairing();
         let nova_port = core.nova.listener_port();
-        let discovery_listener = tokio::spawn(comet_nova::transport::serve_discovery_listener(
+        let discovery_listener = tokio::spawn(nova_network::transport::serve_discovery_listener(
             discovery_socket,
             core.nova.identity(),
             endpoint.clone(),
         ));
-        let nova_listener = tokio::spawn(comet_nova::transport::serve_iroh_endpoint(
+        let nova_listener = tokio::spawn(nova_network::transport::serve_iroh_endpoint(
             endpoint,
             nova_service,
             nova_trust,
@@ -415,19 +415,18 @@ async fn shutdown_signal() -> std::io::Result<()> {
 /// port, not who can reach it.
 pub async fn serve_ipc(
     port: u16,
-    service: std::sync::Arc<dyn comet_rpc::RpcService>,
+    service: std::sync::Arc<dyn nova_rpc::RpcService>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(comet_rpc::serve_ws_listener(
-        listener, service,
-    )))
+    Ok(tokio::spawn(nova_rpc::serve_ws_listener(listener, service)))
 }
 
 /// Best-effort human name for this device's registry row (hostname).
 fn local_device_name() -> String {
-    std::env::var("COMET_DEVICE_NAME")
+    std::env::var("NOVA_DEVICE_NAME")
         .ok()
+        .or_else(|| std::env::var("COMET_DEVICE_NAME").ok())
         .or_else(|| std::env::var("HOSTNAME").ok())
         .or_else(|| std::env::var("COMPUTERNAME").ok())
         .or_else(|| std::fs::read_to_string("/etc/hostname").ok())

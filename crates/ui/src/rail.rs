@@ -10,7 +10,7 @@
 use gpui::{AnyElement, Context, ListOffset, SharedString, div, prelude::*, px};
 use std::time::{Duration, Instant};
 
-use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use nova_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
 use crate::motion;
 use crate::popover;
@@ -218,13 +218,12 @@ impl GlideTimeline {
     }
 }
 
-/// `COMET_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
-/// the smoothness measurement knob (same family as `COMET_FRAME_STATS`).
+/// `NOVA_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
+/// the smoothness measurement knob (same family as `NOVA_FRAME_STATS`).
 fn scroll_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("COMET_SCROLL_TRACE").is_ok_and(|v| !v.is_empty() && v != "0")
-    })
+    *ENABLED
+        .get_or_init(|| std::env::var("NOVA_SCROLL_TRACE").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +554,7 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_doc::MessageStatus;
+    use nova_doc::MessageStatus;
 
     fn entry(id: &str, role: MessageRole, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {

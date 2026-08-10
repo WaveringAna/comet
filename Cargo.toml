@@ -11,7 +11,7 @@ members = [
     "crates/update",
     "crates/ui",
     "crates/tui",
-    "apps/comet",
+    "apps/nova",
     "apps/tui",
 ]
 
@@ -22,16 +22,16 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-comet-proto = { path = "crates/proto" }
-comet-doc = { path = "crates/doc" }
-comet-sync = { path = "crates/sync" }
-comet-harness = { path = "crates/harness" }
-comet-engine = { path = "crates/engine" }
-comet-rpc = { path = "crates/rpc" }
-comet-nova = { path = "crates/nova" }
-comet-update = { path = "crates/update" }
-comet-ui = { path = "crates/ui" }
-comet-tui = { path = "crates/tui" }
+nova-proto = { path = "crates/proto" }
+nova-doc = { path = "crates/doc" }
+nova-sync = { path = "crates/sync" }
+nova-harness = { path = "crates/harness" }
+nova-engine = { path = "crates/engine" }
+nova-rpc = { path = "crates/rpc" }
+nova-network = { path = "crates/nova" }
+nova-update = { path = "crates/update" }
+nova-ui = { path = "crates/ui" }
+nova-tui = { path = "crates/tui" }
 
 # CRDT
 loro = "1.13"
@@ -50,7 +50,7 @@ gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "a6c1ad501f90c
 ] }
 gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "a6c1ad501f90c9437d2553bde691958f150364c5" }
 
-# ratatui — the terminal viewport (`comet-tui`). Deliberately narrow features:
+# ratatui — the terminal viewport (`nova-tui`). Deliberately narrow features:
 # `widget-calendar` (a default) drags in `time`, and we render no calendar.
 # `layout-cache` memoizes the cassowary solve, which is the one per-frame cost
 # in ratatui that isn't already diffed away.

@@ -1,16 +1,16 @@
 [package]
-name = "comet-ui"
+name = "nova-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-comet-proto.workspace = true
-comet-doc.workspace = true
-comet-engine.workspace = true
-comet-rpc.workspace = true
-comet-update.workspace = true
+nova-proto.workspace = true
+nova-doc.workspace = true
+nova-engine.workspace = true
+nova-rpc.workspace = true
+nova-update.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui_tokio.workspace = true

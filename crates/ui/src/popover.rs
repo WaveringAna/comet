@@ -15,7 +15,7 @@ use gpui::{
     Anchor, AnyElement, ElementId, IntoElement, Pixels, Point, SharedString, div, prelude::*, px,
 };
 
-use crate::motion::{self, AnimationExt as _, COMET_PULSE};
+use crate::motion::{self, AnimationExt as _, NOVA_PULSE};
 use crate::theme::{Theme, white_alpha};
 
 // ---------------------------------------------------------------------------
@@ -373,7 +373,7 @@ pub fn menu_row_nav(
     }
 }
 
-/// Small uppercase section heading inside a floating menu (comet
+/// Small uppercase section heading inside a floating menu (nova
 /// `MenuHeading`): `px-2 pb-1 pt-1.5 text-[10px] font-medium uppercase
 /// tracking-[0.1em] text-muted-foreground/60`. gpui has no letter-spacing at
 /// the pinned rev; the tracking is approximated with hair spaces.
@@ -516,7 +516,7 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
         .child(SharedString::from(label.to_string()))
 }
 
-/// The search/text input frame at the top of a picker popover (comet
+/// The search/text input frame at the top of a picker popover (nova
 /// `searchInput`: `w-full rounded-lg bg-white/[0.04] px-2.5 py-1.5
 /// text-[13px]` + `mb-1`, borderless — full width inside the card's own
 /// p-1, only a 4px bottom margin).
@@ -531,7 +531,7 @@ pub fn search_input_frame(_theme: &Theme, input: AnyElement) -> gpui::Div {
         .child(input)
 }
 
-/// A bordered trailing menu section (comet picker action groups /
+/// A bordered trailing menu section (nova picker action groups /
 /// branch-picker worktree block: `mt-1 flex flex-col gap-0.5 border-t
 /// border-white/[0.06] pt-1` — the hairline runs edge-to-edge of the card's
 /// p-1 inset, unlike [`menu_separator`]'s mx-1).
@@ -666,7 +666,7 @@ pub fn skeleton_rows(id: &'static str, _theme: &Theme, count: usize) -> AnyEleme
                 .h(px(28.0))
                 .rounded(px(Theme::CONTROL_RADIUS))
                 .bg(wash)
-                .with_animation((id, i), COMET_PULSE.repeating(), move |el, delta| {
+                .with_animation((id, i), NOVA_PULSE.repeating(), move |el, delta| {
                     let phase = motion::staggered_phase(delta, i, 0.08);
                     el.opacity(0.35 + 0.4 * motion::pulse_wave(phase))
                 })

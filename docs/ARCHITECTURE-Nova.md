@@ -95,11 +95,11 @@ peer rpc uses iroh quic with tls encryption and endpoint-id authentication deriv
 ## verification
 
 ```sh
-cargo test -p comet-nova --lib
-cargo test -p comet-engine --test device_routing
-cargo test -p comet-engine
-cargo test -p comet-ui --lib
-cargo test -p comet-tui
+cargo test -p nova-network --lib
+cargo test -p nova-engine --test device_routing
+cargo test -p nova-engine
+cargo test -p nova-ui --lib
+cargo test -p nova-tui
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 

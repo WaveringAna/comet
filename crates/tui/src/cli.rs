@@ -1,5 +1,5 @@
 //! The command-line entry point, shared by both faces that run the viewport:
-//! the standalone `comet-tui` dev binary and the shipped `comet tui` subcommand.
+//! the standalone `nova-tui` dev binary and the shipped `nova tui` subcommand.
 //!
 //! Keeping the arg parsing, environment resolution, tracing setup and runtime
 //! shape here — rather than in either binary — is the same no-drift discipline
@@ -14,24 +14,24 @@ use clap::Args;
 
 use crate::Config;
 
-/// Same default as `apps/comet`.
+/// Same default as `apps/nova`.
 pub const DEFAULT_IPC_PORT: u16 = 27654;
 /// 60fps. See [`Config::frame_budget`].
 pub const DEFAULT_FPS: u32 = 60;
 
 /// Flags for the terminal viewport. Flattened into the standalone binary's
-/// parser and into `comet`'s `tui` subcommand, so both accept the same options.
+/// parser and into `nova`'s `tui` subcommand, so both accept the same options.
 #[derive(Args, Debug, Default)]
 pub struct TuiArgs {
-    /// Localhost IPC port the engine serves (env: COMET_IPC_PORT).
+    /// Localhost IPC port the engine serves (env: NOVA_IPC_PORT).
     #[arg(long)]
     pub port: Option<u16>,
-    /// Engine data directory (env: COMET_DATA_DIR).
+    /// Engine data directory (env: NOVA_DATA_DIR).
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
-    /// Path to the `comet` binary used to start an engine (env: COMET_BIN).
+    /// Path to the `nova` binary used to start an engine (env: NOVA_BIN).
     #[arg(long)]
-    pub comet_bin: Option<PathBuf>,
+    pub nova_bin: Option<PathBuf>,
     /// Fail instead of starting an engine when none is listening.
     #[arg(long)]
     pub no_spawn: bool,
@@ -53,12 +53,13 @@ pub struct TuiArgs {
 pub fn run(args: TuiArgs) -> anyhow::Result<()> {
     let data_dir = args
         .data_dir
-        .or_else(|| std::env::var_os("COMET_DATA_DIR").map(PathBuf::from))
+        .or_else(|| env_os("NOVA_DATA_DIR", "COMET_DATA_DIR").map(PathBuf::from))
         .unwrap_or_else(default_data_dir);
     let ipc_port = args
         .port
         .or_else(|| {
-            std::env::var("COMET_IPC_PORT")
+            std::env::var("NOVA_IPC_PORT")
+                .or_else(|_| std::env::var("COMET_IPC_PORT"))
                 .ok()
                 .and_then(|port| port.parse().ok())
         })
@@ -72,10 +73,10 @@ pub fn run(args: TuiArgs) -> anyhow::Result<()> {
     let config = Config {
         data_dir,
         ipc_port,
-        comet_bin: args.comet_bin,
+        nova_bin: args.nova_bin,
         spawn_daemon: !args.no_spawn,
         mouse: !args.no_mouse
-            && std::env::var_os("COMET_TUI_MOUSE").as_deref() != Some("0".as_ref()),
+            && env_os("NOVA_TUI_MOUSE", "COMET_TUI_MOUSE").as_deref() != Some("0".as_ref()),
         frame_budget: Duration::from_micros(1_000_000 / u64::from(fps)),
     };
 
@@ -115,10 +116,21 @@ pub fn run(args: TuiArgs) -> anyhow::Result<()> {
     }
 }
 
-/// `~/.comet-native`, matching `apps/comet`'s `dirs_data_dir`.
+/// `~/.nova-native`, matching `apps/nova`'s `dirs_data_dir`.
 pub fn default_data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").expect("HOME not set");
-    PathBuf::from(home).join(".comet-native")
+    let home = PathBuf::from(home);
+    let current = home.join(".nova-native");
+    let legacy = home.join(".comet-native");
+    if !current.exists() && legacy.exists() {
+        legacy
+    } else {
+        current
+    }
+}
+
+fn env_os(primary: &str, legacy: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(primary).or_else(|| std::env::var_os(legacy))
 }
 
 /// Warn-level tracing into `{data_dir}/tui.log`. `RUST_LOG` overrides.

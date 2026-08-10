@@ -612,7 +612,7 @@ impl AppearancePage {
     fn render_scheme_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let description = match self.preference {
             ThemePreference::System => {
-                "Follows your system appearance — switching the OS theme re-paints Comet live."
+                "Follows your system appearance — switching the OS theme re-paints Nova live."
             }
             ThemePreference::Light => "Always use the light scheme, regardless of the system.",
             ThemePreference::Dark => "Always use the dark scheme, regardless of the system.",
@@ -986,7 +986,7 @@ impl Render for AppearancePage {
                                 ))
                                 .child(crate::settings::widgets::page_subtitle(
                                     &theme,
-                                    "Theme colors and the typefaces Comet uses for interface text and code.",
+                                    "Theme colors and the typefaces Nova uses for interface text and code.",
                                 )),
                         )
                         .child(

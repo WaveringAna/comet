@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use comet_proto::{RunRequest, UserInputAnswer};
+use nova_proto::{RunRequest, UserInputAnswer};
 
 use crate::constants::COMMAND_DEFAULT_TTL_MS;
 
@@ -308,7 +308,7 @@ mod tests {
             reasoning: None,
             model_options: Default::default(),
             cwd: "/tmp".into(),
-            sandbox: comet_proto::SandboxLevel::WorkspaceWrite,
+            sandbox: nova_proto::SandboxLevel::WorkspaceWrite,
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,

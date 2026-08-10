@@ -2,7 +2,7 @@
 //! (Claude Code, Codex) with account rows — email, plan badge, Active, usage
 //! meters (indigo → amber ≥80% → red ≥95%, reset time), Switch / Forget — plus
 //! the add-account dialogs (paste-code and browser-poll flows) and
-//! account-shaped loading skeletons. Comet retargets devices from the settings
+//! account-shaped loading skeletons. Nova retargets devices from the settings
 //! sidebar (`targetDeviceId` passthrough kept plumbed, unused single-device).
 //!
 //! The accounts RPC surface is being implemented engine-side in parallel —
@@ -16,11 +16,11 @@ use gpui::{
 };
 use std::time::Duration;
 
-use comet_proto::{
+use nova_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
     AgentLoginStatus, HarnessId,
 };
-use comet_rpc::methods;
+use nova_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
@@ -488,7 +488,7 @@ impl AccountsPage {
             this.update(cx, |page, cx| {
                 match result.and_then(|value| {
                     serde_json::from_value::<AgentLoginStart>(value)
-                        .map_err(|e| comet_rpc::RpcError::Failed(e.to_string()))
+                        .map_err(|e| nova_rpc::RpcError::Failed(e.to_string()))
                 }) {
                     Ok(start) => {
                         cx.open_url(&start.url);
@@ -674,7 +674,7 @@ impl AccountsPage {
     /// quiet reset time.
     fn render_usage_meter(
         &self,
-        window: &comet_proto::AgentUsageWindow,
+        window: &nova_proto::AgentUsageWindow,
         theme: &Theme,
         now: DateTime<Utc>,
     ) -> AnyElement {
@@ -1157,7 +1157,7 @@ impl AccountsPage {
             .when(!first, |el| el.border_t_1().border_color(theme.border))
             .when(dim, |el| el.opacity(0.6))
             .child(
-                inner.with_animation(id, motion::COMET_PULSE.repeating(), move |el, delta| {
+                inner.with_animation(id, motion::NOVA_PULSE.repeating(), move |el, delta| {
                     el.opacity(0.55 + 0.35 * motion::pulse_wave(delta))
                 }),
             )
@@ -1279,7 +1279,7 @@ impl Render for AccountsPage {
                     .into_iter()
                     .map(|(harness, name, cli)| {
                         let accounts = provider_accounts(&snapshot, harness);
-                        // EVERY warning renders its own strip (comet maps them).
+                        // EVERY warning renders its own strip (nova maps them).
                         let warnings: Vec<String> = snapshot
                             .warnings
                             .iter()
@@ -1373,7 +1373,7 @@ impl Render for AccountsPage {
                             .child(div().flex_1())
                             .child(
                                 // `text-[12.5px]` + leading 16px Refresh icon,
-                                // dimmed while a refresh is in flight (comet
+                                // dimmed while a refresh is in flight (nova
                                 // `disabled:opacity-50`).
                                 widgets::ghost_action(&theme)
                                     .id("accounts-refresh")
@@ -1395,7 +1395,7 @@ impl Render for AccountsPage {
                     )
                     .child(widgets::page_subtitle(
                         &theme,
-                        "The Claude Code and Codex logins on this device. Comet detects the \
+                        "The Claude Code and Codex logins on this device. Nova detects the \
                          live session, keeps each account backed up, and can swap between \
                          them.",
                     ))
@@ -1452,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_thresholds_match_comet() {
+    fn usage_thresholds_match_nova() {
         assert_eq!(usage_level(0.0), UsageLevel::Normal);
         assert_eq!(usage_level(0.79), UsageLevel::Normal);
         assert_eq!(usage_level(0.80), UsageLevel::Warn);

@@ -8,10 +8,10 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use comet_harness::{
+use nova_harness::{
     CancellationToken, ClaudeHarness, Harness, HarnessError, RunControls, SteerMessage,
 };
-use comet_proto::{
+use nova_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, ToolCall, UserInputAnswer,
     UserInputQuestion,
 };

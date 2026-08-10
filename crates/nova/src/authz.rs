@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use comet_rpc::methods;
+use nova_rpc::methods;
 
 use crate::trust::Role;
 
@@ -123,7 +123,7 @@ pub fn authorize(caller: CallerKind, method: &str) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_rpc::methods;
+    use nova_rpc::methods;
 
     #[test]
     fn local_can_call_anything() {

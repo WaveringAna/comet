@@ -124,7 +124,7 @@ async fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Strin
             stdin.flush().await
         };
         if let Err(e) = write.await {
-            tracing::debug!(target: "comet_harness::codex", "stdin write failed (tolerated): {e}");
+            tracing::debug!(target: "nova_harness::codex", "stdin write failed (tolerated): {e}");
             return;
         }
     }
@@ -143,7 +143,7 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
-            tracing::debug!(target: "comet_harness::codex", "non-JSON stdout line (skipped)");
+            tracing::debug!(target: "nova_harness::codex", "non-JSON stdout line (skipped)");
             continue;
         };
         let method = msg.get("method").and_then(Value::as_str);

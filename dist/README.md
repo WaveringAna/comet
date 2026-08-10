@@ -7,12 +7,12 @@ scripts/package-linux.sh            # release build (thin LTO, stripped)
 PROFILE=debug scripts/package-linux.sh   # fast smoke package
 ```
 
-Produces `target/package/comet-<version>-linux-<arch>.tar.gz` containing:
+Produces `target/package/nova-<version>-linux-<arch>.tar.gz` containing:
 
-- `comet` — the binary (headed by default; `comet headless` runs the engine alone)
-- `comet.desktop` — XDG desktop entry
-- `comet.png` — 1024×1024 app icon (the comet mark from the original app;
-  vector source `comet.svg`)
+- `nova` — the binary (headed by default; `nova headless` runs the engine alone)
+- `nova.desktop` — XDG desktop entry
+- `nova.png` — 1024×1024 app icon (the nova mark from the original app;
+  vector source `nova.svg`)
 - `install.sh` — installs into `~/.local/{bin,share/applications,share/icons}`
 
 The release profile in the root `Cargo.toml` sets `lto = "thin"` and
@@ -21,10 +21,10 @@ The release profile in the root `Cargo.toml` sets `lto = "thin"` and
 ## macOS
 
 ```sh
-scripts/package-macos.sh    # → target/package/comet-<version>-macos-<arch>.dmg
+scripts/package-macos.sh    # → target/package/nova-<version>-macos-<arch>.dmg
 ```
 
-Builds the release binary, assembles `Comet.app` (Info.plist + icns), ad-hoc
+Builds the release binary, assembles `Nova.app` (Info.plist + icns), ad-hoc
 signs it (set `CODESIGN_IDENTITY` for a real Developer ID), and wraps it in a
 dmg. CI runs this on tags (`.github/workflows/release.yml`). The manual steps
 it automates, for reference (run on a macOS host — gpui needs Metal; no
@@ -32,29 +32,29 @@ cross-build from Linux):
 
 1. Build the universal (or per-arch) binary:
    ```sh
-   cargo build --release -p comet --target aarch64-apple-darwin
-   cargo build --release -p comet --target x86_64-apple-darwin
-   lipo -create -output comet \
-     target/aarch64-apple-darwin/release/comet \
-     target/x86_64-apple-darwin/release/comet
+   cargo build --release -p nova --target aarch64-apple-darwin
+   cargo build --release -p nova --target x86_64-apple-darwin
+   lipo -create -output nova \
+     target/aarch64-apple-darwin/release/nova \
+     target/x86_64-apple-darwin/release/nova
    ```
 2. Assemble the bundle:
    ```sh
-   mkdir -p Comet.app/Contents/{MacOS,Resources}
-   cp comet Comet.app/Contents/MacOS/comet
+   mkdir -p Nova.app/Contents/{MacOS,Resources}
+   cp nova Nova.app/Contents/MacOS/nova
    sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
-     dist/macos/Info.plist > Comet.app/Contents/Info.plist
+     dist/macos/Info.plist > Nova.app/Contents/Info.plist
    ```
-3. Icon: generate `comet.icns` from `dist/comet.png` (`iconutil`) and place it at
-   `Comet.app/Contents/Resources/comet.icns`:
+3. Icon: generate `nova.icns` from `dist/nova.png` (`iconutil`) and place it at
+   `Nova.app/Contents/Resources/nova.icns`:
    ```sh
-   mkdir comet.iconset && sips -z 256 256 dist/comet.png --out comet.iconset/icon_256x256.png
-   iconutil -c icns comet.iconset -o Comet.app/Contents/Resources/comet.icns
+   mkdir nova.iconset && sips -z 256 256 dist/nova.png --out nova.iconset/icon_256x256.png
+   iconutil -c icns nova.iconset -o Nova.app/Contents/Resources/nova.icns
    ```
 4. Sign + notarize (required for distribution):
    ```sh
-   codesign --deep --force --options runtime --sign "Developer ID Application: …" Comet.app
-   xcrun notarytool submit Comet.zip --keychain-profile … --wait
-   xcrun stapler staple Comet.app
+   codesign --deep --force --options runtime --sign "Developer ID Application: …" Nova.app
+   xcrun notarytool submit Nova.zip --keychain-profile … --wait
+   xcrun stapler staple Nova.app
    ```
-5. Ship as a `.dmg` (`hdiutil create -volname Comet -srcfolder Comet.app -ov -format UDZO Comet.dmg`).
+5. Ship as a `.dmg` (`hdiutil create -volname Nova -srcfolder Nova.app -ov -format UDZO Nova.dmg`).

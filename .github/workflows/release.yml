@@ -81,7 +81,7 @@ jobs:
         run: |
           ver="${GITHUB_REF_NAME#v}"
           ls dist/
-          ls dist/ | grep -q "comet-$ver-" \
+          ls dist/ | grep -q "nova-$ver-" \
             || { echo "tag v$ver does not match built artifact versions — bump Cargo.toml [workspace.package] version"; exit 1; }
       - uses: softprops/action-gh-release@v2
         with:

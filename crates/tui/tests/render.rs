@@ -8,14 +8,14 @@
 //! bugs, and this is where geometry is checked.
 
 use chrono::Utc;
-use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
-use comet_proto::view::ConnectionStatus;
-use comet_proto::{Chat, Project, Session, SessionStatus, ToolCall};
-use comet_tui::app::App;
-use comet_tui::keys::{Action, Focus};
-use comet_tui::link::Update;
-use comet_tui::render;
-use comet_tui::theme::Theme;
+use nova_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use nova_proto::view::ConnectionStatus;
+use nova_proto::{Chat, Project, Session, SessionStatus, ToolCall};
+use nova_tui::app::App;
+use nova_tui::keys::{Action, Focus};
+use nova_tui::link::Update;
+use nova_tui::render;
+use nova_tui::theme::Theme;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -38,7 +38,7 @@ fn chat(id: &str, title: &str) -> Chat {
         device_id: "dev".into(),
         title: Some(title.into()),
         archived: false,
-        cwd: Some("/dev/comet".into()),
+        cwd: Some("/dev/nova".into()),
         branch: Some("main".into()),
         checkout_id: None,
         config: None,
@@ -77,7 +77,7 @@ fn text(id: &str, body: &str) -> MessagePart {
 fn populated() -> App {
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
-    app.apply(Update::Projects(vec![project("s1", "/dev/comet")]));
+    app.apply(Update::Projects(vec![project("s1", "/dev/nova")]));
     app.apply(Update::Chats(vec![
         chat("c1", "Rework the diff sidebar"),
         chat("c2", "Chase the flaky room test"),
@@ -99,7 +99,7 @@ fn populated() -> App {
                     MessagePart::Tool {
                         id: "p1".into(),
                         call: ToolCall::Exec {
-                            command: "cargo test -p comet-engine --test device_routing".into(),
+                            command: "cargo test -p nova-engine --test device_routing".into(),
                         },
                         is_error: false,
                         resolved: true,
@@ -184,7 +184,7 @@ fn a_populated_frame_shows_the_chrome_sidebar_and_transcript() {
     assert!(screen.contains("Sessions"), "{screen}");
     // Session rows carry a "project@device" sub-line under the title — where the
     // work happens, not which branch it happens on.
-    assert!(screen.contains("comet@"), "sub-line missing:\n{screen}");
+    assert!(screen.contains("nova@"), "sub-line missing:\n{screen}");
 
     // Transcript: the user turn, the assistant text, the tool row, the fenced
     // code, and the bullet.
@@ -202,7 +202,7 @@ fn a_populated_frame_shows_the_chrome_sidebar_and_transcript() {
         "tool chip label missing:\n{screen}"
     );
     assert!(
-        screen.contains("cargo test -p comet-engine"),
+        screen.contains("cargo test -p nova-engine"),
         "tool detail missing:\n{screen}"
     );
     assert!(
@@ -342,14 +342,14 @@ fn the_help_overlay_covers_the_body_and_lists_the_real_bindings() {
         "the overlay must cover the body:\n{screen}"
     );
     assert!(
-        !screen.contains("cargo test -p comet-engine"),
+        !screen.contains("cargo test -p nova-engine"),
         "including the right-hand ends of long lines:\n{screen}"
     );
     // The tab strip still names the sessions; only the body is covered.
     assert!(screen.contains("Rework the diff"), "{screen}");
     // Every entry comes from the keymap's own table, so the overlay cannot drift
     // from the bindings.
-    for (key, _) in comet_tui::keys::HELP.iter().take(3) {
+    for (key, _) in nova_tui::keys::HELP.iter().take(3) {
         assert!(screen.contains(key.trim()), "missing {key:?} in:\n{screen}");
     }
 }
@@ -395,8 +395,8 @@ fn the_composer_grows_with_its_content_and_places_the_caret() {
     let one_line = snapshot(&mut app, 60, 20);
 
     for _ in 0..3 {
-        app.act(Action::Edit(comet_tui::keys::Edit::Insert('x')));
-        app.act(Action::Edit(comet_tui::keys::Edit::Newline));
+        app.act(Action::Edit(nova_tui::keys::Edit::Insert('x')));
+        app.act(Action::Edit(nova_tui::keys::Edit::Newline));
     }
     let three_lines = snapshot(&mut app, 60, 20);
     assert_ne!(one_line, three_lines);
@@ -520,11 +520,11 @@ fn the_sidebar_follows_the_desktop_order() {
             .position(|row| row.contains(needle))
             .unwrap_or_else(|| panic!("{needle:?} missing from sidebar:\n{sidebar:#?}"))
     };
-    // Two sections, in comet-native's order: Projects, then a flat global
+    // Two sections, in nova-native's order: Projects, then a flat global
     // Sessions list. Not one list grouped by project — that was the original
     // Electron app.
     let projects = index("Projects");
-    let project_row = index("comet ");
+    let project_row = index("nova ");
     let sessions = index("Sessions");
     let session = index("Rework the diff");
     assert!(
@@ -535,7 +535,7 @@ fn the_sidebar_follows_the_desktop_order() {
     assert!(sidebar[projects].trim_end().ends_with('+'), "{sidebar:#?}");
     // Two-line session rows: the sub-line is directly under its title.
     assert!(
-        sidebar[session + 1].contains("comet@"),
+        sidebar[session + 1].contains("nova@"),
         "sub-line must follow the title:\n{sidebar:#?}"
     );
     assert!(!sidebar.iter().any(|row| row.contains("w@example.com")));
@@ -564,7 +564,7 @@ fn the_cursor_steps_over_decoration() {
 
 #[test]
 fn tool_runs_collapse_into_a_group() {
-    use comet_proto::ToolCall;
+    use nova_proto::ToolCall;
     let mut app = populated();
     app.apply(Update::Transcript {
         chat_id: "c1".into(),
@@ -621,7 +621,7 @@ fn tool_runs_collapse_into_a_group() {
 
 #[test]
 fn a_running_tool_group_shows_its_chips() {
-    use comet_proto::ToolCall;
+    use nova_proto::ToolCall;
     let mut app = populated();
     app.apply(Update::Transcript {
         chat_id: "c1".into(),
@@ -669,7 +669,7 @@ fn the_project_row_names_its_host_device() {
     // The fixture's chats are hosted on "dev"; this engine is someone else.
     app.apply(Update::LocalDevice("laptop".into()));
     // The project row names the host device, which is where "whose machine is
-    // this running on" lives in comet-native.
+    // this running on" lives in nova-native.
     let screen = joined(&snapshot(&mut app, 100, 24));
     assert!(screen.contains("dev"), "host device missing:\n{screen}");
 
@@ -780,7 +780,7 @@ fn a_selected_row_keeps_its_status_colour() {
     let dot = (0..24u16)
         .flat_map(|y| (0..30u16).map(move |x| (x, y)))
         .map(|(x, y)| &buffer[(x, y)])
-        .find(|cell| cell.symbol() == comet_tui::theme::DOT && cell.bg == app.theme.selection)
+        .find(|cell| cell.symbol() == nova_tui::theme::DOT && cell.bg == app.theme.selection)
         .expect("a status dot on the selected row");
     assert_eq!(
         dot.fg, app.theme.dot_awaiting,
@@ -791,7 +791,7 @@ fn a_selected_row_keeps_its_status_colour() {
 
 #[test]
 fn the_sessions_list_is_flat_and_global_not_grouped_by_space() {
-    // comet-native's Sessions list answers "what needs me right now" across
+    // nova-native's Sessions list answers "what needs me right now" across
     // every project. Grouping it by project — which the original Electron app did
     // — buries exactly that.
     let mut app = App::with_theme(Theme::dark());
@@ -899,7 +899,7 @@ fn a_project_shows_its_host_and_flags_a_lapsed_one() {
     assert!(!screen.contains("offline"), "{screen}");
 
     // A device we DO have a record of, whose heartbeat lapsed, reads offline.
-    app.apply(Update::Devices(vec![comet_proto::Device {
+    app.apply(Update::Devices(vec![nova_proto::Device {
         id: "dev".into(),
         name: "devbox".into(),
         platform: "linux".into(),
@@ -914,7 +914,7 @@ fn a_project_shows_its_host_and_flags_a_lapsed_one() {
     );
 
     // Fresh heartbeat: named, not flagged.
-    app.apply(Update::Devices(vec![comet_proto::Device {
+    app.apply(Update::Devices(vec![nova_proto::Device {
         id: "dev".into(),
         name: "devbox".into(),
         platform: "linux".into(),
@@ -959,9 +959,9 @@ fn clicking_a_session_row_opens_it() {
     );
     assert_eq!(app.focus, Focus::Composer, "opening focuses the prompt");
     assert!(
-        effects.iter().any(
-            |c| matches!(c, comet_tui::link::Command::WatchTranscript(Some(id)) if id == "c2")
-        ),
+        effects
+            .iter()
+            .any(|c| matches!(c, nova_tui::link::Command::WatchTranscript(Some(id)) if id == "c2")),
         "and resubscribes its transcript"
     );
 }
@@ -1111,7 +1111,7 @@ fn right_click_opens_a_context_menu_with_the_desktop_verbs() {
 #[test]
 fn a_project_menu_offers_project_verbs_only() {
     let mut app = populated();
-    let (x, y) = cell_of(&mut app, 100, 26, "comet ");
+    let (x, y) = cell_of(&mut app, 100, 26, "nova ");
     app.right_click(x, y);
     let screen = joined(&snapshot(&mut app, 100, 26));
     assert!(screen.contains("Rename project"), "{screen}");
@@ -1129,7 +1129,7 @@ fn archiving_from_the_menu_issues_the_mutation() {
     let effects = app.act(Action::OverlayConfirm);
     assert!(app.overlay.is_none(), "confirming closes the menu");
     match effects.first() {
-        Some(comet_tui::link::Command::Call { params, .. }) => {
+        Some(nova_tui::link::Command::Call { params, .. }) => {
             assert_eq!(params["op"], "setChatArchived");
             assert_eq!(params["chatId"], "c2");
             assert_eq!(params["archived"], true);
@@ -1155,11 +1155,11 @@ fn renaming_opens_a_prompt_seeded_with_the_current_title() {
 
     // Type and confirm.
     for ch in " v2".chars() {
-        app.act(Action::OverlayEdit(comet_tui::keys::Edit::Insert(ch)));
+        app.act(Action::OverlayEdit(nova_tui::keys::Edit::Insert(ch)));
     }
     let effects = app.act(Action::OverlayConfirm);
     match effects.first() {
-        Some(comet_tui::link::Command::Call { params, .. }) => {
+        Some(nova_tui::link::Command::Call { params, .. }) => {
             assert_eq!(params["op"], "renameChat");
             assert_eq!(params["title"], "Chase the flaky room test v2");
         }
@@ -1174,10 +1174,8 @@ fn an_empty_rename_is_refused_rather_than_wiping_the_title() {
     let (x, y) = cell_of(&mut app, 100, 26, "Chase the flaky room");
     app.right_click(x, y);
     app.act(Action::OverlayConfirm); // open the prompt
-    app.act(Action::OverlayEdit(
-        comet_tui::keys::Edit::DeleteToLineStart,
-    ));
-    app.act(Action::OverlayEdit(comet_tui::keys::Edit::End));
+    app.act(Action::OverlayEdit(nova_tui::keys::Edit::DeleteToLineStart));
+    app.act(Action::OverlayEdit(nova_tui::keys::Edit::End));
     let effects = app.act(Action::OverlayConfirm);
     assert!(effects.is_empty(), "an empty name must not be submitted");
     assert!(app.overlay.is_some(), "and the prompt stays open");
@@ -1185,13 +1183,13 @@ fn an_empty_rename_is_refused_rather_than_wiping_the_title() {
 
 #[test]
 fn the_model_picker_lists_and_switches() {
-    use comet_proto::{Model, ReasoningLevel};
+    use nova_proto::{Model, ReasoningLevel};
     let mut app = populated();
     let effects = app.act(Action::PickModel);
     assert!(
         effects
             .iter()
-            .any(|c| matches!(c, comet_tui::link::Command::ListModels { .. })),
+            .any(|c| matches!(c, nova_tui::link::Command::ListModels { .. })),
         "asks the engine for the catalogue"
     );
     // Until it answers, the picker says so rather than showing an empty list.
@@ -1221,7 +1219,7 @@ fn the_model_picker_lists_and_switches() {
     app.act(Action::OverlayStep(1));
     let effects = app.act(Action::OverlayConfirm);
     match effects.first() {
-        Some(comet_tui::link::Command::Call { params, .. }) => {
+        Some(nova_tui::link::Command::Call { params, .. }) => {
             assert_eq!(params["op"], "setChatConfig");
             assert_eq!(params["config"]["model"], "opus-5");
         }
@@ -1369,7 +1367,7 @@ fn a_draft_shows_its_pending_tab_and_where_it_will_run() {
 
 #[test]
 fn the_checkout_picker_offers_two_modes_and_names_the_third_outcome() {
-    use comet_proto::RepoRef;
+    use nova_proto::RepoRef;
     let mut app = populated();
     app.act(Action::NewSession);
     app.apply(Update::Refs(vec![RepoRef {
@@ -1400,7 +1398,7 @@ fn the_checkout_picker_offers_two_modes_and_names_the_third_outcome() {
 
 #[test]
 fn the_branch_picker_tags_current_and_materialized_refs() {
-    use comet_proto::RepoRef;
+    use nova_proto::RepoRef;
     let mut app = populated();
     app.act(Action::NewSession);
     // While loading it says so rather than showing an empty list.
@@ -1488,7 +1486,7 @@ fn every_loader_on_screen_is_the_same_one() {
         started_at: Some(Utc::now()),
         updated_at: Utc::now(),
     }]));
-    let (expected, _) = comet_tui::loaders::mini_spinner(app.elapsed());
+    let (expected, _) = nova_tui::loaders::mini_spinner(app.elapsed());
     let screen = joined(&snapshot(&mut app, 100, 28));
     let count = screen.matches(expected.as_str()).count();
     assert!(
@@ -1499,7 +1497,7 @@ fn every_loader_on_screen_is_the_same_one() {
 
 #[test]
 fn each_chip_is_its_own_button() {
-    use comet_tui::app::ChipKind;
+    use nova_tui::app::ChipKind;
     let mut app = populated();
     app.act(Action::NewSession);
     snapshot(&mut app, 110, 28);
@@ -1547,7 +1545,7 @@ fn each_chip_is_its_own_button() {
 
 #[test]
 fn effort_is_pickable_and_follows_the_model() {
-    use comet_proto::{Model, ReasoningLevel};
+    use nova_proto::{Model, ReasoningLevel};
     let mut app = populated();
     app.act(Action::NewSession);
 
@@ -1585,7 +1583,7 @@ fn effort_is_pickable_and_follows_the_model() {
 
 #[test]
 fn a_drafts_model_and_effort_ride_the_session_it_creates() {
-    use comet_proto::{Model, ReasoningLevel};
+    use nova_proto::{Model, ReasoningLevel};
     let mut app = populated();
     app.act(Action::NewSession);
     app.act(Action::PickModel);
@@ -1603,7 +1601,7 @@ fn a_drafts_model_and_effort_ride_the_session_it_creates() {
     let start = effects
         .iter()
         .find_map(|c| match c {
-            comet_tui::link::Command::StartSession(start) => Some(start),
+            nova_tui::link::Command::StartSession(start) => Some(start),
             _ => None,
         })
         .expect("a StartSession");
@@ -1619,7 +1617,7 @@ fn the_caret_is_drawn_so_a_trailing_project_is_visible() {
     let mut app = populated();
     app.focus = Focus::Composer;
     for ch in "hi ".chars() {
-        app.act(Action::Edit(comet_tui::keys::Edit::Insert(ch)));
+        app.act(Action::Edit(nova_tui::keys::Edit::Insert(ch)));
     }
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal
@@ -1692,7 +1690,7 @@ fn a_project_you_have_never_opened_lands_on_its_newest_session() {
 fn an_empty_project_opens_the_new_session_canvas() {
     let mut app = two_spaces();
     // Archive everything in s2, leaving it empty.
-    let chats: Vec<comet_proto::Chat> = app
+    let chats: Vec<nova_proto::Chat> = app
         .chats
         .iter()
         .cloned()
@@ -1721,7 +1719,7 @@ fn a_remembered_session_that_vanished_falls_back() {
     app.select_chat(Some("a2".into()));
 
     // a2 is deleted elsewhere.
-    let chats: Vec<comet_proto::Chat> = app
+    let chats: Vec<nova_proto::Chat> = app
         .chats
         .iter()
         .filter(|chat| chat.id != "a2")
@@ -1779,7 +1777,7 @@ fn a_draft_survives_the_chats_frames_that_arrive_while_you_type() {
     assert_eq!(
         effects
             .iter()
-            .filter(|c| matches!(c, comet_tui::link::Command::StartSession(_)))
+            .filter(|c| matches!(c, nova_tui::link::Command::StartSession(_)))
             .count(),
         1
     );
@@ -1803,11 +1801,11 @@ fn sending_in_an_open_session_never_creates_a_new_one() {
     assert!(
         !effects
             .iter()
-            .any(|c| matches!(c, comet_tui::link::Command::StartSession(_))),
+            .any(|c| matches!(c, nova_tui::link::Command::StartSession(_))),
         "a send in an open session must continue it"
     );
     match effects.first() {
-        Some(comet_tui::link::Command::Send { chat_id, .. }) => assert_eq!(chat_id, "a1"),
+        Some(nova_tui::link::Command::Send { chat_id, .. }) => assert_eq!(chat_id, "a1"),
         other => panic!("expected a Send to a1, got {other:?}"),
     }
 }
@@ -1867,7 +1865,7 @@ fn a_tool_group_is_plain_rows_with_air_around_it() {
     // A tool run is the agent's bookkeeping, not something it said to you.
     // Giving it a fill of its own made every reply look like it had been
     // interrupted by a panel; the chevron and the indent are enough.
-    use comet_proto::ToolCall;
+    use nova_proto::ToolCall;
     let mut app = populated();
     app.apply(Update::Transcript {
         chat_id: "c1".into(),
@@ -2003,7 +2001,7 @@ fn the_footer_follows_a_session_as_well_as_a_draft() {
     // The other half of the report: branch and checkout were drafting-only, so
     // opening a tab made them vanish. The desktop's `render_footer` is live in
     // both modes — t3code keeps its branch selector interactive mid-session and
-    // so does comet — and only the checkout side locks, because a session's
+    // so does nova — and only the checkout side locks, because a session's
     // checkout kind was fixed when it was created.
     let mut app = populated();
 
@@ -2036,7 +2034,7 @@ fn a_project_that_is_not_a_checkout_has_no_footer_at_all() {
     // An absent row, not an empty one: with no git there is no ref and no
     // worktree, so the two questions the footer answers do not arise.
     let mut app = populated();
-    let mut plain = project("s1", "/dev/comet");
+    let mut plain = project("s1", "/dev/nova");
     plain.git_detected = false;
     app.apply(Update::Projects(vec![plain]));
     app.activate_project("s1".into());
@@ -2045,7 +2043,7 @@ fn a_project_that_is_not_a_checkout_has_no_footer_at_all() {
 
 #[test]
 fn context_gauge_bar_covers_all_five_levels() {
-    use comet_proto::view::ContextGauge;
+    use nova_proto::view::ContextGauge;
     use ratatui::style::Color;
 
     let cases = [
@@ -2069,7 +2067,7 @@ fn context_gauge_bar_covers_all_five_levels() {
 
 #[test]
 fn the_working_strip_reports_turn_rate_and_context_gauge() {
-    use comet_proto::ChatUsage;
+    use nova_proto::ChatUsage;
 
     let mut app = populated();
     if let Some(chat) = app.chats.iter_mut().find(|c| c.id == "c1") {

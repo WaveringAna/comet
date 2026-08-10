@@ -55,11 +55,11 @@ pub const TABLE_HEADER_WEIGHT: FontWeight = FontWeight::BOLD;
 /// Floor for a column's max-content share, so a short column ("1k") beside a
 /// prose column keeps a readable width (mugen `MIN_COLUMN_CONTENT`).
 pub const TABLE_MIN_COLUMN_CONTENT: f32 = 48.0;
-/// Minimum rendered column width in px, padding included (comet
+/// Minimum rendered column width in px, padding included (nova
 /// `table.minColumnWidth`). Naturally narrower columns keep their content
 /// width; wider ones wrap down to this floor, then the table scrolls.
 pub const TABLE_MIN_COLUMN_WIDTH: f32 = 96.0;
-/// Hairline tone (comet md theme `table.borderColor`: rgba(255,255,255,0.1)).
+/// Hairline tone (nova md theme `table.borderColor`: rgba(255,255,255,0.1)).
 pub fn table_hairline() -> Hsla {
     crate::theme::white_alpha(0.10)
 }
@@ -87,9 +87,11 @@ pub struct RenderOptions {
 /// Copy-button wiring for one row's code blocks: the handler writes the code
 /// to the clipboard and flips a transient per-row "Copied" state owned by the
 /// transcript entity; `copied_ix` is the block currently showing feedback.
+pub type CopyHandler = Rc<dyn Fn(usize, SharedString, &mut Window, &mut gpui::App)>;
+
 #[derive(Clone)]
 pub struct CopyUi {
-    pub handler: Rc<dyn Fn(usize, SharedString, &mut Window, &mut gpui::App)>,
+    pub handler: CopyHandler,
     pub copied_ix: Option<usize>,
 }
 
@@ -470,7 +472,8 @@ fn render_table(
 
 /// Flattened inline runs: one string + gpui `TextRun`s + clickable link ranges
 /// + inline-code ranges (their rounded washes are painted by a canvas UNDER
-/// the text — `TextRun::background_color` can only paint square boxes).
+///   the text — `TextRun::background_color` can only paint square boxes).
+///
 /// `text` is a `SharedString` so cached reuse across frames is an Arc clone.
 pub struct FlatText {
     pub text: SharedString,

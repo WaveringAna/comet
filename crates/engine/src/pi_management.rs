@@ -1,6 +1,6 @@
 //! Device-local Pi runtime management for the native settings surface.
 //!
-//! Pi remains the owner of its file formats and package installation. Comet
+//! Pi remains the owner of its file formats and package installation. Nova
 //! reads a deliberately small typed projection, patches only named common
 //! settings atomically, and shells out to the resolved Pi CLI for package
 //! lifecycle commands. Credentials never leave this module.
@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use comet_proto::{
+use nova_proto::{
     PiCommonSettings, PiOpenAiCompatibleStatus, PiPackageInfo, PiProviderStatus, PiResourceInfo,
     PiRuntimeInfo, PiSettingsScope, PiSettingsSnapshot,
 };
@@ -95,7 +95,7 @@ impl PiManagement {
             Value::Object(global.clone())
         };
 
-        let executable = comet_harness::pi::resolve_pi_executable();
+        let executable = nova_harness::pi::resolve_pi_executable();
         let version = if let Some(executable) = executable.as_ref() {
             let output = Command::new(executable)
                 .arg("--version")
@@ -306,7 +306,7 @@ impl PiManagement {
         scope: PiSettingsScope,
         project_path: Option<&str>,
     ) -> Result<PiSettingsSnapshot, String> {
-        let executable = comet_harness::pi::resolve_pi_executable()
+        let executable = nova_harness::pi::resolve_pi_executable()
             .ok_or_else(|| "Pi is not installed on this device".to_string())?;
         if source.trim().is_empty() {
             return Err("Package source is required".into());

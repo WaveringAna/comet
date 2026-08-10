@@ -22,14 +22,14 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use loro::{ExportMode, VersionVector};
 use tokio::sync::watch;
 
-use comet_doc::{
+use nova_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
     SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
     join_continuation_entries,
 };
-use comet_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
-use comet_sync::DocsStore;
+use nova_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
+use nova_sync::DocsStore;
 
 use crate::sessions::{SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
@@ -117,7 +117,7 @@ impl ChatDocHandle {
 
     /// Recovery sweep: stamp this device's abandoned `streaming` entries `aborted`, appending
     /// `note` as a visible error part so the transcript says WHY the turn
-    /// ended (comet folded "Run interrupted by backend restart" the same
+    /// ended (nova folded "Run interrupted by backend restart" the same
     /// way). Returns the stamped entries' `(id, created_at)` — recovery uses
     /// them for the resume-freshness check.
     pub fn mark_abandoned_streams(&self, note: &str) -> Result<Vec<(String, i64)>, DocError> {
@@ -448,7 +448,7 @@ impl DocHost {
                         // run it as the next turn (comet's fallback, executor-side).
                         // After an engine restart `last_request` is empty too, so
                         // rebuild the run config from the chat's workspace row
-                        // (comet derived dispatch config from the chat row the
+                        // (nova derived dispatch config from the chat row the
                         // same way — sessions.ts:601-620); dispatch's engine-owned
                         // resume then reattaches the prior harness conversation.
                         let request = sessions
@@ -564,7 +564,7 @@ impl DocHost {
         &self,
         chat_id: &str,
         prompt: &str,
-    ) -> Option<comet_proto::RunRequest> {
+    ) -> Option<nova_proto::RunRequest> {
         let workspace = self.workspace()?;
         let chat = match workspace.doc().chat(chat_id) {
             Ok(chat) => chat?,
@@ -574,7 +574,7 @@ impl DocHost {
             }
         };
         let config = chat.config;
-        Some(comet_proto::RunRequest {
+        Some(nova_proto::RunRequest {
             prompt: prompt.to_string(),
             model: config.as_ref().and_then(|c| c.model.clone()),
             reasoning: config.as_ref().and_then(|c| c.reasoning),
@@ -586,7 +586,7 @@ impl DocHost {
             sandbox: config
                 .as_ref()
                 .map(|c| c.sandbox)
-                .unwrap_or(comet_proto::SandboxLevel::WorkspaceWrite),
+                .unwrap_or(nova_proto::SandboxLevel::WorkspaceWrite),
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,
