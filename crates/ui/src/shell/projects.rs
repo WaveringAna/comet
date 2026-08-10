@@ -1211,7 +1211,7 @@ impl Shell {
                         })
                         .when(selected, |el| el.child(popover::menu_check(&theme)))
                 }));
-            device_trigger = device_trigger.child(popover::anchored_menu(
+            device_trigger = device_trigger.child(popover::anchored_menu_in_modal(
                 "add-project-device-menu",
                 menu.into_any_element(),
             ));

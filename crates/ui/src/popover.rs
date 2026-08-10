@@ -189,7 +189,11 @@ fn pinned_layer(layer: AnyElement) -> AnyElement {
 /// `.on_mouse_down_out` on the content. The layer `.occlude()`s: hitboxes are
 /// paint-order only in gpui, so without it clicks on menu rows would ALSO fire
 /// whatever clickable sits under the floating layer.
-pub fn anchored_menu(id: impl Into<ElementId>, content: AnyElement) -> AnyElement {
+fn anchored_menu_with_priority(
+    id: impl Into<ElementId>,
+    content: AnyElement,
+    priority: usize,
+) -> AnyElement {
     let content = crate::frost::frosted(12.0, 16.0, content).into_any_element();
     pinned_layer(
         gpui::deferred(
@@ -201,9 +205,20 @@ pub fn anchored_menu(id: impl Into<ElementId>, content: AnyElement) -> AnyElemen
                     div().occlude().pt(px(6.0)).child(content),
                 )),
         )
-        .priority(1)
+        .priority(priority)
         .into_any_element(),
     )
+}
+
+pub fn anchored_menu(id: impl Into<ElementId>, content: AnyElement) -> AnyElement {
+    anchored_menu_with_priority(id, content, 1)
+}
+
+/// A floating menu nested inside [`modal`]. Deferred layers are ordered
+/// globally, so this must paint above the modal's priority-2 scrim/card rather
+/// than using the ordinary menu priority and disappearing underneath it.
+pub fn anchored_menu_in_modal(id: impl Into<ElementId>, content: AnyElement) -> AnyElement {
+    anchored_menu_with_priority(id, content, 3)
 }
 
 /// [`anchored_menu`] opening UPWARD from the trigger (composer pickers, the
