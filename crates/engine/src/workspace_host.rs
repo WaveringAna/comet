@@ -1,7 +1,5 @@
-//! WorkspaceHost — owns the per-user `WorkspaceDoc` (ARCHITECTURE §2.2, made
-//! per-user for privacy): local snapshot persistence, edge room sync
-//! (`ws3/{orgId}/{userId}`, offline-tolerant — projects/sessions are private to
-//! their owner, never org-visible), the device registry row for THIS device,
+//! WorkspaceHost — owns the local `WorkspaceDoc`: snapshot persistence, direct
+//! Nova peer sync, the device registry row for this device,
 //! and the typed watch channels the WatchChats/WatchDevices/WatchSessions RPC
 //! streams are fed from.
 //!
@@ -9,69 +7,34 @@
 //! its own session-status rows, and rows for chats it hosts; renames/archives are LWW
 //! sets accepted from any device (the Mutate surface).
 //!
-//! Liveness: `lastSeenAt` is a map write on boot/shutdown ONLY — the periodic 15s
-//! heartbeat rides the room's `EphemeralStore` (`presence/{deviceId}` → timestamp), so
-//! staying online never grows the workspace oplog.
+//! Liveness: `lastSeenAt` is a map write on boot/shutdown only. Successful
+//! authenticated peer exchanges refresh a process-local presence cache.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use chrono::Utc;
+use loro::{ExportMode, VersionVector};
 use tokio::sync::watch;
 
-use comet_doc::{DeletedProject, WorkspaceDoc, presence_key};
+use comet_doc::{DeletedProject, WorkspaceDoc};
 use comet_proto::{Chat, ChatConfig, ChatUsage, Device, Project, Session};
-use comet_sync::{DocsStore, RoomClient};
+use comet_sync::DocsStore;
 
-use crate::doc_host::EdgeConfig;
 use crate::{EngineError, now_ms};
 
 /// Snapshot row id in the local `DocsStore` (chat ids never collide with it).
-/// `workspace2` = the projects-overhaul destructive break: the legacy `workspace`
-/// row is simply never read again. (The per-user room break — `ws2/{orgId}` →
-/// `ws3/{orgId}/{userId}` — needed no row-id bump: the local store itself moved
-/// to `orgs/{org}/{user}/`, so the old snapshot is unreachable anyway.)
+/// `workspace3` is the current post-projects snapshot shape. Older snapshot rows are
+/// intentionally ignored and removed when this document opens.
 pub const WORKSPACE_DOC_ID: &str = "workspace3";
 /// Legacy (pre-projects) snapshot row — best-effort deleted on open.
 const LEGACY_WORKSPACE_DOC_IDS: &[&str] = &["workspace", "workspace2"];
-/// Org used when none is configured (matches the edge's dev-mode `user@org` bearers).
+/// Stable local storage namespace retained so existing on-device data stays visible.
 pub const DEFAULT_ORG_ID: &str = "dev-org";
-/// User used when none is configured (dev mode without a bearer).
 pub const DEFAULT_USER_ID: &str = "dev-user";
-/// Ephemeral presence refresh cadence.
+/// Presence overlay refresh cadence.
 const PRESENCE_INTERVAL_MS: u64 = 15_000;
-/// A presence heartbeat younger than this marks the device alive (3 missed
-/// beats = offline). Also the "peer is reachable" signal that clears the
-/// peer-dial cooldown.
-const PRESENCE_FRESH_MS: i64 = 45_000;
-/// Relay-status probe cadence. Ephemeral heartbeats ride the workspace room,
-/// so any workspace-DO pathology (log-replay wedge, CPU reset, our own room
-/// connection being down) silently starves them — and every device looks
-/// offline while its relay works fine. Before believing "offline", ask the
-/// device's DeviceRoom (`GET /device/{id}/status` → `hostConnected`), which
-/// tracks the host socket authoritatively and shares no machinery with the
-/// workspace room. Probes only run for devices whose heartbeat is stale, so
-/// the steady state (healthy room, fresh beats) sends no extra traffic.
-const RELAY_PROBE_INTERVAL_MS: u64 = 30_000;
-/// Per-request timeout for a relay-status probe.
-const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
-/// Initial-join retry backoff (base, cap). A first workspace-room join that
-/// fails must not strand the device offline until an app restart — retry until
-/// it lands. Jittered so N devices restarting together don't resynchronize
-/// their retries into a thundering herd on the cold DO.
-const JOIN_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(500);
-const JOIN_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Cheap decorrelation jitter (0–500ms) without pulling in a rng — derived from
-/// the sub-nanosecond wall clock. Mirrors the device relay's `jitter()`.
-fn join_retry_jitter() -> std::time::Duration {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    std::time::Duration::from_millis(u64::from(nanos) % 500)
-}
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceHostConfig {
@@ -80,13 +43,6 @@ pub struct WorkspaceHostConfig {
     pub device_name: String,
     /// `std::env::consts::OS`-style platform string.
     pub platform: String,
-    pub org_id: String,
-    /// The signed-in user — workspace docs are per-user (`ws3/{orgId}/{userId}`):
-    /// projects/sessions are private to their owner, never org-visible.
-    pub user_id: String,
-    /// When present, the host joins `/workspace/{orgId}/ws`. `None` = fully offline
-    /// (local snapshots only; the doc still drives everything device-side).
-    pub edge: Option<EdgeConfig>,
 }
 
 struct WorkspaceHostInner {
@@ -97,23 +53,11 @@ struct WorkspaceHostInner {
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     projects_tx: watch::Sender<Vec<Project>>,
-    room: Mutex<Option<RoomClient>>,
-    /// Freshest presence heartbeat (ms) we have EVER observed per device. The
-    /// ephemeral store forgets entries after its 30s TTL and starts empty on a
-    /// room (re)join, so without this cache a receive-side hiccup snaps a
-    /// device's overlay back to its boot-time doc `lastSeenAt` — an instant
-    /// (and false) "offline" badge for a host that beat 20s ago.
+    /// Freshest successful authenticated peer exchange per device.
     presence_seen: Mutex<std::collections::HashMap<String, i64>>,
-    /// Called with a device id whenever its presence heartbeat proves it alive —
-    /// wired to `LinkCache::reset_cooldown` so a peer that comes back is dialed
-    /// immediately instead of waiting out the failure backoff.
-    peer_alive: Mutex<Option<PeerAliveHook>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
 }
-
-/// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
-pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -125,8 +69,8 @@ pub struct WorkspaceHost {
 }
 
 impl WorkspaceHost {
-    /// Load (or init) the workspace doc, upsert this device's registry row, start the
-    /// change-driven task, and join the edge workspace room when configured.
+    /// Load (or init) the workspace doc, upsert this device's registry row, and
+    /// start the change-driven persistence/watch task.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {
         let doc = match store.load_snapshot(WORKSPACE_DOC_ID)? {
             Some(bytes) => {
@@ -189,93 +133,12 @@ impl WorkspaceHost {
                 devices_tx,
                 sessions_tx,
                 projects_tx,
-                room: Mutex::new(None),
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
-                peer_alive: Mutex::new(None),
                 _sub: sub,
             }),
         };
-        host.join_room();
         tokio::spawn(workspace_task(Arc::downgrade(&host.inner), changed_rx));
-        if host.inner.config.edge.is_some() {
-            tokio::spawn(relay_probe_task(Arc::downgrade(&host.inner)));
-        }
         Ok(host)
-    }
-
-    /// Edge room join — offline-tolerant: a failed join logs and stays local-first.
-    fn join_room(&self) {
-        let Some(edge) = &self.inner.config.edge else {
-            return;
-        };
-        let org_id = self.inner.config.org_id.clone();
-        // Per-dial URL provider: the bearer is re-read on every (re)connect.
-        let url = edge.room_url(format!("/workspace/{org_id}/ws"));
-        // `ws3/{orgId}/{userId}` = the per-user privacy room (must match the
-        // edge's join id, which it derives from the caller's own auth claim —
-        // a mismatched user can never join).
-        let room_id = format!("ws3/{}/{}", org_id, self.inner.config.user_id);
-        let room_doc = self.inner.doc.doc().clone();
-        let device_id = self.inner.config.device_id.clone();
-        let weak = Arc::downgrade(&self.inner);
-        tokio::spawn(async move {
-            // `RoomClient` only self-reconnects AFTER a first successful join;
-            // an INITIAL failure (a 500 from an overloaded workspace DO, a token
-            // racing a refresh, an edge deploy) used to end this task and leave
-            // the device offline until an app restart — presence stuck "offline"
-            // while the relay and per-chat rooms worked. Retry the first join on
-            // a capped, jittered backoff so a transient edge blip self-heals.
-            let mut backoff = JOIN_RETRY_BASE;
-            loop {
-                if weak.upgrade().is_none() {
-                    return; // host dropped
-                }
-                match RoomClient::connect_via(url.clone(), &room_id, room_doc.clone()).await {
-                    Ok(client) => {
-                        client.ephemeral().set(&presence_key(&device_id), now_ms());
-                        let mut events = client.events();
-                        let Some(inner) = weak.upgrade() else { return };
-                        *lock(&inner.room) = Some(client);
-                        tracing::info!(room = %room_id, "workspace room joined");
-                        drop(inner);
-                        // Presence rides `%EPH`, never the doc — remote
-                        // heartbeats must re-publish the device watch themselves
-                        // (the signal that distinguishes "host offline" from slow
-                        // sync). This loop ends only when the RoomClient closes
-                        // (host shutdown), which drops us out to a rejoin.
-                        loop {
-                            match events.recv().await {
-                                Ok(comet_sync::RoomEvent::EphemeralUpdate) => {
-                                    let Some(inner) = weak.upgrade() else { return };
-                                    inner.publish();
-                                }
-                                Ok(_) => {}
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                        // The established client gave up (host shutdown): clear
-                        // the slot and stop — nothing to rejoin into.
-                        if let Some(inner) = weak.upgrade() {
-                            *lock(&inner.room) = None;
-                        }
-                        return;
-                    }
-                    Err(err) => {
-                        tracing::warn!(room = %room_id, error = %err, backoff_ms = backoff.as_millis() as u64,
-                            "workspace room join failed; retrying");
-                    }
-                }
-                tokio::time::sleep(backoff + join_retry_jitter()).await;
-                backoff = (backoff * 2).min(JOIN_RETRY_CAP);
-            }
-        });
-    }
-
-    /// Wire the "peer is alive" signal (fresh presence heartbeat) to a callback —
-    /// the engine points this at `LinkCache::reset_cooldown`.
-    pub fn set_peer_alive_hook(&self, hook: PeerAliveHook) {
-        *lock(&self.inner.peer_alive) = Some(hook);
     }
 
     pub fn device_id(&self) -> &str {
@@ -290,8 +153,45 @@ impl WorkspaceHost {
         self.inner.doc.clone()
     }
 
-    pub fn connected(&self) -> bool {
-        lock(&self.inner.room).is_some()
+    pub fn sync_chat_ids(&self) -> Result<Vec<String>, EngineError> {
+        Ok(self
+            .inner
+            .doc
+            .read_all()?
+            .chats
+            .into_iter()
+            .map(|chat| chat.id)
+            .collect())
+    }
+
+    pub fn sync_version(&self) -> Vec<u8> {
+        self.inner.doc.doc().oplog_vv().encode()
+    }
+
+    pub fn sync_export(&self, remote_version: &[u8]) -> Result<Vec<u8>, EngineError> {
+        let version = VersionVector::decode(remote_version)
+            .map_err(|error| EngineError::Other(format!("invalid workspace sync head: {error}")))?;
+        self.inner
+            .doc
+            .doc()
+            .export(ExportMode::updates(&version))
+            .map_err(|error| EngineError::Other(format!("workspace sync export failed: {error}")))
+    }
+
+    pub fn sync_import(&self, update: &[u8]) -> Result<(), EngineError> {
+        if update.is_empty() {
+            return Ok(());
+        }
+        self.inner.doc.doc().import(update).map_err(|error| {
+            EngineError::Other(format!("workspace sync import failed: {error}"))
+        })?;
+        Ok(())
+    }
+
+    /// A successful authenticated sync refreshes the in-memory peer presence view.
+    pub fn note_peer_seen(&self, device_id: &str) {
+        lock(&self.inner.presence_seen).insert(device_id.to_string(), now_ms());
+        self.inner.publish();
     }
 
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
@@ -342,9 +242,9 @@ impl WorkspaceHost {
         rx
     }
 
-    // ── chat ownership (replaces the M2 "host everything" pragmatism) ───────
+    // ── chat ownership ──────────────────────────────────────────────────────
 
-    /// §2.2 writer discipline: the chat's host is its row's `deviceId`. Unknown chats
+    /// The chat's host is its row's `deviceId`. Unknown chats
     /// are claimable — the first run command claims them via [`Self::claim_chat`].
     pub fn is_host(&self, chat_id: &str) -> bool {
         match self.inner.doc.chat(chat_id) {
@@ -770,57 +670,18 @@ impl WorkspaceHostInner {
         }
     }
 
-    /// Fold the 15s ephemeral presence heartbeats into the device rows'
-    /// `lastSeenAt` before publishing. The doc row is written on boot/shutdown
-    /// ONLY (oplog hygiene), so without this overlay every device looks offline
-    /// ~70s after its boot — and a genuinely dead host is indistinguishable
-    /// from slow sync. Fresh remote heartbeats also fire the peer-alive hook
-    /// (dial-cooldown reset).
+    /// Fold authenticated direct-sync observations into device rows before
+    /// publishing. These are process-local and never grow the CRDT oplog.
     fn overlay_presence(&self, devices: &mut [Device]) {
-        let mut alive_peers: Vec<String> = Vec::new();
-        {
-            // No live room handle is NOT "everyone is offline": the cache (fed
-            // by past heartbeats and the relay-status probe) still overlays —
-            // a wedged workspace DO must never fake an offline badge for
-            // devices whose relay connection is fine.
-            let room = lock(&self.room);
-            let mut seen = lock(&self.presence_seen);
-            let now = now_ms();
-            for device in devices.iter_mut() {
-                // Freshest of the live ephemeral entry and the cache: the
-                // store's 30s TTL (and its empty state right after a room
-                // rejoin) must not erase freshness this engine already
-                // witnessed — the device is offline only once heartbeats
-                // genuinely stop arriving for the UI's whole online window.
-                let live = room.as_ref().and_then(|room| {
-                    match room.ephemeral().get(&presence_key(&device.id)) {
-                        Some(loro::LoroValue::I64(ms)) => Some(ms),
-                        _ => None,
-                    }
-                });
-                let cached = seen.get(&device.id).copied();
-                let Some(ms) = live.into_iter().chain(cached).max() else {
-                    continue;
-                };
-                seen.insert(device.id.clone(), ms);
-                if let Some(at) = chrono::DateTime::<Utc>::from_timestamp_millis(ms)
-                    && device.last_seen_at.is_none_or(|prev| prev < at)
-                {
-                    device.last_seen_at = Some(at);
-                }
-                if device.id != self.config.device_id && now.saturating_sub(ms) < PRESENCE_FRESH_MS
-                {
-                    alive_peers.push(device.id.clone());
-                }
-            }
-        }
-        if alive_peers.is_empty() {
-            return;
-        }
-        let hook = lock(&self.peer_alive).clone();
-        if let Some(hook) = hook {
-            for id in &alive_peers {
-                hook(id);
+        let seen = lock(&self.presence_seen);
+        for device in devices.iter_mut() {
+            let Some(ms) = seen.get(&device.id).copied() else {
+                continue;
+            };
+            if let Some(at) = chrono::DateTime::<Utc>::from_timestamp_millis(ms)
+                && device.last_seen_at.is_none_or(|prev| prev < at)
+            {
+                device.last_seen_at = Some(at);
             }
         }
     }
@@ -835,14 +696,6 @@ impl WorkspaceHostInner {
             Err(err) => {
                 tracing::warn!(error = %err, "workspace snapshot export failed");
             }
-        }
-    }
-
-    /// Ephemeral presence heartbeat — relayed over `%EPH`, never the oplog.
-    fn presence_tick(&self) {
-        if let Some(room) = lock(&self.room).as_ref() {
-            room.ephemeral()
-                .set(&presence_key(&self.config.device_id), now_ms());
         }
     }
 }
@@ -863,89 +716,9 @@ fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<S
     list
 }
 
-/// Background task: relay-verified presence. Every [`RELAY_PROBE_INTERVAL_MS`],
-/// for each known device whose merged heartbeat freshness has gone stale, ask
-/// its DeviceRoom whether the host socket is live (`/device/{id}/status`); a
-/// positive answer refreshes the presence cache so the overlay keeps the badge
-/// online. The DeviceRoom shares no machinery with the workspace room, so a
-/// false "offline" now requires BOTH independent paths to be down — at which
-/// point the device is, for every purpose the app has, genuinely offline.
-/// Steady state (healthy room, fresh heartbeats) probes nothing.
-async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick.tick().await; // consume the immediate first tick
-    let client = reqwest::Client::new();
-    loop {
-        tick.tick().await;
-        let Some(inner) = weak.upgrade() else { return };
-        let Some(edge) = inner.config.edge.clone() else {
-            return;
-        };
-        let self_id = inner.config.device_id.clone();
-        let now = now_ms();
-        let stale: Vec<String> = {
-            let Ok(devices) = inner.doc.read_devices() else {
-                continue;
-            };
-            let seen = lock(&inner.presence_seen);
-            devices
-                .into_iter()
-                .filter(|d| d.id != self_id)
-                .filter(|d| {
-                    seen.get(&d.id)
-                        .is_none_or(|ms| now.saturating_sub(*ms) >= PRESENCE_FRESH_MS)
-                })
-                .map(|d| d.id)
-                .collect()
-        };
-        drop(inner);
-        if stale.is_empty() {
-            continue;
-        }
-        let Some(bearer) = edge.bearer().await else {
-            continue; // signed out
-        };
-        let mut refreshed = false;
-        for device_id in stale {
-            let url = format!(
-                "{}/device/{}/status",
-                edge.url.trim_end_matches('/'),
-                device_id
-            );
-            let response = client
-                .get(&url)
-                .bearer_auth(&bearer)
-                .timeout(RELAY_PROBE_TIMEOUT)
-                .send()
-                .await;
-            let Ok(response) = response else { continue };
-            if !response.status().is_success() {
-                continue;
-            }
-            let Ok(body) = response.json::<serde_json::Value>().await else {
-                continue;
-            };
-            if body
-                .get("hostConnected")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-            {
-                let Some(inner) = weak.upgrade() else { return };
-                lock(&inner.presence_seen).insert(device_id.clone(), now_ms());
-                tracing::debug!(device = %device_id, "presence: relay-verified alive");
-                refreshed = true;
-            }
-        }
-        if refreshed && let Some(inner) = weak.upgrade() {
-            inner.publish();
-        }
-    }
-}
-
 /// Background task: reacts to doc changes (local commits and remote imports) by
-/// re-publishing the watch channels and debouncing snapshots, and refreshes ephemeral
-/// presence every [`PRESENCE_INTERVAL_MS`]. Holds only a weak handle so a dropped
+/// re-publishing the watch channels and debouncing snapshots. It refreshes the
+/// liveness overlay every [`PRESENCE_INTERVAL_MS`]. Holds only a weak handle so a dropped
 /// host tears the task down.
 async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::Receiver<u64>) {
     let mut presence =
@@ -976,10 +749,6 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
             }
             _ = presence.tick() => {
                 let Some(inner) = weak.upgrade() else { break };
-                inner.presence_tick();
-                // Re-publish on the same cadence: remote heartbeats decay when a
-                // device goes silent, and watchers (the UI online dot, "host
-                // offline" hints) need a tick to observe that staleness.
                 inner.publish();
             }
         }

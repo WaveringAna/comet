@@ -1,19 +1,12 @@
-//! Uploads — attachment staging + the content-addressed edge mirror
+//! Uploads — attachment staging and device-local serving
 //! (feature-inventory §3.7 "Uploads"; port of comet's `uploads.ts`).
 //!
-//! The UI streams a file as base64 chunks (~60KB, sized for the relay when the
+//! The UI streams a file as base64 chunks (~60KB, sized for direct peer RPC when the
 //! target device is remote); chunks stage on disk under `{data_dir}/uploads/tmp/
 //! {uploadId}/{seq}.b64` (surviving an engine restart mid-upload, unlike comet's
 //! in-memory buffers), and `commit` assembles them into
 //! `{data_dir}/uploads/{id8}-{name}` and returns the absolute path, which the
 //! composer appends to the prompt so the agent can read the file from disk.
-//!
-//! On commit the assembled bytes are also mirrored to the edge, best-effort:
-//! `PUT {edge}/attachments/{sha256}` (bearer auth, content-addressed R2 —
-//! `edge/src/index.ts`). A device that doesn't hold the file locally can fall
-//! back to `GET {edge}/attachments/{sha256}` with the same bearer; native keeps
-//! reads local-first (`read_chunk` proxies through the owning device), so the
-//! GET fallback is the disaster path, not the hot path.
 //!
 //! `read_chunk` serves transcript images back in 45KB base64 chunks. Path jail:
 //! only files under the uploads dir or a workspace-known chat cwd are readable
@@ -27,15 +20,12 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::EngineError;
-use crate::doc_host::EdgeConfig;
-use crate::repos::hex;
 
 /// A pending upload must finish within this window (covers slow mesh links).
 const STAGING_TTL: Duration = Duration::from_secs(10 * 60);
-/// Hard cap on an assembled file (matches the edge's 32MB attachment cap).
+/// Hard cap on an assembled file.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// Multiple of 3 so independent base64 chunks concatenate losslessly.
 const READ_CHUNK_BYTES: u64 = 45_000;
@@ -57,8 +47,6 @@ struct UploadsInner {
     dir: PathBuf,
     /// Chunk staging (`{data_dir}/uploads/tmp/{uploadId}/`).
     tmp: PathBuf,
-    edge: Option<EdgeConfig>,
-    http: reqwest::Client,
 }
 
 #[derive(Clone)]
@@ -67,17 +55,12 @@ pub struct Uploads {
 }
 
 impl Uploads {
-    pub fn new(data_dir: &Path, edge: Option<EdgeConfig>) -> Self {
+    pub fn new(data_dir: &Path) -> Self {
         let dir = data_dir.join("uploads");
         Self {
             inner: Arc::new(UploadsInner {
                 tmp: dir.join("tmp"),
                 dir,
-                edge,
-                http: reqwest::Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new()),
             }),
         }
     }
@@ -116,7 +99,7 @@ impl Uploads {
     }
 
     /// Assemble the staged chunks into a durable file and return its absolute
-    /// path. Also mirrors the bytes to the edge (content-addressed), best-effort.
+    /// path. Remote readers request chunks directly from this device over Nova.
     pub fn commit(&self, upload_id: &str, file_name: &str) -> Result<String, EngineError> {
         let dir = self.staging_dir(upload_id)?;
         let mut parts = chunk_files(&dir)?;
@@ -146,7 +129,6 @@ impl Uploads {
         let path = self.inner.dir.join(format!("{id8}-{name}"));
         std::fs::write(&path, &bytes)?;
         let _ = std::fs::remove_dir_all(&dir);
-        self.mirror_to_edge(&path, bytes);
         Ok(path.to_string_lossy().to_string())
     }
 
@@ -253,45 +235,6 @@ impl Uploads {
             size: meta.len(),
             resolved,
         })
-    }
-
-    /// Best-effort content-addressed mirror (`PUT /attachments/{sha256}`, bearer
-    /// auth). Failures only log — local commit already succeeded.
-    fn mirror_to_edge(&self, path: &Path, bytes: Vec<u8>) {
-        let Some(edge) = self.inner.edge.clone() else {
-            return;
-        };
-        let sha = hex(&Sha256::digest(&bytes));
-        let mime = mime_by_ext(path)
-            .unwrap_or("application/octet-stream")
-            .to_string();
-        let url = format!("{}/attachments/{sha}", edge.url.trim_end_matches('/'));
-        let http = self.inner.http.clone();
-        tokio::spawn(async move {
-            // Fresh bearer per request — never the boot-time snapshot.
-            let Some(bearer) = edge.bearer().await else {
-                tracing::warn!(sha = %sha, "attachment mirror skipped: signed out");
-                return;
-            };
-            let sent = http
-                .put(&url)
-                .bearer_auth(&bearer)
-                .header("content-type", mime)
-                .body(bytes)
-                .send()
-                .await;
-            match sent {
-                Ok(res) if res.status().is_success() => {
-                    tracing::debug!(sha = %sha, "attachment mirrored to edge");
-                }
-                Ok(res) => {
-                    tracing::warn!(sha = %sha, status = %res.status(), "edge attachment mirror rejected");
-                }
-                Err(err) => {
-                    tracing::warn!(sha = %sha, error = %err, "edge attachment mirror failed");
-                }
-            }
-        });
     }
 }
 

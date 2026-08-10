@@ -42,9 +42,6 @@
             pkg-config
             cmake
 
-            # edge/ worker
-            nodejs_22
-
             # scripts/ (tui-smoke, frame_png → PIL)
             (python3.withPackages (ps: [ ps.pillow ]))
           ]

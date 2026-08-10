@@ -1,15 +1,15 @@
-//! Two-device e2e smoke driver (`scripts/e2e-smoke.sh` runs it).
+//! Manual two-device Nova smoke driver.
 //!
 //! Connects to two running headless engines over their localhost IPC ports and proves
-//! the cross-device command plane end to end against a real edge:
+//! the cross-device command plane end to end after the two engines are paired:
 //!
 //! 1. `LocalDevice` on both — distinct device ids;
 //! 2. `Mutate createChat` on A (A hosts the chat, mock harness config);
-//! 3. waits until the chat row syncs A → edge → B (`WatchChats` on B);
+//! 3. waits until direct Nova sync carries the chat row A → B (`WatchChats` on B);
 //! 4. `QueueCommand` a Run on **B** — the doc path: B commits the command into its
-//!    replica, nudges A's device room, A's host executor drains and runs it;
+//!    replica, direct sync carries it to A, and A's host executor drains and runs it;
 //! 5. waits on **B** until the assistant entry lands `complete` with the mock
-//!    transcript (A → edge → B), and the session-status row round-trips.
+//!    transcript (A → B), and the session-status row round-trips.
 //!
 //! Prints `PASS`/`FAIL` lines; exits nonzero on failure.
 
@@ -141,7 +141,7 @@ async fn main() {
     .unwrap_or_else(|err| fail(&format!("createChat on A: {err}")));
     pass(&format!("project + chat created on A ({chat_id})"));
 
-    // 2b. Project row syncs A → edge → B (WatchProjects).
+    // 2b. Project row syncs A → B over the paired Nova connection (WatchProjects).
     let project_device = wait_stream(
         &b,
         methods::WATCH_PROJECTS,
@@ -162,9 +162,9 @@ async fn main() {
             "project synced to B but owned by {project_device}, expected {a_dev}"
         ));
     }
-    pass("project row synced A -> edge -> B (owner = A)");
+    pass("project row synced A -> B (owner = A)");
 
-    // 3. Workspace sync A → edge → B: the chat row appears in B's WatchChats.
+    // 3. Direct workspace sync A → B: the chat row appears in B's WatchChats.
     let hosted_by = wait_stream(
         &b,
         methods::WATCH_CHATS,
@@ -183,10 +183,10 @@ async fn main() {
             "chat synced to B but hosted by {hosted_by}, expected {a_dev}"
         ));
     }
-    pass("chat row synced A -> edge -> B (host = A)");
+    pass("chat row synced A -> B (host = A)");
 
     // 4. Queue the run from B THROUGH THE DOC (no targetDeviceId): B commits the
-    //    command into its replica; the nudge + room sync hand it to A's executor.
+    //    command into its replica; direct peer sync hands it to A's executor.
     let message_id = uuid::Uuid::new_v4().to_string();
     b.call(
         methods::QUEUE_COMMAND,

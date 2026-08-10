@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use comet_doc::SessionMessageEntry;
 use comet_proto::view::ConnectionStatus;
-use comet_proto::{AuthState, Chat, Device, Project, Session};
+use comet_proto::{Chat, Device, Project, Session};
 use comet_rpc::{RpcClient, methods};
 use tokio::sync::mpsc;
 
@@ -33,7 +33,6 @@ pub enum Update {
     Connection(ConnectionStatus),
     /// How we reached the engine — decides what quitting means.
     Attached(Attachment),
-    Auth(Box<AuthState>),
     Chats(Vec<Chat>),
     Projects(Vec<Project>),
     Devices(Vec<Device>),
@@ -264,12 +263,11 @@ async fn session(
         Err(err) => tracing::debug!(error = %err, "LocalDevice unavailable"),
     }
 
-    let (mut chats, mut projects, mut devices, mut sessions, mut auth) = match tokio::try_join!(
+    let (mut chats, mut projects, mut devices, mut sessions) = match tokio::try_join!(
         client.subscribe(methods::WATCH_CHATS, empty()),
         client.subscribe(methods::WATCH_PROJECTS, empty()),
         client.subscribe(methods::WATCH_DEVICES, empty()),
         client.subscribe(methods::WATCH_SESSIONS, empty()),
-        client.subscribe(methods::AUTH_STATUS, empty()),
     ) {
         Ok(streams) => streams,
         Err(err) => {
@@ -345,18 +343,6 @@ async fn session(
                 Frame::Skip => {}
                 Frame::Ended => return SessionEnd::ConnectionLost,
             },
-            frame = auth.recv() => match frame {
-                // Auth is the one frame with two wire shapes in flight; the
-                // tolerant parser is shared with the gpui viewport.
-                Some(value) => match comet_proto::view::parse_auth_state(&value) {
-                    Some(state) => if updates.send(Update::Auth(Box::new(state))).is_err() {
-                        return SessionEnd::AppGone;
-                    },
-                    None => tracing::warn!("dropping unrecognized AuthStatus frame"),
-                },
-                None => return SessionEnd::ConnectionLost,
-            },
-
             // A transcript stream ending is NOT a lost connection: the engine
             // ends it when the chat is deleted. Drop it and keep going.
             frame = recv_optional(&mut transcript) => {

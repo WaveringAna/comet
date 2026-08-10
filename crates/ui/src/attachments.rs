@@ -29,7 +29,7 @@ use comet_rpc::methods;
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
 /// Base64 chars per `UploadChunk` (comet state.ts `UPLOAD_CHUNK` — sized for
-/// the relay when the target device is remote).
+/// the paired Nova connection when the target device is remote).
 pub const UPLOAD_CHUNK_B64_CHARS: usize = 60_000;
 /// state.ts `MAX_ATTACHMENT_READ_CHUNKS` — bounds the read-back loop.
 const MAX_READ_CHUNKS: usize = 1_000;
@@ -265,7 +265,7 @@ fn with_target(mut params: serde_json::Value, target_device_id: Option<&str>) ->
     params
 }
 
-/// Per-call deadlines (desktop state.ts): a stalled-but-open relay link never
+/// Per-call deadlines (desktop state.ts): a stalled-but-open peer link never
 /// fails an RPC on its own, so every attachment call races a timer. The first
 /// chunk gets 90s (a cold dial to a remote device), later chunks 30s; commit
 /// 150s (it must outlast the engine's cross-device assemble); reads 20s.

@@ -1050,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn appending_to_the_tail_relays_out_only_the_tail() {
+    fn appending_to_the_tail_reflows_only_the_tail() {
         let mut view = Transcript::new();
         let entries: Vec<_> = (0..20)
             .map(|i| text_entry(&format!("m{i}"), MessageRole::Assistant, "hello there"))

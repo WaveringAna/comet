@@ -1,6 +1,7 @@
-//! Session doc schema over `loro` — Rust port of `packages/session-doc/src/schema.ts`.
+//! Session transcript and command schema over `loro`.
 //!
-//! Container layout (MUST stay shape-compatible with the TS edge/tail materializer):
+//! Container layout is persisted and exchanged between Nova Engines, so changes require
+//! an explicit schema migration:
 //! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)
 //! - `messages`: LoroList of LoroMap {
 //!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?, continuationOf? }

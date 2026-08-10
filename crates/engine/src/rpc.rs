@@ -13,9 +13,6 @@
 //! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
 //!   setChatArchived, deleteChat, renameDevice, markChatSeen)
 //! - `LocalDevice` → `{deviceId}` — this engine's identity (never forwarded)
-//! - AuthRpc (feature-inventory §2): `AuthStatus` (stream), `SignIn`/`SignInHeadless` →
-//!   `{url}`, `CompleteSignIn {code}`, `SignOut`, `ListOrgs`, `CreateOrg {name}`,
-//!   `SelectOrg {organizationId}`
 //! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
 //!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
 //!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
@@ -23,8 +20,8 @@
 //! - Terminals (§3.4): `OpenTerminal {chatId, cols, rows}` → `TerminalSession`,
 //!   `SubscribeTerminal {terminalId, afterSeq?}` → stream of `TerminalEvent`
 //!   (replay then live tail), `WriteTerminal {terminalId, data}`, `ResizeTerminal`,
-//!   `CloseTerminal`. M5 is single-user local: per-user owner checks land with
-//!   real multi-account auth in M6.
+//!   `CloseTerminal`. Terminal access is authorized at the Nova peer boundary;
+//!   sessions themselves remain device-local.
 //! - Agent accounts (§3.7): `ListAgentAccounts {forceUsage?}` →
 //!   `AgentAccountsSnapshot`, `ActivateAgentAccount`/`ForgetAgentAccount`
 //!   `{harness, accountId}` → snapshot, `StartAgentLogin {harness}` →
@@ -37,10 +34,10 @@
 //!
 //! ## Device-addressed routing (`targetDeviceId`, feature-inventory §2.1)
 //!
-//! ControlRpc methods are relay-forwardable: params may carry `targetDeviceId`. When it
-//! names another device, the call is forwarded verbatim over that device's relay DO via
-//! the [`LinkCache`] — the remote engine sees its own id and handles locally, so the
-//! forward can never loop. Streaming methods are proxied by re-subscribing remotely and
+//! ControlRpc methods are Nova-forwardable: params may carry `targetDeviceId`. When it
+//! names another device, the call is forwarded verbatim over its authenticated direct
+//! connection. The remote engine sees its own id and handles locally, so the forward
+//! can never loop. Streaming methods are proxied by re-subscribing remotely and
 //! piping items. To make another method device-addressable, nothing per-method is needed
 //! beyond listing it in [`forwardable`] (and [`is_stream_method`] if it streams);
 //! handlers stay transport-agnostic. Currently routed: `ListHarnesses`, `ListModels`,
@@ -54,12 +51,13 @@ use tokio::sync::watch;
 
 use comet_doc::SessionCommandPayload;
 use comet_proto::{ChatConfig, HarnessId, PiSettingsScope};
-use comet_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
+use comet_rpc::{RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
-use crate::auth::Auth;
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
+use crate::nova::NovaHost;
+use crate::peer_sync::{PeerSync, SyncExchange};
 use crate::pi_management::PiManagement;
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, home_dir};
@@ -399,9 +397,8 @@ pub struct EngineRpc {
     uploads: Uploads,
     agent_accounts: AgentAccounts,
     pi_management: PiManagement,
-    auth: Option<Auth>,
-    links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<comet_update::Updater>,
+    nova: Option<NovaHost>,
 }
 
 impl EngineRpc {
@@ -428,22 +425,9 @@ impl EngineRpc {
             uploads,
             agent_accounts,
             pi_management: PiManagement,
-            auth: None,
-            links: None,
             updater: None,
+            nova: None,
         }
-    }
-
-    /// Attach the auth service (AuthStatus + AuthRpc mutations).
-    pub fn with_auth(mut self, auth: Auth) -> Self {
-        self.auth = Some(auth);
-        self
-    }
-
-    /// Attach the peer link cache — enables `targetDeviceId` relay forwarding.
-    pub fn with_links(mut self, links: std::sync::Arc<LinkCache>) -> Self {
-        self.links = Some(links);
-        self
     }
 
     /// Attach the release checker (UpdateStatus stream + ApplyUpdate).
@@ -452,10 +436,16 @@ impl EngineRpc {
         self
     }
 
-    fn auth(&self) -> Result<&Auth, RpcError> {
-        self.auth
-            .as_ref()
-            .ok_or_else(|| RpcError::Failed("auth unavailable".into()))
+    /// Attach the Nova Engine peer host (Nova* settings RPCs + inbound peer auth).
+    pub fn with_nova(mut self, nova: NovaHost) -> Self {
+        self.nova = Some(nova);
+        self
+    }
+
+    fn nova(&self) -> Result<&NovaHost, RpcError> {
+        self.nova.as_ref().ok_or_else(|| {
+            RpcError::Failed("Nova peer networking is not enabled on this engine".into())
+        })
     }
 
     fn updater(&self) -> Result<&comet_update::Updater, RpcError> {
@@ -464,30 +454,25 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
     }
 
-    /// Forward a device-addressed call over the target device's relay. On transport
-    /// failure the cached link is invalidated so the next call re-dials.
+    /// Forward a device-addressed call over its paired direct Nova connection.
     async fn forward(
         &self,
         target: &str,
         method: &str,
         params: serde_json::Value,
     ) -> Result<RpcReply, RpcError> {
-        let Some(links) = &self.links else {
-            return Err(RpcError::Failed(format!(
-                "cannot reach device {target}: remote routing unavailable (offline)"
-            )));
-        };
-        let client = links.client(target).await?;
+        let nova = self.nova()?.clone();
+        let client = nova.dial(target).await?;
         if is_stream_method(method) {
             let rx = match client.subscribe(method, params).await {
                 Ok(rx) => rx,
                 Err(err) => {
-                    links.invalidate(target);
+                    nova.invalidate(target).await;
                     return Err(err);
                 }
             };
             // Pipe remote items; the held client keeps the link's RpcClient alive for
-            // the stream's lifetime. A remote error just ends the stream (the relay
+            // the stream's lifetime. A remote error just ends the stream (the direct
             // link-down path fails pending calls; stream receivers close).
             let stream = futures::stream::unfold((rx, client), |(mut rx, client)| async move {
                 rx.recv().await.map(|item| (item, (rx, client)))
@@ -498,7 +483,7 @@ impl EngineRpc {
             Ok(value) => Ok(RpcReply::Value(value)),
             Err(err) => {
                 if matches!(err, RpcError::Closed | RpcError::Transport(_)) {
-                    links.invalidate(target);
+                    nova.invalidate(target).await;
                 }
                 Err(err)
             }
@@ -650,6 +635,7 @@ fn forwardable(method: &str) -> bool {
             // Tool outputs live in the chat host's run journal (host-local,
             // never synced — that's the point of the lookup).
             | methods::TOOL_OUTPUT
+            | methods::TOOL_DIFF
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -706,122 +692,71 @@ where
     .boxed()
 }
 
-/// Authentication-only RPC surface used while the headed app is waiting for a
-/// production WorkOS session. Keeping this independent from [`EngineRpc`] lets
-/// the UI show its sign-in and organization gates before identity-scoped Loro
-/// stores are opened.
-#[derive(Clone)]
-pub struct AuthRpc {
-    auth: Auth,
+fn nova_peer_watch_stream(nova: NovaHost) -> BoxStream<'static, serde_json::Value> {
+    futures::stream::unfold(
+        (nova.watch_trust(), nova, false),
+        |(mut rx, nova, emitted)| async move {
+            if emitted {
+                rx.changed().await.ok()?;
+            }
+            let value = serde_json::to_value(nova.list_peers()).ok()?;
+            Some((value, (rx, nova, true)))
+        },
+    )
+    .boxed()
 }
 
-impl AuthRpc {
-    pub fn new(auth: Auth) -> Self {
-        Self { auth }
-    }
-
-    pub fn handles(method: &str) -> bool {
-        matches!(
-            method,
-            methods::AUTH_STATUS
-                | methods::SIGN_IN
-                | methods::SIGN_IN_HEADLESS
-                | methods::COMPLETE_SIGN_IN
-                | methods::SIGN_OUT
-                | methods::LIST_ORGS
-                | methods::CREATE_ORG
-                | methods::SELECT_ORG
-        )
-    }
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IdParams {
+    device_id: String,
 }
 
-#[async_trait]
-impl RpcService for AuthRpc {
-    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        match method {
-            methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
-            methods::SIGN_IN => {
-                let url = self
-                    .auth
-                    .start_sign_in()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "url": url }))
-            }
-            methods::SIGN_IN_HEADLESS => {
-                let url = self.auth.start_headless_sign_in();
-                RpcReply::value(&serde_json::json!({ "url": url }))
-            }
-            methods::COMPLETE_SIGN_IN => {
-                #[derive(Deserialize)]
-                struct P {
-                    code: String,
-                }
-                let p: P = parse_params(params)?;
-                self.auth
-                    .complete_sign_in(&p.code)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::SIGN_OUT => {
-                self.auth.sign_out();
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::LIST_ORGS => {
-                let orgs = self
-                    .auth
-                    .list_orgs()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "orgs": orgs }))
-            }
-            methods::CREATE_ORG => {
-                #[derive(Deserialize)]
-                struct P {
-                    name: String,
-                }
-                let p: P = parse_params(params)?;
-                self.auth
-                    .create_org(&p.name)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::SELECT_ORG => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    organization_id: String,
-                }
-                let p: P = parse_params(params)?;
-                self.auth
-                    .select_org(&p.organization_id)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            _ => Err(RpcError::UnknownMethod(method.to_string())),
-        }
-    }
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairPeerParams {
+    endpoint: String,
+    code: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanParams {
+    ranges: Vec<String>,
+    #[serde(default = "default_nova_port")]
+    port: u16,
+    #[serde(default)]
+    allow_public: bool,
+}
+
+fn default_nova_port() -> u16 {
+    27655
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdatePeerParams {
+    device_id: String,
+    name: String,
+    endpoint: String,
+    #[serde(default = "default_role")]
+    role: comet_nova::trust::Role,
+}
+
+fn default_role() -> comet_nova::trust::Role {
+    comet_nova::trust::Role::Peer
 }
 
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        // Device-addressed routing: forward calls that target another device over its
-        // relay. The target compares the id to its own, so forwards cannot loop.
+        // Device-addressed routing: forward calls that target another paired Nova.
         if forwardable(method)
             && let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
             return self.forward(&target, method, params).await;
-        }
-        if AuthRpc::handles(method) {
-            return AuthRpc::new(self.auth()?.clone())
-                .handle(method, params)
-                .await;
         }
         match method {
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
@@ -1209,6 +1144,99 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chunk)
             }
+            // Nova Engine peer-network settings (IPC-only; never peer-forwarded).
+            comet_nova::methods::NOVA_LOCAL_DEVICE => {
+                let nova = self.nova()?;
+                RpcReply::value(&serde_json::json!({
+                    "deviceId": nova.device_id(),
+                    "name": nova.device_name(),
+                    "port": nova.listener_port(),
+                    "ticket": nova.ticket()?,
+                }))
+            }
+            comet_nova::methods::NOVA_BEGIN_PAIRING => {
+                Ok(RpcReply::Value(self.nova()?.begin_pairing()))
+            }
+            comet_nova::methods::NOVA_CANCEL_PAIRING => {
+                Ok(RpcReply::Value(self.nova()?.cancel_pairing()))
+            }
+            comet_nova::methods::NOVA_LIST_PEERS => RpcReply::value(&self.nova()?.list_peers()),
+            comet_nova::methods::NOVA_WATCH_PEERS => Ok(RpcReply::Stream(nova_peer_watch_stream(
+                self.nova()?.clone(),
+            ))),
+            comet_nova::methods::NOVA_PAIR_PEER => {
+                let p: PairPeerParams = parse_params(params)?;
+                self.nova()?
+                    .pair_peer(&p.endpoint, &p.code)
+                    .await
+                    .map(RpcReply::Value)
+            }
+            comet_nova::methods::NOVA_UPDATE_PEER => {
+                let p: UpdatePeerParams = parse_params(params)?;
+                let nova = self.nova()?.clone();
+                let result = nova
+                    .update_peer(&p.device_id, p.name, &p.endpoint, p.role)
+                    .map(RpcReply::Value);
+                if result.is_ok() {
+                    nova.invalidate(&p.device_id).await;
+                }
+                result
+            }
+            comet_nova::methods::NOVA_TEST_PEER => {
+                let p: IdParams = parse_params(params)?;
+                let client = self.nova()?.dial(&p.device_id).await?;
+                client
+                    .call(methods::LIST_HARNESSES, serde_json::Value::Null)
+                    .await
+                    .map(|_| RpcReply::Value(serde_json::json!({"ok": true})))
+            }
+            comet_nova::methods::NOVA_REVOKE_PEER => {
+                let p: IdParams = parse_params(params)?;
+                let nova = self.nova()?.clone();
+                let result = nova.revoke_peer(&p.device_id).map(RpcReply::Value);
+                nova.invalidate(&p.device_id).await;
+                result
+            }
+            comet_nova::methods::NOVA_FORGET_PEER => {
+                let p: IdParams = parse_params(params)?;
+                let nova = self.nova()?.clone();
+                let result = nova.forget_peer(&p.device_id).map(RpcReply::Value);
+                nova.invalidate(&p.device_id).await;
+                result
+            }
+            comet_nova::methods::NOVA_SCAN => {
+                let p: ScanParams = parse_params(params)?;
+                Ok(RpcReply::Stream(self.nova()?.scan(
+                    p.ranges,
+                    p.port,
+                    p.allow_public,
+                )?))
+            }
+            comet_nova::methods::NOVA_SYNC_HEADS => {
+                let sync = PeerSync::new(
+                    self.nova()?.clone(),
+                    self.workspace.clone(),
+                    self.doc_host.clone(),
+                );
+                RpcReply::value(
+                    &sync
+                        .heads()
+                        .map_err(|error| RpcError::Failed(error.to_string()))?,
+                )
+            }
+            comet_nova::methods::NOVA_SYNC_APPLY => {
+                let exchange: SyncExchange = parse_params(params)?;
+                let sync = PeerSync::new(
+                    self.nova()?.clone(),
+                    self.workspace.clone(),
+                    self.doc_host.clone(),
+                );
+                RpcReply::value(
+                    &sync
+                        .apply(exchange)
+                        .map_err(|error| RpcError::Failed(error.to_string()))?,
+                )
+            }
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }
@@ -1237,5 +1265,6 @@ mod tests {
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::TOOL_DIFF));
     }
 }

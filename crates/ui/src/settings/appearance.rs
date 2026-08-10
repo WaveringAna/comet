@@ -260,9 +260,7 @@ impl AppearancePage {
     fn sync_hex_edits(&mut self, cx: &mut Context<Self>) {
         let scheme = self.resolved_scheme();
         let bg_text = self.bg_input.read(cx).text().to_string();
-        if parse_hex(&bg_text).is_some()
-            && !bg_text.eq_ignore_ascii_case(default_bg_hex(scheme))
-        {
+        if parse_hex(&bg_text).is_some() && !bg_text.eq_ignore_ascii_case(default_bg_hex(scheme)) {
             let slot = match scheme {
                 ColorScheme::Dark => &mut self.bg_hex_dark,
                 ColorScheme::Light => &mut self.bg_hex_light,
@@ -272,9 +270,7 @@ impl AppearancePage {
             }
         }
         let fg_text = self.fg_input.read(cx).text().to_string();
-        if parse_hex(&fg_text).is_some()
-            && !fg_text.eq_ignore_ascii_case(default_fg_hex(scheme))
-        {
+        if parse_hex(&fg_text).is_some() && !fg_text.eq_ignore_ascii_case(default_fg_hex(scheme)) {
             let slot = match scheme {
                 ColorScheme::Dark => &mut self.fg_hex_dark,
                 ColorScheme::Light => &mut self.fg_hex_light,
@@ -348,22 +344,26 @@ impl AppearancePage {
             (true, ColorScheme::Dark) => {
                 self.bg_hex_dark = None;
                 let hex = default_bg_hex(scheme);
-                self.bg_input.update(cx, |input, cx| input.set_text(hex, cx));
+                self.bg_input
+                    .update(cx, |input, cx| input.set_text(hex, cx));
             }
             (true, ColorScheme::Light) => {
                 self.bg_hex_light = None;
                 let hex = default_bg_hex(scheme);
-                self.bg_input.update(cx, |input, cx| input.set_text(hex, cx));
+                self.bg_input
+                    .update(cx, |input, cx| input.set_text(hex, cx));
             }
             (false, ColorScheme::Dark) => {
                 self.fg_hex_dark = None;
                 let hex = default_fg_hex(scheme);
-                self.fg_input.update(cx, |input, cx| input.set_text(hex, cx));
+                self.fg_input
+                    .update(cx, |input, cx| input.set_text(hex, cx));
             }
             (false, ColorScheme::Light) => {
                 self.fg_hex_light = None;
                 let hex = default_fg_hex(scheme);
-                self.fg_input.update(cx, |input, cx| input.set_text(hex, cx));
+                self.fg_input
+                    .update(cx, |input, cx| input.set_text(hex, cx));
             }
         }
         self.commit(cx);

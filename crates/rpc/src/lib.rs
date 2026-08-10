@@ -1,5 +1,5 @@
-//! comet-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
-//! transports, plus the device-room relay transport ({s,k,to,from} frames — [`device_room`]).
+//! comet-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket and
+//! in-memory transports.
 //!
 //! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on
 //! byte transports), matching the shape of comet's Effect RPC without the Effect runtime:
@@ -19,15 +19,9 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 mod client;
-pub mod device_room;
 mod server;
 
 pub use client::{RpcClient, connect_ws};
-pub use device_room::{
-    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
-    NudgeHandler, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
-    encode_device_frame,
-};
 pub use server::{serve_connection, serve_ws_listener};
 
 /// RPC method names — single source of truth for both ends.
@@ -46,19 +40,10 @@ pub mod methods {
     /// Params are tagged `{op: createChat|createProject|renameProject|deleteProject|
     /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
-    /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
+    /// This engine's identity → `{deviceId}` (IPC-only; never peer-forwarded —
     /// the answer is about whichever engine you are directly connected to).
     pub const LOCAL_DEVICE: &str = "LocalDevice";
-    pub const AUTH_STATUS: &str = "AuthStatus";
-    // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
-    pub const SIGN_IN: &str = "SignIn";
-    pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";
-    pub const COMPLETE_SIGN_IN: &str = "CompleteSignIn";
-    pub const SIGN_OUT: &str = "SignOut";
-    pub const LIST_ORGS: &str = "ListOrgs";
-    pub const CREATE_ORG: &str = "CreateOrg";
-    pub const SELECT_ORG: &str = "SelectOrg";
-    // Repos / worktrees / folders (ControlRpc, relay-forwardable).
+    // Repos / worktrees / folders (ControlRpc, direct-peer-forwardable).
     pub const LIST_REPOS: &str = "ListRepos";
     pub const ADD_REPO: &str = "AddRepo";
     pub const CLONE_REPO: &str = "CloneRepo";
@@ -69,20 +54,20 @@ pub mod methods {
     pub const LIST_FOLDERS: &str = "ListFolders";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
-    // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
+    // Terminals (ControlRpc, direct-peer-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
     pub const WRITE_TERMINAL: &str = "WriteTerminal";
     pub const RESIZE_TERMINAL: &str = "ResizeTerminal";
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
     /// A tool result's captured output from the chat host's run journal
-    /// (ControlRpc, relay-forwardable — journals are host-local by design).
+    /// (ControlRpc, direct-peer-forwardable — journals are host-local by design).
     pub const TOOL_OUTPUT: &str = "ToolOutput";
     pub const TOOL_DIFF: &str = "ToolDiff";
     /// Checkout-diff stream for the target device's chats (DataRpc,
-    /// relay-forwardable — diffs are produced where the checkout lives).
+    /// direct-peer-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
-    // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
+    // Agent accounts (ControlRpc, direct-peer-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
@@ -90,7 +75,7 @@ pub mod methods {
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
     pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
-    // Pi runtime settings (ControlRpc, relay-forwardable — configuration and
+    // Pi runtime settings (ControlRpc, direct-peer-forwardable — configuration and
     // credentials belong to the device that launches Pi).
     pub const GET_PI_SETTINGS: &str = "GetPiSettings";
     pub const SET_PI_SETTING: &str = "SetPiSetting";
@@ -98,11 +83,11 @@ pub mod methods {
     pub const REMOVE_PI_CREDENTIAL: &str = "RemovePiCredential";
     pub const SET_PI_OPENAI_COMPATIBLE: &str = "SetPiOpenAiCompatible";
     pub const PI_PACKAGE_ACTION: &str = "PiPackageAction";
-    // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
+    // Uploads / attachments (ControlRpc, direct-peer-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
-    // Updates (ControlRpc, relay-forwardable — a device reports/applies its own
+    // Updates (ControlRpc, direct-peer-forwardable — a device reports/applies its own
     // binary's update). Stream: current UpdateStatus, then every change.
     pub const UPDATE_STATUS: &str = "UpdateStatus";
     /// Download + apply the newest release on the target device (symlink-managed

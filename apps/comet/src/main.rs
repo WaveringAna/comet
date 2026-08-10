@@ -1,8 +1,5 @@
-//! comet — headed by default; `comet headless` runs the engine alone. Auth is
-//! decoupled from the daemon: `comet login` persists the session and exits, so a
-//! service-managed `comet headless` only ever loads saved credentials.
+//! nova — headed by default; `comet headless` runs the local engine alone.
 
-mod auth_cli;
 mod daemon;
 mod update_cli;
 
@@ -19,12 +16,6 @@ struct Cli {
 enum Command {
     /// Run the engine without a UI (VPS / remote device mode).
     Headless,
-    /// Sign in (paste-code flow), persist the session, and exit.
-    Login,
-    /// Remove the saved session.
-    Logout,
-    /// Show auth + engine status (exits nonzero when a sign-in is needed).
-    Status,
     /// Manage `comet headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -57,15 +48,10 @@ enum DaemonCommand {
     Status,
 }
 
-/// the pi orchestrator is local-first. an edge url is retained only for the
-/// compatibility sync path when explicitly configured with a bearer.
-const DEFAULT_EDGE_URL: &str = "http://127.0.0.1:1";
-
-fn edge_url_from_env() -> String {
-    std::env::var("COMET_EDGE_URL")
+fn update_url_from_env() -> Option<String> {
+    std::env::var("NOVA_UPDATE_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_EDGE_URL.into())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -100,21 +86,11 @@ fn main() -> anyhow::Result<()> {
                 engine.run().await
             })
         }
-        Some(Command::Login) => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(auth_cli::login(engine_config_from_env()))
-        }
-        Some(Command::Logout) => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(auth_cli::logout(engine_config_from_env()))
-        }
-        Some(Command::Status) => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(auth_cli::status(engine_config_from_env()))
-        }
         Some(Command::Update { check }) => {
+            let update_url = update_url_from_env()
+                .ok_or_else(|| anyhow::anyhow!("set NOVA_UPDATE_URL to the Nova release server"))?;
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+            runtime.block_on(update_cli::update(&update_url, check))
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),
@@ -125,7 +101,6 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Status => daemon::status(),
         },
         None => {
-            let edge_token = std::env::var("COMET_EDGE_TOKEN").ok();
             // Headed: the UI probes COMET_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
             comet_ui::run_app(comet_ui::UiConfig {
@@ -136,11 +111,8 @@ fn main() -> anyhow::Result<()> {
                     .ok()
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(27654),
-                edge_url: edge_url_from_env(),
-                // the ui is a local pi viewport; no hosted auth gate is needed.
-                workos_client_id: None,
-                edge_token,
-                org_id: std::env::var("COMET_ORG_ID").ok(),
+                nova_port: nova_port_from_env(),
+                update_url: update_url_from_env(),
                 default_harness: comet_ui::HarnessId::Pi,
             });
             Ok(())
@@ -148,29 +120,27 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// The env-resolved engine configuration shared by `headless`, `login`,
-/// `logout`, and `status` — one resolution so the CLI auth commands always
-/// operate on the exact session the daemon will load.
+/// Environment-resolved configuration shared by headed and headless engines.
 fn engine_config_from_env() -> comet_engine::EngineConfig {
-    // Dev-mode bearer (no WorkOS): an explicit token enables sync.
-    let edge_token = std::env::var("COMET_EDGE_TOKEN").ok();
     comet_engine::EngineConfig {
         data_dir: std::env::var_os("COMET_DATA_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(dirs_data_dir),
-        edge_url: edge_url_from_env(),
+        update_url: update_url_from_env(),
         ipc_port: std::env::var("COMET_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(27654),
+        nova_port: nova_port_from_env(),
         default_harness: harness_from_env(),
-        // WorkOS mode: the signed-in session's org wins; COMET_ORG_ID (dev
-        // default "dev-org") scopes the workspace room otherwise.
-        org_id: std::env::var("COMET_ORG_ID").ok(),
-        // pi sessions are local and do not require the hosted auth backend.
-        workos_client_id: None,
-        edge_token,
     }
+}
+
+fn nova_port_from_env() -> u16 {
+    std::env::var("NOVA_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(27655)
 }
 
 /// `COMET_HARNESS` (kebab-case id) picks the default harness for chats without a

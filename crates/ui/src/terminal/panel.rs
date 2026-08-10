@@ -1185,7 +1185,7 @@ impl TerminalPanel {
                         entry.feed_outputs.insert(tool_owned, output);
                         cx.notify();
                     }
-                    // Transient RPC/relay failure (Err): left UNCACHED and no
+                    // Transient RPC/peer-link failure (Err): left UNCACHED and no
                     // notify, or render would refire in a hot loop — the next
                     // natural render retries.
                 }

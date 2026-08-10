@@ -18,6 +18,7 @@ pub mod archived;
 pub mod composer;
 pub mod developer;
 pub mod devices;
+pub mod nova;
 pub mod pi;
 pub mod shortcuts;
 pub mod widgets;

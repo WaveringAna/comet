@@ -1,8 +1,7 @@
 //! comet-doc — session & workspace Loro doc schemas and the typed mirror layer.
 //!
-//! Port of comet's `packages/session-doc`. The schema SHAPE (container names, part maps with
-//! LoroText bodies, command entries) is kept identical to the TS implementation so the edge's
-//! tail materializer and any TS peer remain compatible.
+//! The persisted schema shape includes stable container names, part maps with `LoroText`
+//! bodies, and command entries. Paired Nova Engines exchange this data directly.
 //!
 //! Load-bearing invariant (measured in comet, `oplog-shape.test.ts`): message parts are a
 //! LoroList of part maps whose text bodies live in **LoroText** — streaming appends RLE-merge at

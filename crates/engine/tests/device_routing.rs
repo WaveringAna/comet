@@ -1,124 +1,60 @@
-//! M4b integration: `targetDeviceId` routing — engine A forwards device-addressed RPCs
-//! to engine B through B's device-room relay (host relay on B, link cache on A), with a
-//! minimal in-memory device-room standing in for the edge DO (route client→host with
-//! `from` stamped, host→client by `to`).
+//! Integration coverage for device-addressed RPCs over paired Nova listeners.
 
 // tungstenite's `accept_hdr_async` callback signature fixes the Err type as a full
 // `Response` — its size is not ours to shrink.
 #![allow(clippy::result_large_err)]
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use futures::stream::BoxStream;
-use futures::{SinkExt, StreamExt};
-use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::tungstenite::handshake::server::{
-    Request as WsRequest, Response as WsResponse,
-};
 
 use comet_doc::SessionCommandPayload;
+use comet_engine::peer_sync::PeerSync;
 use comet_engine::{EngineCore, HarnessRegistry};
 use comet_harness::{Harness, HarnessError, RunControls};
 use comet_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
-use comet_rpc::{
-    DeviceFrameHeader, LinkCache, LinkCacheConfig, StaticToken, decode_device_frame,
-    encode_device_frame, methods,
-};
+use comet_rpc::methods;
 
 // ---------------------------------------------------------------------------
-// Minimal in-memory device room (route-only subset of the DO semantics)
+// Direct listener fixtures
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-struct RelayState {
-    host: Option<mpsc::UnboundedSender<Vec<u8>>>,
-    clients: HashMap<String, mpsc::UnboundedSender<Vec<u8>>>,
+async fn start_nova_listener(core: &EngineCore) -> (String, tokio::task::JoinHandle<()>) {
+    let endpoint = core
+        .nova
+        .bind_endpoint(false)
+        .await
+        .expect("bind iroh endpoint");
+    let ticket = core.nova.ticket().expect("iroh ticket");
+    let service = core.rpc_service();
+    let trust = core.nova.trust();
+    let identity = core.nova.identity();
+    let pairing = core.nova.pairing();
+    let task = tokio::spawn(comet_nova::transport::serve_iroh_endpoint(
+        endpoint, service, trust, identity, pairing,
+    ));
+    (ticket, task)
 }
 
-async fn fake_device_room() -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
-    let url = format!(
-        "http://127.0.0.1:{}",
-        listener.local_addr().expect("addr").port()
-    );
-    let state = Arc::new(Mutex::new(RelayState::default()));
-    let task = tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let state = state.clone();
-            tokio::spawn(async move {
-                let mut uri = String::new();
-                let Ok(ws) = tokio_tungstenite::accept_hdr_async(
-                    stream,
-                    |req: &WsRequest, res: WsResponse| {
-                        uri = req.uri().to_string();
-                        Ok(res)
-                    },
-                )
-                .await
-                else {
-                    return;
-                };
-                let query = uri.split_once('?').map(|(_, q)| q).unwrap_or("");
-                let is_host = query.contains("role=host");
-                let conn_id = query
-                    .split('&')
-                    .find_map(|kv| kv.strip_prefix("connId="))
-                    .unwrap_or("anon")
-                    .to_string();
-                let (mut sink, mut ws_stream) = ws.split();
-                let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-                {
-                    let mut st = state.lock().expect("lock");
-                    if is_host {
-                        st.host = Some(tx);
-                    } else {
-                        st.clients.insert(conn_id.clone(), tx);
-                    }
-                }
-                let writer = tokio::spawn(async move {
-                    while let Some(bytes) = rx.recv().await {
-                        if sink.send(WsMessage::Binary(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-                while let Some(Ok(message)) = ws_stream.next().await {
-                    let WsMessage::Binary(bytes) = message else {
-                        continue;
-                    };
-                    let Ok((header, payload)) = decode_device_frame(&bytes) else {
-                        break;
-                    };
-                    let st = state.lock().expect("lock");
-                    if is_host {
-                        let Some(to) = header.to else { continue };
-                        if let Some(client) = st.clients.get(&to) {
-                            let stripped = DeviceFrameHeader::new(header.s, header.k);
-                            let _ = client
-                                .send(encode_device_frame(&stripped, &payload).expect("encode"));
-                        }
-                    } else if let Some(host) = &st.host {
-                        let mut routed = DeviceFrameHeader::new(header.s, header.k);
-                        routed.from = Some(conn_id.clone());
-                        let _ = host.send(encode_device_frame(&routed, &payload).expect("encode"));
-                    }
-                }
-                writer.abort();
-            });
-        }
-    });
-    (url, task)
+async fn pair_engines(
+    core_a: &EngineCore,
+    _endpoint_a: &str,
+    core_b: &EngineCore,
+    endpoint_b: &str,
+) {
+    let pairing = core_b.nova.begin_pairing();
+    let code = pairing["code"].as_str().expect("pairing code").to_string();
+    core_a
+        .nova
+        .pair_peer(endpoint_b, &code)
+        .await
+        .expect("pair A with B");
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +121,7 @@ fn registry() -> Arc<HarnessRegistry> {
 fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     std::fs::create_dir_all(dir).expect("create data dir");
     std::fs::write(dir.join("device-id"), device_id).expect("write device id");
-    EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
+    EngineCore::assemble_on_port(dir, registry(), HarnessId::Mock, 0).expect("engine assembles")
 }
 
 // ---------------------------------------------------------------------------
@@ -193,20 +129,14 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn target_device_id_routes_over_the_relay() {
-    let (relay_url, _relay) = fake_device_room().await;
+async fn target_device_id_routes_over_paired_nova_engines() {
     let dirs = tempfile::tempdir().expect("tempdir");
 
-    // Engine B hosts its device room on the fake relay.
     let core_b = assemble(&dirs.path().join("b"), "device-b");
-    let _host = core_b.start_host_relay(&relay_url);
-
-    // Engine A dials peers through the same relay.
     let core_a = assemble(&dirs.path().join("a"), "device-a");
-    let mut link_config =
-        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
-    link_config.probe_timeout = Duration::from_secs(5);
-    core_a.set_links(LinkCache::new(link_config));
+    let (endpoint_a, listener_a) = start_nova_listener(&core_a).await;
+    let (endpoint_b, listener_b) = start_nova_listener(&core_b).await;
+    pair_engines(&core_a, &endpoint_a, &core_b, &endpoint_b).await;
 
     // Seed a transcript on B only — proves reads come from B, not A's (empty) doc.
     let handle_b = core_b.doc_host.open("chat-remote").expect("open chat on B");
@@ -226,31 +156,27 @@ async fn target_device_id_routes_over_the_relay() {
         .expect("local list");
     assert!(local.is_array());
 
-    // Unary forward: ListHarnesses answered by B through the relay. (The host relay
-    // dials with backoff; retry until its session is up.)
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    let remote = loop {
-        match client
-            .call(
-                methods::LIST_HARNESSES,
-                serde_json::json!({ "targetDeviceId": "device-b" }),
-            )
-            .await
-        {
-            Ok(value) => break value,
-            Err(err) => {
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "relay never came up: {err}"
-                );
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        }
-    };
+    // Unary forwarding works in both directions over the paired listeners.
+    let remote = client
+        .call(
+            methods::LIST_HARNESSES,
+            serde_json::json!({ "targetDeviceId": "device-b" }),
+        )
+        .await
+        .expect("direct call from A to B");
     assert!(remote.is_array());
+    let client_b = comet_rpc::memory_client(core_b.rpc_service());
+    let reverse = client_b
+        .call(
+            methods::LIST_HARNESSES,
+            serde_json::json!({ "targetDeviceId": "device-a" }),
+        )
+        .await
+        .expect("direct call from B to A");
+    assert!(reverse.is_array());
 
     // The add-project picker's exact call: browse a folder ON B from A's IPC
-    // surface (ListFolders + targetDeviceId, relay-forwarded).
+    // surface (ListFolders + targetDeviceId, direct-peer-forwarded).
     let browse_dir = dirs.path().join("b-folders");
     std::fs::create_dir_all(browse_dir.join("project-x")).expect("browse fixture");
     let listing = client
@@ -262,7 +188,7 @@ async fn target_device_id_routes_over_the_relay() {
             }),
         )
         .await
-        .expect("remote ListFolders");
+        .expect("direct ListFolders");
     let names: Vec<&str> = listing["entries"]
         .as_array()
         .expect("entries array")
@@ -332,24 +258,130 @@ async fn target_device_id_routes_over_the_relay() {
         "command must live in B's doc"
     );
 
+    // Pi configuration uses the same device selector and is deliberately available
+    // to an admin peer. Project scope keeps the test isolated from the user's config.
+    let pi_project = dirs.path().join("b-pi-project");
+    std::fs::create_dir_all(&pi_project).expect("pi project fixture");
+    let pi = client
+        .call(
+            methods::SET_PI_SETTING,
+            serde_json::json!({
+                "scope": "project",
+                "projectPath": pi_project,
+                "key": "transport",
+                "value": "sse",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("configure Pi on B");
+    assert_eq!(pi["settings"]["transport"], "sse");
+    assert!(pi_project.join(".pi/settings.json").exists());
+
+    listener_a.abort();
+    listener_b.abort();
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paired_engines_converge_workspace_and_chat_docs_directly() {
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    let (endpoint_a, listener_a) = start_nova_listener(&core_a).await;
+    let (endpoint_b, listener_b) = start_nova_listener(&core_b).await;
+    pair_engines(&core_a, &endpoint_a, &core_b, &endpoint_b).await;
+
+    core_a
+        .workspace
+        .create_project("project-a", "device-a", "/tmp/a", None, false)
+        .expect("project A");
+    core_a
+        .workspace
+        .create_chat("chat-a", "project-a", None, None)
+        .expect("chat A");
+    core_a
+        .doc_host
+        .open("chat-a")
+        .expect("open A chat")
+        .write_user_message("message-a", "from A", 1_000)
+        .expect("write A transcript");
+
+    core_b
+        .workspace
+        .create_project("project-b", "device-b", "/tmp/b", None, false)
+        .expect("project B");
+    core_b
+        .workspace
+        .create_chat("chat-b", "project-b", None, None)
+        .expect("chat B");
+    core_b
+        .doc_host
+        .open("chat-b")
+        .expect("open B chat")
+        .write_user_message("message-b", "from B", 2_000)
+        .expect("write B transcript");
+
+    PeerSync::new(
+        core_a.nova.clone(),
+        core_a.workspace.clone(),
+        core_a.doc_host.clone(),
+    )
+    .sync_peer("device-b")
+    .await
+    .expect("direct sync exchange");
+
+    for core in [&core_a, &core_b] {
+        let project_ids: Vec<_> = core
+            .workspace
+            .read_projects()
+            .expect("projects")
+            .into_iter()
+            .map(|project| project.id)
+            .collect();
+        assert!(project_ids.contains(&"project-a".to_string()));
+        assert!(project_ids.contains(&"project-b".to_string()));
+        assert!(
+            core.doc_host
+                .open("chat-a")
+                .expect("synced A chat")
+                .doc()
+                .read_entries()
+                .expect("A entries")
+                .iter()
+                .any(|entry| entry.id == "message-a")
+        );
+        assert!(
+            core.doc_host
+                .open("chat-b")
+                .expect("synced B chat")
+                .doc()
+                .read_entries()
+                .expect("B entries")
+                .iter()
+                .any(|entry| entry.id == "message-b")
+        );
+    }
+
+    listener_a.abort();
+    listener_b.abort();
     core_a.shutdown().await;
     core_b.shutdown().await;
 }
 
 /// M5: terminals are device-addressable — OpenTerminal/WriteTerminal forward as
-/// unary calls and SubscribeTerminal proxies its stream through the relay.
+/// unary calls and SubscribeTerminal proxies its stream through Nova.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminal_stream_proxies_over_the_relay() {
+async fn terminal_stream_proxies_over_nova() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
-    let (relay_url, _relay) = fake_device_room().await;
     let dirs = tempfile::tempdir().expect("tempdir");
     let cwd = dirs.path().join("work");
     std::fs::create_dir_all(&cwd).expect("cwd");
 
-    // Engine B hosts its device room; its chat row (via its project) pins the
-    // terminal cwd.
+    // Engine B's chat row (via its project) pins the terminal cwd.
     let core_b = assemble(&dirs.path().join("b"), "device-b");
     core_b
         .workspace
@@ -365,40 +397,24 @@ async fn terminal_stream_proxies_over_the_relay() {
         .workspace
         .create_chat("chat-term", "project-term", None, None)
         .expect("chat row on B");
-    let _host = core_b.start_host_relay(&relay_url);
-
     let core_a = assemble(&dirs.path().join("a"), "device-a");
-    let mut link_config =
-        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
-    link_config.probe_timeout = Duration::from_secs(5);
-    core_a.set_links(LinkCache::new(link_config));
+    let (endpoint_a, listener_a) = start_nova_listener(&core_a).await;
+    let (endpoint_b, listener_b) = start_nova_listener(&core_b).await;
+    pair_engines(&core_a, &endpoint_a, &core_b, &endpoint_b).await;
     let client = comet_rpc::memory_client(core_a.rpc_service());
 
-    // OpenTerminal forwards to B once the relay session is up.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    let session = loop {
-        match client
-            .call(
-                methods::OPEN_TERMINAL,
-                serde_json::json!({
-                    "chatId": "chat-term",
-                    "cols": 80,
-                    "rows": 24,
-                    "targetDeviceId": "device-b",
-                }),
-            )
-            .await
-        {
-            Ok(session) => break session,
-            Err(err) => {
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "relay never came up: {err}"
-                );
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        }
-    };
+    let session = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "chat-term",
+                "cols": 80,
+                "rows": 24,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("open terminal on B");
     let terminal_id = session["id"].as_str().expect("terminal id").to_string();
     assert_eq!(
         session["cwd"].as_str(),
@@ -406,7 +422,7 @@ async fn terminal_stream_proxies_over_the_relay() {
         "cwd from B's chat row"
     );
 
-    // SubscribeTerminal: the stream is proxied item-by-item through the relay.
+    // SubscribeTerminal: the stream is proxied item-by-item over the direct peer link.
     let mut stream = client
         .subscribe(
             methods::SUBSCRIBE_TERMINAL,
@@ -419,7 +435,7 @@ async fn terminal_stream_proxies_over_the_relay() {
             methods::WRITE_TERMINAL,
             serde_json::json!({
                 "terminalId": terminal_id,
-                "data": BASE64.encode("echo r3lay-$((20+2))\n"),
+                "data": BASE64.encode("echo nova-$((20+2))\n"),
                 "targetDeviceId": "device-b",
             }),
         )
@@ -438,7 +454,7 @@ async fn terminal_stream_proxies_over_the_relay() {
                 .expect("valid base64");
             transcript.extend(bytes);
         }
-        if String::from_utf8_lossy(&transcript).contains("r3lay-22") {
+        if String::from_utf8_lossy(&transcript).contains("nova-22") {
             break;
         }
     }
@@ -451,12 +467,14 @@ async fn terminal_stream_proxies_over_the_relay() {
         .await
         .expect("remote close");
 
+    listener_a.abort();
+    listener_b.abort();
     core_a.shutdown().await;
     core_b.shutdown().await;
 }
 
 #[tokio::test]
-async fn remote_target_without_links_fails_clearly() {
+async fn unpaired_remote_target_fails_clearly() {
     let dirs = tempfile::tempdir().expect("tempdir");
     let core = assemble(&dirs.path().join("solo"), "device-solo");
     let client = comet_rpc::memory_client(core.rpc_service());
@@ -467,9 +485,6 @@ async fn remote_target_without_links_fails_clearly() {
         )
         .await
         .expect_err("offline forward must fail");
-    assert!(
-        err.to_string().contains("remote routing unavailable"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("is not paired"), "got: {err}");
     core.shutdown().await;
 }

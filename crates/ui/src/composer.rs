@@ -2696,7 +2696,7 @@ impl Composer {
                 // (a plain cwd override — multiple sessions share one
                 // worktree), or a fresh isolated worktree created off the
                 // picked base ref (CreateWorktree on send, targeted at the
-                // project's device; the RPC relay-forwards).
+                // project's device; Nova routes the RPC directly).
                 let mut cwd = if is_new {
                     project_path.clone()
                 } else {

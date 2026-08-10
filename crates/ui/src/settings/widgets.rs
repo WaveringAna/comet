@@ -113,6 +113,16 @@ pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
         .child(title.into())
 }
 
+/// The quiet supporting copy below a row title.
+pub fn row_description(theme: &Theme, description: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .mt(px(4.0))
+        .min_w_0()
+        .text_size(px(11.5))
+        .text_color(theme.text_muted.opacity(0.65))
+        .child(description.into())
+}
+
 /// The quiet meta line under a row title: `text-[11.5px]
 /// text-muted-foreground/65` fragments joined by dots.
 pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {

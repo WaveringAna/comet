@@ -192,7 +192,10 @@ pub fn merge_models(displayed: &mut Vec<Model>, fresh: Vec<Model>) -> bool {
 /// The same silent merge for harness descriptors: a new harness appears, a
 /// removed one drops — the picker's provider list never flashes. Descriptors
 /// keep registry order (no sort). Returns whether the displayed list changed.
-pub fn merge_harnesses(displayed: &mut Vec<HarnessDescriptor>, fresh: Vec<HarnessDescriptor>) -> bool {
+pub fn merge_harnesses(
+    displayed: &mut Vec<HarnessDescriptor>,
+    fresh: Vec<HarnessDescriptor>,
+) -> bool {
     let mut changed = false;
     let fresh_map: HashMap<HarnessId, &HarnessDescriptor> =
         fresh.iter().map(|d| (d.id, d)).collect();
@@ -1091,8 +1094,7 @@ impl Pickers {
                     Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
                         Ok(mut fresh) => {
                             sort_models(&mut fresh);
-                            if let Some(Loadable::Ready(list)) = pickers.models.get_mut(&harness)
-                            {
+                            if let Some(Loadable::Ready(list)) = pickers.models.get_mut(&harness) {
                                 changed = merge_models(list, fresh.clone());
                             } else {
                                 pickers
@@ -1109,18 +1111,19 @@ impl Pickers {
                         Err(err) => {
                             // A failed pull keeps any displayed rows — never
                             // flip a populated list to an error row mid-open.
-                            if !matches!(
-                                pickers.models.get(&harness),
-                                Some(Loadable::Ready(_))
-                            ) {
-                                pickers.models.insert(harness, Loadable::Error(err.to_string()));
+                            if !matches!(pickers.models.get(&harness), Some(Loadable::Ready(_))) {
+                                pickers
+                                    .models
+                                    .insert(harness, Loadable::Error(err.to_string()));
                                 changed = true;
                             }
                         }
                     },
                     Err(err) => {
                         if !matches!(pickers.models.get(&harness), Some(Loadable::Ready(_))) {
-                            pickers.models.insert(harness, Loadable::Error(err.to_string()));
+                            pickers
+                                .models
+                                .insert(harness, Loadable::Error(err.to_string()));
                             changed = true;
                         }
                     }
@@ -1145,7 +1148,7 @@ impl Pickers {
     }
 
     /// ListRefs for the selected SPACE's folder — targeted at the project's
-    /// device (relay-forwarded when remote), keyed/invalidated by project id.
+    /// device (routed over Nova when remote), keyed/invalidated by project id.
     /// Rows carry checkout state (`current`, `worktreePath`) so the picker can
     /// tag refs and the checkout-kind selector can offer worktree reuse.
     fn ensure_refs(&mut self, force: bool, cx: &mut Context<Self>) {
@@ -1245,7 +1248,7 @@ impl Pickers {
     }
 
     /// Draft-mode checkout switch: `git checkout` in the SPACE's folder
-    /// (relay-forwarded for remote projects). Success records the pick and
+    /// (routed over Nova for remote projects). Success records the pick and
     /// refreshes tags; failure keeps the popover open with git's message.
     fn switch_draft_ref(&mut self, row: RepoRef, cx: &mut Context<Self>) {
         if self.switching.is_some() {
@@ -1306,7 +1309,7 @@ impl Pickers {
     ///   run there starts a fresh harness conversation — the transcript
     ///   itself carries on.
     /// - Otherwise → `git checkout` in the SESSION's own cwd (`SwitchRef`,
-    ///   relay-forwarded to the host device). The host's HEAD watcher
+    ///   routed over Nova to the host device). The host's HEAD watcher
     ///   reconciles `chat.branch` to every device. Errors (dirty tree, ref
     ///   held by the MAIN checkout) keep the popover open with git's message.
     fn switch_session_ref(&mut self, row: RepoRef, cx: &mut Context<Self>) {
@@ -3421,8 +3424,14 @@ mod tests {
         let mut displayed = vec![model("a", "A"), model("b", "B"), model("c", "C")];
 
         // No diff: nothing changes, nothing is reported changed.
-        assert!(!merge_models(&mut displayed, vec![model("a", "A"), model("c", "C"), model("b", "B")]));
-        assert_eq!(displayed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert!(!merge_models(
+            &mut displayed,
+            vec![model("a", "A"), model("c", "C"), model("b", "B")]
+        ));
+        assert_eq!(
+            displayed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
 
         // A vanished model drops; a changed label updates in place; a new
         // model appends — all in one pull.
@@ -3430,7 +3439,10 @@ mod tests {
             &mut displayed,
             vec![model("a", "A!"), model("b", "B"), model("d", "D")],
         ));
-        assert_eq!(displayed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b", "d"]);
+        assert_eq!(
+            displayed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "d"]
+        );
         assert_eq!(displayed[0].label, "A!");
 
         // An empty fresh catalog silently empties the list.
@@ -3448,7 +3460,10 @@ mod tests {
             options: vec![],
         };
         // Displayed order is discovery order — stale from an old catalog.
-        let mut displayed = vec![model("openai-codex/gpt-5.4"), model("deepseek/deepseek-v4-pro")];
+        let mut displayed = vec![
+            model("openai-codex/gpt-5.4"),
+            model("deepseek/deepseek-v4-pro"),
+        ];
         // The pull brings a newer flagship that outranks the first row.
         merge_models(
             &mut displayed,
@@ -3460,7 +3475,11 @@ mod tests {
         );
         assert_eq!(
             displayed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            ["openai-codex/gpt-5.6-sol", "openai-codex/gpt-5.4", "deepseek/deepseek-v4-pro"]
+            [
+                "openai-codex/gpt-5.6-sol",
+                "openai-codex/gpt-5.4",
+                "deepseek/deepseek-v4-pro"
+            ]
         );
     }
 
@@ -3474,14 +3493,23 @@ mod tests {
             reasoning_levels: vec![],
         };
         let mut displayed = vec![descriptor(HarnessId::Pi)];
-        assert!(!merge_harnesses(&mut displayed, vec![descriptor(HarnessId::Pi)]));
+        assert!(!merge_harnesses(
+            &mut displayed,
+            vec![descriptor(HarnessId::Pi)]
+        ));
         assert!(merge_harnesses(
             &mut displayed,
             vec![descriptor(HarnessId::Pi), descriptor(HarnessId::ClaudeCode)],
         ));
         assert_eq!(displayed.len(), 2);
-        assert!(merge_harnesses(&mut displayed, vec![descriptor(HarnessId::ClaudeCode)]));
-        assert_eq!(displayed.iter().map(|d| d.id).collect::<Vec<_>>(), [HarnessId::ClaudeCode]);
+        assert!(merge_harnesses(
+            &mut displayed,
+            vec![descriptor(HarnessId::ClaudeCode)]
+        ));
+        assert_eq!(
+            displayed.iter().map(|d| d.id).collect::<Vec<_>>(),
+            [HarnessId::ClaudeCode]
+        );
     }
 
     #[test]

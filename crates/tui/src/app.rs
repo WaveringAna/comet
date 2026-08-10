@@ -21,9 +21,7 @@ use comet_proto::view::{
     self, CheckoutKind, CheckoutPlan, ConnectionStatus, GatePhase, Indicator, display_status,
     format_time_ago,
 };
-use comet_proto::{
-    AuthState, Chat, ChatIndicator, Device, Project, RunRequest, SandboxLevel, Session,
-};
+use comet_proto::{Chat, ChatIndicator, Device, Project, RunRequest, SandboxLevel, Session};
 use comet_rpc::methods;
 
 use crate::composer::Composer;
@@ -82,7 +80,7 @@ fn apply_edit(buffer: &mut Composer, edit: Edit) {
 const NOTICE_TTL: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// How long a just-created chat's selection is protected from being healed away
-/// while its row is still in flight. Long enough for a slow relay-forwarded
+/// while its row is still in flight. Long enough for a slow direct-peer-forwarded
 /// mutation, short enough that a `createChat` which genuinely failed doesn't
 /// leave the viewport pointed at a session that will never exist.
 const PENDING_CHAT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
@@ -133,8 +131,6 @@ pub enum Row {
     Empty { label: String },
     /// Vertical air between sections (the desktop sidebar's 12px lead-in).
     Blank,
-    /// The signed-in user, pinned at the bottom.
-    User { name: String, email: String },
 }
 
 impl Row {
@@ -154,15 +150,6 @@ impl Row {
             // rather than a list, and a terminal has no half-row to spend
             // instead. The breathing room comes from the pane's own padding.
             Row::Chat { .. } => 2,
-            // An account with no display name is one line, not one line and a
-            // blank: the second row exists to carry the email *under* a name.
-            Row::User { name, email } => {
-                if name.is_empty() || email.is_empty() || name == email {
-                    1
-                } else {
-                    2
-                }
-            }
             _ => 1,
         }
     }
@@ -354,8 +341,6 @@ pub struct App {
     pub focus: Focus,
     pub connection: ConnectionStatus,
     pub attachment: Option<Attachment>,
-    pub auth: Option<AuthState>,
-
     pub devices: Vec<Device>,
     pub projects: Vec<Project>,
     /// Sorted by `comet_proto::view::sort_chats`; includes archived rows.
@@ -430,7 +415,6 @@ impl App {
             focus: Focus::Composer,
             connection: ConnectionStatus::Connecting,
             attachment: None,
-            auth: None,
             devices: Vec::new(),
             projects: Vec::new(),
             chats: Vec::new(),
@@ -480,12 +464,6 @@ impl App {
             }
             Update::Attached(attachment) => {
                 self.attachment = Some(attachment);
-                Vec::new()
-            }
-            Update::Auth(state) => {
-                self.auth = Some(*state);
-                // The user row appears once the engine reports a session.
-                self.rebuild_rows();
                 Vec::new()
             }
             Update::Devices(devices) => {
@@ -656,7 +634,7 @@ impl App {
             }
             Action::Reconnect => vec![Command::Reconnect],
 
-            // Blanks, section headers and the user row are decoration: the
+            // Blanks and section headers are decoration: the
             // cursor steps over them rather than stopping on nothing.
             Action::ListUp => {
                 if let Some(at) = self.next_selectable(self.cursor, -1) {
@@ -783,11 +761,9 @@ impl App {
             Some(Row::Project { id, .. }) => self.activate_project(id),
             // Decoration isn't selectable, so nothing else can be under the
             // cursor; a defensive arm keeps this total.
-            Some(Row::Blank)
-            | Some(Row::Section { .. })
-            | Some(Row::Empty { .. })
-            | Some(Row::User { .. })
-            | None => Vec::new(),
+            Some(Row::Blank) | Some(Row::Section { .. }) | Some(Row::Empty { .. }) | None => {
+                Vec::new()
+            }
             Some(Row::Chat { id, project_id, .. }) => {
                 if project_id.is_some() {
                     self.selected_project = project_id.clone();
@@ -1287,15 +1263,6 @@ impl App {
             .and_then(|row| row.id())
             .map(str::to_string);
         let now = Utc::now();
-        let user_row = self.auth_user().map(|user| {
-            (
-                user.name
-                    .clone()
-                    .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| user.email.clone()),
-                user.email.clone(),
-            )
-        });
 
         // Aggregate attention per project: the most urgent live member wins, so a
         // running session stays visible when the Sessions list is scrolled off.
@@ -1374,14 +1341,6 @@ impl App {
                 archived: chat.archived,
                 activity: chat.last_message_at.or(Some(chat.created_at)),
             });
-        }
-
-        if let Some((name, email)) = user_row {
-            // Air, not a hairline: the user row is already pinned to the bottom
-            // of the pane, so a rule above it is a second answer to a question
-            // position has already answered.
-            rows.push(Row::Blank);
-            rows.push(Row::User { name, email });
         }
 
         self.rows = rows;
@@ -1704,7 +1663,7 @@ impl App {
     }
 
     pub fn gate(&self) -> GatePhase {
-        view::gate_phase(&self.connection, self.auth.as_ref())
+        view::gate_phase(&self.connection)
     }
 
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
@@ -1721,14 +1680,6 @@ impl App {
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|chat| chat.id == id)
-    }
-
-    /// The signed-in user, when the engine reports one.
-    pub fn auth_user(&self) -> Option<&comet_proto::UserProfile> {
-        match self.auth.as_ref()? {
-            AuthState::SignedIn { user, .. } | AuthState::NeedsOrganization { user } => Some(user),
-            AuthState::SignedOut => None,
-        }
     }
 
     /// True while something on screen is animating: a live session, or the boot
@@ -2971,16 +2922,13 @@ mod tests {
     }
 
     #[test]
-    fn gate_follows_connection_then_auth() {
+    fn gate_follows_connection() {
         let mut app = App::with_theme(crate::theme::Theme::dark());
         assert_eq!(app.gate(), GatePhase::Loading);
         app.apply(Update::Connection(ConnectionStatus::Failed("boom".into())));
         assert_eq!(app.gate(), GatePhase::Failed("boom".into()));
         app.apply(Update::Connection(ConnectionStatus::Ready));
-        // No auth frame yet (dev-mode engine) gates nothing.
         assert_eq!(app.gate(), GatePhase::Ready);
-        app.apply(Update::Auth(Box::new(AuthState::SignedOut)));
-        assert_eq!(app.gate(), GatePhase::SignIn);
     }
 
     #[test]

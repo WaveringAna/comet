@@ -28,11 +28,9 @@ use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
-use comet_engine::{Engine, EngineConfig, EngineRuntime, rpc::AuthRpc};
-use comet_proto::{
-    AuthState, Chat, ChatIndicator, Device, HarnessId, Project, Session, SessionStatus,
-};
-use comet_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
+use comet_engine::{Engine, EngineConfig, EngineRuntime};
+use comet_proto::{Chat, ChatIndicator, Device, HarnessId, Project, Session, SessionStatus};
+use comet_rpc::{RpcClient, connect_ws, memory_client, methods};
 
 // ---------------------------------------------------------------------------
 // Hot reload (dev-supervisor handoff). The Settings → Developer toggle or
@@ -76,14 +74,10 @@ pub struct EngineBootConfig {
     pub data_dir: PathBuf,
     /// Localhost IPC port to probe / serve.
     pub ipc_port: u16,
-    /// Edge base URL for the embedded engine.
-    pub edge_url: String,
-    /// Bearer for edge room joins; `None` runs offline.
-    pub edge_token: Option<String>,
-    /// Workspace org override for explicit dev-mode runs.
-    pub org_id: Option<String>,
-    /// WorkOS client id for production authentication.
-    pub workos_client_id: Option<String>,
+    /// Direct Nova listener port used when this window embeds the engine.
+    pub nova_port: u16,
+    /// Optional Nova release server.
+    pub update_url: Option<String>,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
 }
@@ -111,8 +105,6 @@ trait EngineBackend: Send + Sync {
 /// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
 struct InProcessEngine {
     runtime: Arc<tokio::sync::Mutex<Option<EngineRuntime>>>,
-    boot_task: tokio::task::JoinHandle<()>,
-    refresh_task: tokio::task::JoinHandle<()>,
     /// Serves this engine to other viewports over the IPC port. `None` when the
     /// port was already taken — the window still works over its own transport.
     ipc_task: Option<tokio::task::JoinHandle<()>>,
@@ -128,7 +120,6 @@ impl EngineBackend for InProcessEngine {
         EngineMode::InProcess
     }
     async fn shutdown(&self) {
-        self.boot_task.abort();
         // Stop accepting first: a viewport must not connect midway through the
         // drain and queue work against stores that are closing.
         if let Some(ipc) = &self.ipc_task {
@@ -136,44 +127,6 @@ impl EngineBackend for InProcessEngine {
         }
         if let Some(runtime) = self.runtime.lock().await.take() {
             runtime.shutdown().await;
-        }
-        self.refresh_task.abort();
-    }
-}
-
-#[derive(Clone)]
-enum DeferredEngineState {
-    Waiting,
-    Ready(Arc<dyn RpcService>),
-    Failed(String),
-}
-
-/// Serves AuthRpc immediately, then holds all data RPC calls until the signed-in
-/// user's identity-scoped engine is assembled. Existing UI subscriptions remain
-/// pending and attach to the real service without reconnecting.
-struct DeferredEngineRpc {
-    auth: AuthRpc,
-    state: tokio::sync::watch::Receiver<DeferredEngineState>,
-}
-
-#[async_trait]
-impl RpcService for DeferredEngineRpc {
-    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        if AuthRpc::handles(method) {
-            return self.auth.handle(method, params).await;
-        }
-
-        let mut state = self.state.clone();
-        loop {
-            let current = { state.borrow().clone() };
-            match current {
-                DeferredEngineState::Waiting => {}
-                DeferredEngineState::Ready(service) => {
-                    return service.handle(method, params).await;
-                }
-                DeferredEngineState::Failed(message) => return Err(RpcError::Failed(message)),
-            }
-            state.changed().await.map_err(|_| RpcError::Closed)?;
         }
     }
 }
@@ -234,28 +187,17 @@ impl EngineHandle {
         tracing::info!(data_dir = %config.data_dir.display(), "no daemon on port; embedding engine");
         let engine_config = EngineConfig {
             data_dir: config.data_dir,
-            edge_url: config.edge_url,
-            edge_token: config.edge_token,
+            update_url: config.update_url,
             ipc_port: config.ipc_port,
+            nova_port: config.nova_port,
             default_harness: config.default_harness,
-            org_id: config.org_id,
-            workos_client_id: config.workos_client_id,
         };
-        let auth = Engine::build_auth(&engine_config).await;
-        let refresh_task = auth.spawn_refresh_loop();
-        let (state_tx, state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
-        let service: Arc<dyn RpcService> = Arc::new(DeferredEngineRpc {
-            auth: AuthRpc::new(auth.clone()),
-            state: state_rx,
-        });
+        let engine_runtime = Engine::assemble_runtime(&engine_config).await?;
+        let service = engine_runtime.core().rpc_service();
         let client = memory_client(service.clone());
 
         // Serve the same service on the IPC port so a terminal viewport can
-        // attach to this window's engine with no setup. Deliberately the
-        // *deferred* service, not the assembled one: a viewport that connects
-        // before sign-in gets AuthRpc (so it can show its own gate) and its
-        // data subscriptions wait exactly as this window's do.
-        //
+        // attach to this window's engine with no setup.
         // Best-effort — losing the bind race with another engine costs other
         // viewports, not this one.
         let ipc_task = match comet_engine::serve_ipc(engine_config.ipc_port, service).await {
@@ -269,36 +211,10 @@ impl EngineHandle {
                 None
             }
         };
-        let runtime = Arc::new(tokio::sync::Mutex::new(None));
-        let runtime_for_boot = runtime.clone();
-        let boot_task = tokio::spawn(async move {
-            let mut auth_state = auth.watch_state();
-            while !auth_state.borrow().is_signed_in() {
-                if auth_state.changed().await.is_err() {
-                    state_tx.send_replace(DeferredEngineState::Failed(
-                        "authentication state closed before sign-in".into(),
-                    ));
-                    return;
-                }
-            }
-
-            match Engine::assemble_runtime(&engine_config, auth).await {
-                Ok(engine_runtime) => {
-                    let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
-                    *runtime_for_boot.lock().await = Some(engine_runtime);
-                    state_tx.send_replace(DeferredEngineState::Ready(service));
-                }
-                Err(err) => {
-                    tracing::error!(error = %err, "embedded engine assembly failed");
-                    state_tx.send_replace(DeferredEngineState::Failed(format!("{err:#}")));
-                }
-            }
-        });
+        let runtime = Arc::new(tokio::sync::Mutex::new(Some(engine_runtime)));
         Ok(EngineHandle {
             inner: Arc::new(InProcessEngine {
                 runtime,
-                boot_task,
-                refresh_task,
                 ipc_task,
                 client,
             }),
@@ -330,45 +246,8 @@ impl EngineHandle {
 pub use comet_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
-    parse_auth_state, project_label, sort_active, sort_chats, sort_projects, sort_tabs,
+    project_label, sort_active, sort_chats, sort_projects, sort_tabs,
 };
-
-// ---------------------------------------------------------------------------
-// Org gate (pure)
-// ---------------------------------------------------------------------------
-
-/// One org membership row (tolerant local mirror of the engine's ListOrgs
-/// reply — `{orgs: [{id, organizationId, name}]}`).
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OrgRow {
-    pub organization_id: String,
-    pub name: String,
-}
-
-/// Parse a ListOrgs reply tolerantly (accepts a bare array too).
-pub fn parse_orgs(value: &serde_json::Value) -> Vec<OrgRow> {
-    let list = value.get("orgs").unwrap_or(value);
-    serde_json::from_value(list.clone()).unwrap_or_default()
-}
-
-/// Workspace names must be non-empty (trimmed) and reasonably short.
-pub fn org_name_valid(name: &str) -> bool {
-    let trimmed = name.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= 64
-}
-
-/// Memberships sorted by name (case-insensitive), deduped by organization id.
-pub fn sort_memberships(mut orgs: Vec<OrgRow>) -> Vec<OrgRow> {
-    orgs.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    orgs.dedup_by(|a, b| a.organization_id == b.organization_id);
-    orgs
-}
 
 // ---------------------------------------------------------------------------
 // AppState entity
@@ -379,9 +258,9 @@ pub fn sort_memberships(mut orgs: Vec<OrgRow>) -> Vec<OrgRow> {
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
 pub struct AppState {
     pub connection: ConnectionStatus,
-    /// Auth stream value; `None` until the engine reports one (M4).
-    pub auth: Option<AuthState>,
     pub devices: Vec<Device>,
+    workspace_devices: Vec<Device>,
+    nova_devices: Vec<Device>,
     /// Sorted (see [`sort_projects`]).
     pub projects: Vec<Project>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
@@ -431,8 +310,9 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             connection: ConnectionStatus::Connecting,
-            auth: None,
             devices: Vec::new(),
+            workspace_devices: Vec::new(),
+            nova_devices: Vec::new(),
             projects: Vec::new(),
             chats: Vec::new(),
             working_since: None,
@@ -500,31 +380,32 @@ impl AppState {
     }
 
     pub fn apply_devices(&mut self, devices: Vec<Device>) {
-        self.devices = devices;
+        self.workspace_devices = devices;
+        self.rebuild_devices();
+    }
+
+    pub fn apply_nova_devices(&mut self, devices: Vec<Device>) {
+        self.nova_devices = devices;
+        self.rebuild_devices();
+    }
+
+    fn rebuild_devices(&mut self) {
+        let mut merged = self.workspace_devices.clone();
+        for peer in &self.nova_devices {
+            if let Some(existing) = merged.iter_mut().find(|device| device.id == peer.id) {
+                existing.name = peer.name.clone();
+                existing.platform = peer.platform.clone();
+                existing.last_seen_at = peer.last_seen_at.or(existing.last_seen_at);
+            } else {
+                merged.push(peer.clone());
+            }
+        }
+        merged.sort_by(|a, b| a.id.cmp(&b.id));
+        self.devices = merged;
     }
 
     pub fn apply_update(&mut self, status: comet_update::UpdateStatus) {
         self.update = Some(status);
-    }
-
-    pub fn apply_auth(&mut self, auth: AuthState) {
-        self.auth = Some(auth);
-    }
-
-    /// Tolerant AuthStatus frame reducer (see [`parse_auth_state`]).
-    pub fn apply_auth_value(&mut self, value: serde_json::Value) {
-        match parse_auth_state(&value) {
-            Some(auth) => self.apply_auth(auth),
-            None => tracing::warn!("dropping unrecognized AuthStatus frame"),
-        }
-    }
-
-    /// The signed-in user, if the engine reports one.
-    pub fn auth_user(&self) -> Option<&comet_proto::UserProfile> {
-        match self.auth.as_ref()? {
-            AuthState::SignedIn { user, .. } | AuthState::NeedsOrganization { user } => Some(user),
-            AuthState::SignedOut => None,
-        }
     }
 
     pub fn apply_transcript(&mut self, entries: Vec<SessionMessageEntry>) {
@@ -669,7 +550,7 @@ impl AppState {
             .map(|d| d.name.as_str())
     }
 
-    /// Host-presence check: is this device's 15s presence heartbeat fresh?
+    /// Host-presence check: was this device observed by recent direct sync?
     /// Distinguishes "host offline" (its queued work syncs when it returns)
     /// from slow sync. The local device is trivially online; unknown devices
     /// get the benefit of the doubt (no evidence — don't cry wolf).
@@ -726,7 +607,7 @@ impl AppState {
     }
 
     pub fn gate(&self) -> GatePhase {
-        gate_phase(&self.connection, self.auth.as_ref())
+        gate_phase(&self.connection)
     }
 
     pub fn engine(&self) -> Option<&EngineHandle> {
@@ -767,8 +648,8 @@ impl AppState {
     }
 
     /// Wire the connected engine: mark Ready and start the standing watches.
-    /// Methods the engine doesn't serve yet (chats/devices/auth land with the
-    /// workspace doc in M4) fail their subscribe and are skipped gracefully.
+    /// Methods the engine doesn't serve yet fail their subscribe and are skipped
+    /// gracefully.
     fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
         self.connection = ConnectionStatus::Ready;
         self.engine = Some(handle.clone());
@@ -792,13 +673,6 @@ impl AppState {
                 methods::WATCH_PROJECTS,
                 AppState::apply_projects,
             ),
-            // Auth frames parse tolerantly — engine and proto tags differ today.
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::AUTH_STATUS,
-                AppState::apply_auth_value,
-            ),
             spawn_watch(
                 cx,
                 handle.clone(),
@@ -806,6 +680,7 @@ impl AppState {
                 AppState::apply_update,
             ),
             spawn_local_device_probe(cx, handle.clone()),
+            spawn_nova_devices_watch(cx, handle.clone()),
         ];
         // Re-subscribe the transcript if a chat was already selected (reconnect path).
         if let Some(chat_id) = self.selected_chat.clone() {
@@ -1082,6 +957,57 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
     })
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NovaPeerDevice {
+    device_id: String,
+    name: String,
+    platform: String,
+    revoked: bool,
+    paired_at: chrono::DateTime<Utc>,
+}
+
+/// Merge paired Nova identities into the ordinary device selectors. Workspace rows still
+/// carry projects/chats; this probe makes newly paired engines selectable immediately,
+/// without waiting for the removed hosted workspace registry.
+fn spawn_nova_devices_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let Ok(mut values) = handle
+            .client()
+            .subscribe("NovaWatchPeers", serde_json::Value::Null)
+            .await
+        else {
+            return;
+        };
+        while let Some(value) = values.recv().await {
+            let Ok(peers) = serde_json::from_value::<Vec<NovaPeerDevice>>(value) else {
+                continue;
+            };
+            let devices = peers
+                .into_iter()
+                .filter(|peer| !peer.revoked)
+                .map(|peer| Device {
+                    id: peer.device_id,
+                    name: peer.name,
+                    platform: peer.platform,
+                    last_seen_at: None,
+                    created_at: Some(peer.paired_at),
+                    version: None,
+                })
+                .collect();
+            if this
+                .update(cx, |state, cx| {
+                    state.apply_nova_devices(devices);
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
 fn spawn_transcript_watch(
     cx: &mut Context<AppState>,
     handle: EngineHandle,
@@ -1129,7 +1055,7 @@ mod tests {
     use comet_engine::{EngineCore, default_registry};
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `comet_proto::view`.
-    use comet_proto::{SessionStatus, UserProfile};
+    use comet_proto::SessionStatus;
 
     /// A localhost port that was just free (bind :0, read, drop).
     async fn free_port() -> u16 {
@@ -1143,10 +1069,8 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: free_port().await,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None, // offline
-            org_id: None,
-            workos_client_id: None,
+            nova_port: free_port().await,
+            update_url: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -1172,10 +1096,8 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None, // offline
-            org_id: None,
-            workos_client_id: None,
+            nova_port: free_port().await,
+            update_url: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -1217,10 +1139,8 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: None,
+            nova_port: free_port().await,
+            update_url: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -1239,48 +1159,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_bootstrap_requires_sign_in_before_opening_engine_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let handle = EngineHandle::bootstrap(EngineBootConfig {
-            data_dir: dir.path().to_path_buf(),
-            ipc_port: free_port().await,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: Some("client_test".into()),
-            default_harness: HarnessId::Mock,
-        })
-        .await
-        .unwrap();
-
-        let mut auth = handle
-            .client()
-            .subscribe(methods::AUTH_STATUS, serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(
-            parse_auth_state(&auth.recv().await.unwrap()),
-            Some(AuthState::SignedOut)
-        );
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                handle
-                    .client()
-                    .call(methods::LIST_HARNESSES, serde_json::json!({})),
-            )
-            .await
-            .is_err(),
-            "data RPC must wait behind the production sign-in gate"
-        );
-        assert!(
-            !dir.path().join("orgs/dev-org/dev-user").exists(),
-            "production boot must not create dev-user data"
-        );
-        handle.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn bootstrap_connects_when_daemon_is_listening() {
         // Stand in for `comet headless`: an engine served over the WS IPC port.
         let daemon_dir = tempfile::tempdir().unwrap();
@@ -1288,7 +1166,6 @@ mod tests {
             daemon_dir.path(),
             Arc::new(default_registry()),
             HarnessId::Mock,
-            None,
         )
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1299,10 +1176,8 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: ui_dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: None,
+            nova_port: free_port().await,
+            update_url: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -1775,75 +1650,15 @@ mod tests {
 
     #[test]
     fn gate_phases() {
-        let user = UserProfile {
-            id: "u".into(),
-            email: "w@example.com".into(),
-            name: None,
-        };
         assert_eq!(
-            gate_phase(&ConnectionStatus::Connecting, None),
+            gate_phase(&ConnectionStatus::Connecting),
             GatePhase::Loading
         );
         assert_eq!(
-            gate_phase(&ConnectionStatus::Failed("boom".into()), None),
+            gate_phase(&ConnectionStatus::Failed("boom".into())),
             GatePhase::Failed("boom".into())
         );
-        // Unknown auth (pre-M4) gates nothing.
-        assert_eq!(gate_phase(&ConnectionStatus::Ready, None), GatePhase::Ready);
-        assert_eq!(
-            gate_phase(&ConnectionStatus::Ready, Some(&AuthState::SignedOut)),
-            GatePhase::SignIn
-        );
-        assert_eq!(
-            gate_phase(
-                &ConnectionStatus::Ready,
-                Some(&AuthState::SignedIn {
-                    user: user.clone(),
-                    org_id: None
-                })
-            ),
-            GatePhase::Ready
-        );
-        // No org yet → org gate.
-        assert_eq!(
-            gate_phase(
-                &ConnectionStatus::Ready,
-                Some(&AuthState::NeedsOrganization { user })
-            ),
-            GatePhase::OrgGate
-        );
-    }
-
-    #[test]
-    fn auth_frames_parse_both_wire_shapes() {
-        // Proto shape.
-        let proto = serde_json::json!({ "state": "signedOut" });
-        assert_eq!(parse_auth_state(&proto), Some(AuthState::SignedOut));
-        // Engine shape (`_tag`, PascalCase, orgId).
-        let engine = serde_json::json!({
-            "_tag": "SignedIn",
-            "user": { "id": "u1", "email": "w@example.com" },
-            "orgId": "org-1",
-        });
-        let Some(AuthState::SignedIn { user, org_id }) = parse_auth_state(&engine) else {
-            panic!("expected SignedIn");
-        };
-        assert_eq!(user.email, "w@example.com");
-        assert_eq!(org_id.as_deref(), Some("org-1"));
-        let needs = serde_json::json!({
-            "_tag": "NeedsOrganization",
-            "user": { "id": "u1", "email": "w@example.com", "name": "W" },
-        });
-        assert!(matches!(
-            parse_auth_state(&needs),
-            Some(AuthState::NeedsOrganization { .. })
-        ));
-        // Garbage → None (frame dropped, not a crash).
-        assert_eq!(
-            parse_auth_state(&serde_json::json!({ "_tag": "Wat" })),
-            None
-        );
-        assert_eq!(parse_auth_state(&serde_json::json!(42)), None);
+        assert_eq!(gate_phase(&ConnectionStatus::Ready), GatePhase::Ready);
     }
 
     fn chat_with_cwd(id: &str, created_min: i64, cwd: Option<&str>) -> Chat {
@@ -1919,35 +1734,5 @@ mod tests {
         assert_eq!(chat_location(&c), None);
         c.branch = None;
         assert_eq!(chat_location(&c), None);
-    }
-
-    #[test]
-    fn org_gate_reducers() {
-        assert!(org_name_valid("Acme"));
-        assert!(org_name_valid("  padded  "));
-        assert!(!org_name_valid(""));
-        assert!(!org_name_valid("   "));
-        assert!(!org_name_valid(&"x".repeat(65)));
-
-        let rows = parse_orgs(&serde_json::json!({ "orgs": [
-            { "id": "m2", "organizationId": "o2", "name": "beta" },
-            { "id": "m1", "organizationId": "o1", "name": "Alpha" },
-            { "id": "m3", "organizationId": "o1", "name": "Alpha" },
-        ]}));
-        assert_eq!(rows.len(), 3);
-        let sorted = sort_memberships(rows);
-        let names: Vec<&str> = sorted.iter().map(|o| o.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["Alpha", "beta"],
-            "case-insensitive sort + dedupe by org id"
-        );
-        // Bare-array replies parse too; garbage yields empty.
-        assert_eq!(
-            parse_orgs(&serde_json::json!([{ "id": "m", "organizationId": "o", "name": "n" }]))
-                .len(),
-            1
-        );
-        assert!(parse_orgs(&serde_json::json!("nope")).is_empty());
     }
 }

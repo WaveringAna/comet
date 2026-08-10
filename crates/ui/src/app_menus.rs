@@ -147,16 +147,6 @@ mod tests {
     use super::*;
     use gpui::{Action as _, Keystroke};
 
-    fn action_names(menu: &Menu) -> Vec<&'static str> {
-        menu.items
-            .iter()
-            .filter_map(|item| match item {
-                MenuItem::Action { action, .. } => Some(action.name()),
-                _ => None,
-            })
-            .collect()
-    }
-
     #[test]
     fn app_menu_ends_with_quit() {
         let menus = app_menus();

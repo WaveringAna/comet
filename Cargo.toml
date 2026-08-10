@@ -7,6 +7,7 @@ members = [
     "crates/harness",
     "crates/engine",
     "crates/rpc",
+    "crates/nova",
     "crates/update",
     "crates/ui",
     "crates/tui",
@@ -27,17 +28,13 @@ comet-sync = { path = "crates/sync" }
 comet-harness = { path = "crates/harness" }
 comet-engine = { path = "crates/engine" }
 comet-rpc = { path = "crates/rpc" }
+comet-nova = { path = "crates/nova" }
 comet-update = { path = "crates/update" }
 comet-ui = { path = "crates/ui" }
 comet-tui = { path = "crates/tui" }
 
 # CRDT
 loro = "1.13"
-# Wire protocol for the SessionRoom DO rooms — official Rust twin of the npm
-# `loro-protocol` package the TS edge speaks (same monorepo, byte-identical
-# frames, cross-checked by its js_snapshots tests).
-loro-protocol = "0.3"
-
 # gpui — the wingleeio/zed fork: upstream f14fea9 + two commits on
 # `comet/line-wrap-closing-punctuation` (rebase that branch when bumping the
 # upstream rev): a6bf17c fixes BOTH wrap-rule copies (LineWrapper +
@@ -89,6 +86,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+ring = "0.17"
+iroh = "1.0.3"
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"

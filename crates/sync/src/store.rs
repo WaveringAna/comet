@@ -1,5 +1,5 @@
 //! `DocsStore` — local SQLite persistence for doc snapshots and the
-//! processed-command ledger (ARCHITECTURE §2 command plane: entries are marked
+//! processed-command ledger (ARCHITECTURE §5 command plane: entries are marked
 //! processed BEFORE execution so a crash can never double-execute a command).
 
 use std::path::Path;
@@ -34,8 +34,7 @@ const MIGRATIONS: &[&str] = &[
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
 ///
-/// Holds warm-open doc snapshots (the DO room is authoritative; these make
-/// cold starts instant and offline restarts possible) and the command ledger
+/// Holds durable local doc snapshots and the command ledger
 /// that gives command execution mark-BEFORE-execute idempotence.
 pub struct DocsStore {
     conn: Mutex<Connection>,

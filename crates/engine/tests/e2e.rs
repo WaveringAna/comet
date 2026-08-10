@@ -141,7 +141,7 @@ fn registry_with(harness: Arc<dyn Harness>) -> Arc<HarnessRegistry> {
 }
 
 fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
-    EngineCore::assemble(dir, registry_with(harness), HarnessId::Mock, None)
+    EngineCore::assemble(dir, registry_with(harness), HarnessId::Mock)
         .expect("engine core assembles")
 }
 
@@ -1668,7 +1668,6 @@ async fn real_claude_sees_uploaded_image_inline() {
         &dir,
         Arc::new(comet_engine::default_registry()),
         HarnessId::ClaudeCode,
-        None,
     )
     .expect("engine core assembles");
     // Pre-title the chat so the auto-titler doesn't spend a second model call.

@@ -10,7 +10,7 @@
 use chrono::Utc;
 use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use comet_proto::view::ConnectionStatus;
-use comet_proto::{AuthState, Chat, Project, Session, SessionStatus, ToolCall, UserProfile};
+use comet_proto::{Chat, Project, Session, SessionStatus, ToolCall};
 use comet_tui::app::App;
 use comet_tui::keys::{Action, Focus};
 use comet_tui::link::Update;
@@ -73,18 +73,10 @@ fn text(id: &str, body: &str) -> MessagePart {
     }
 }
 
-/// A signed-in app with one project, two sessions, and a transcript.
+/// An app with one project, two sessions, and a transcript.
 fn populated() -> App {
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
-    app.apply(Update::Auth(Box::new(AuthState::SignedIn {
-        user: UserProfile {
-            id: "u".into(),
-            email: "w@example.com".into(),
-            name: None,
-        },
-        org_id: Some("org".into()),
-    })));
     app.apply(Update::Projects(vec![project("s1", "/dev/comet")]));
     app.apply(Update::Chats(vec![
         chat("c1", "Rework the diff sidebar"),
@@ -107,7 +99,7 @@ fn populated() -> App {
                     MessagePart::Tool {
                         id: "p1".into(),
                         call: ToolCall::Exec {
-                            command: "cargo test -p comet-rpc device_room".into(),
+                            command: "cargo test -p comet-engine --test device_routing".into(),
                         },
                         is_error: false,
                         resolved: true,
@@ -210,7 +202,7 @@ fn a_populated_frame_shows_the_chrome_sidebar_and_transcript() {
         "tool chip label missing:\n{screen}"
     );
     assert!(
-        screen.contains("cargo test -p comet-rpc"),
+        screen.contains("cargo test -p comet-engine"),
         "tool detail missing:\n{screen}"
     );
     assert!(
@@ -334,12 +326,6 @@ fn the_gate_replaces_the_body_while_the_engine_is_unreachable() {
         "the reason must be shown:\n{screen}"
     );
     assert!(screen.contains("retry now"), "{screen}");
-
-    // Signed out is a different gate with a different instruction.
-    app.apply(Update::Connection(ConnectionStatus::Ready));
-    app.apply(Update::Auth(Box::new(AuthState::SignedOut)));
-    let screen = joined(&snapshot(&mut app, 80, 20));
-    assert!(screen.contains("comet login"), "{screen}");
 }
 
 #[test]
@@ -356,7 +342,7 @@ fn the_help_overlay_covers_the_body_and_lists_the_real_bindings() {
         "the overlay must cover the body:\n{screen}"
     );
     assert!(
-        !screen.contains("cargo test -p comet-rpc"),
+        !screen.contains("cargo test -p comet-engine"),
         "including the right-hand ends of long lines:\n{screen}"
     );
     // The tab strip still names the sessions; only the body is covered.
@@ -522,9 +508,8 @@ fn drawing_twice_with_no_changes_touches_nothing() {
 
 #[test]
 fn the_sidebar_follows_the_desktop_order() {
-    // The reference sidebar reads: device, New session, rule, "Sessions", then a
-    // faint project heading with its two-line session rows, and the user pinned to
-    // the bottom (docs/reference/original-comet.png).
+    // The sidebar reads Projects followed by the flat Sessions list. Hosted user
+    // identity was removed with the auth gate.
     let mut app = populated();
     let rows = snapshot(&mut app, 100, 24);
     let sidebar = sidebar_of(&rows, 100);
@@ -553,18 +538,12 @@ fn the_sidebar_follows_the_desktop_order() {
         sidebar[session + 1].contains("comet@"),
         "sub-line must follow the title:\n{sidebar:#?}"
     );
-    // The user row is pinned to the bottom of the sidebar, not inline.
-    let user = index("w@example.com");
-    assert!(user > session, "user row must be last:\n{sidebar:#?}");
-    assert!(
-        user >= sidebar.len() - 3,
-        "user row must be pinned to the bottom:\n{sidebar:#?}"
-    );
+    assert!(!sidebar.iter().any(|row| row.contains("w@example.com")));
 }
 
 #[test]
 fn the_cursor_steps_over_decoration() {
-    // Rules, the section header and the user row cannot hold the cursor; walking
+    // Blank rows and section headers cannot hold the cursor; walking
     // the list must never leave it parked on nothing.
     let mut app = populated();
     app.focus = Focus::Sidebar;

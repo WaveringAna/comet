@@ -173,7 +173,7 @@ pub struct AccountsPage {
     state: Entity<AppState>,
     /// Which device's logins are shown; `None` = this device (no passthrough).
     /// Retargeted by the page-header device switcher (comet parity: the
-    /// accounts RPCs are relay-forwardable, CLI logins are per-device).
+    /// accounts RPCs are device-routable over Nova, CLI logins are per-device).
     target_device: Option<String>,
     device_menu_open: bool,
     /// Outside-click dismissal instant — suppresses the trigger click that
@@ -227,7 +227,7 @@ impl AccountsPage {
     }
 
     /// Retarget the page at another device's logins: every accounts RPC is
-    /// relay-forwardable, so the whole page — list, usage probes, switch,
+    /// device-routable over Nova, so the whole page — list, usage probes, switch,
     /// forget, login flows — follows the passthrough.
     fn set_target_device(&mut self, target: Option<String>, cx: &mut Context<Self>) {
         self.device_menu_open = false;

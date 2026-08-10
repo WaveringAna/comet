@@ -240,7 +240,7 @@ impl Harness for MockHarness {
                 | Stage | What happens | p95 |\n\
                 |:--|:--|--:|\n\
                 | Fold | Events fold into parts and diff into the Loro doc on a 120ms coalesced commit cadence, keeping the oplog RLE-merged across devices | 4.2ms |\n\
-                | Sync | Session-room fan-out | 18ms |\n\n"
+                | Sync | Direct Nova peer fan-out | 18ms |\n\n"
                 .into(),
         });
         // Dev/testing knob: `COMET_MOCK_MEND=1` appends a link/list-heavy
@@ -256,7 +256,7 @@ impl Harness for MockHarness {
                 "Inline styles hold while text arrives: **bold stays bold**, ",
                 "*italic stays italic*, `code stays code`, and ~~this stays struck~~.\n\n",
                 "- **Fold** — parts diff into the [Loro doc](https://loro.dev) on a 120ms cadence\n",
-                "- **Relay** — commits fan out through the [session room](https://developers.cloudflare.com/durable-objects/) to every device\n",
+                "- **Nova sync** — missing Loro updates converge directly between paired engines\n",
                 "- **Paint** — the [display tree](https://github.com/pulldown-cmark/pulldown-cmark) mends hanging markers in the last block only\n\n",
                 "Links above never flash their URLs, and closing markers never reflow the paragraph.\n",
             )

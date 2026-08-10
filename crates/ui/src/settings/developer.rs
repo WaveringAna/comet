@@ -34,7 +34,11 @@ impl DeveloperPage {
             .h(px(22.0))
             .rounded_full()
             .border_1()
-            .border_color(if on { theme.accent } else { theme.border_strong })
+            .border_color(if on {
+                theme.accent
+            } else {
+                theme.border_strong
+            })
             .bg(if on {
                 theme.accent
             } else {

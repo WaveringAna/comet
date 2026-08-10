@@ -666,7 +666,7 @@ pub struct Changes {
     started: bool,
     error: Option<SharedString>,
     /// Device the running watch targets: `None` = the connected engine itself,
-    /// `Some(id)` = a remote chat's host (relay-forwarded). The stream only
+    /// `Some(id)` = a remote chat's host (routed over Nova). The stream only
     /// carries the TARGET device's checkouts, so a selection change onto a
     /// chat hosted elsewhere tears the watch down and re-subscribes.
     watch_target: Option<String>,
@@ -706,7 +706,7 @@ impl Changes {
 
     /// The selected chat's host device when it differs from the connected
     /// engine's own — diffs are produced where the checkout lives, so a
-    /// remote chat's watch must relay-forward (`targetDeviceId`) to its host.
+    /// remote chat's watch uses `targetDeviceId` to route to its host over Nova.
     /// Without this the local stream simply never carries the remote checkout
     /// and the pane sits on "Preparing diff…" forever (user report).
     fn desired_target(&self, cx: &App) -> Option<String> {

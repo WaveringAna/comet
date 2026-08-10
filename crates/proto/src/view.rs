@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::{AuthState, Chat, ChatIndicator, ChatUsage, Project, Session, SessionStatus};
+use crate::{Chat, ChatIndicator, ChatUsage, Project, Session, SessionStatus};
 
 // ---------------------------------------------------------------------------
 // Connection + status
@@ -148,56 +148,15 @@ pub enum GatePhase {
     Loading,
     /// Engine unreachable and embedding failed.
     Failed(String),
-    /// Engine up, but signed out — show the sign-in card.
-    SignIn,
-    /// Signed in but no organization selected — "Create your workspace".
-    OrgGate,
     /// Render the shell.
     Ready,
 }
 
-/// `auth = None` means "engine doesn't report auth yet" (dev mode) and gates
-/// nothing.
-pub fn gate_phase(connection: &ConnectionStatus, auth: Option<&AuthState>) -> GatePhase {
+pub fn gate_phase(connection: &ConnectionStatus) -> GatePhase {
     match connection {
         ConnectionStatus::Connecting => GatePhase::Loading,
         ConnectionStatus::Failed(err) => GatePhase::Failed(err.clone()),
-        ConnectionStatus::Ready => match auth {
-            Some(AuthState::SignedOut) => GatePhase::SignIn,
-            Some(AuthState::NeedsOrganization { .. }) => GatePhase::OrgGate,
-            _ => GatePhase::Ready,
-        },
-    }
-}
-
-/// Parse an `AuthStatus` frame tolerantly. The engine currently serializes its
-/// own enum (`{"_tag": "SignedIn", ...}`) while the proto type expects
-/// `{"state": "signedIn", ...}` — accept both so either side can converge
-/// without breaking a viewport.
-pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
-    if let Ok(state) = serde_json::from_value::<AuthState>(value.clone()) {
-        return Some(state);
-    }
-    let tag = value.get("_tag").and_then(|t| t.as_str())?;
-    let user = || -> Option<crate::UserProfile> {
-        let u = value.get("user")?;
-        Some(crate::UserProfile {
-            id: u.get("id")?.as_str()?.to_string(),
-            email: u.get("email")?.as_str()?.to_string(),
-            name: u.get("name").and_then(|n| n.as_str()).map(str::to_string),
-        })
-    };
-    match tag {
-        "SignedOut" => Some(AuthState::SignedOut),
-        "NeedsOrganization" => Some(AuthState::NeedsOrganization { user: user()? }),
-        "SignedIn" => Some(AuthState::SignedIn {
-            user: user()?,
-            org_id: value
-                .get("orgId")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        }),
-        _ => None,
+        ConnectionStatus::Ready => GatePhase::Ready,
     }
 }
 

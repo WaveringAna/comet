@@ -903,7 +903,13 @@ mod tests {
 
     #[test]
     fn custom_defaults_reproduce_the_dark_theme() {
-        let built = Theme::custom(ColorScheme::Dark, "#060606", "#e5e5e5", Accent::Indigo, 100.0);
+        let built = Theme::custom(
+            ColorScheme::Dark,
+            "#060606",
+            "#e5e5e5",
+            Accent::Indigo,
+            100.0,
+        );
         let reference = Theme::dark();
         assert_eq!(built.scheme, ColorScheme::Dark);
         // Anchor hexes land exactly.
@@ -1005,8 +1011,14 @@ mod tests {
 
         // Every theme has distinct dark/light stops (no hue is shared).
         for accent in Accent::ALL {
-            assert_ne!(accent.accent(ColorScheme::Dark), accent.accent(ColorScheme::Light));
-            assert_eq!(accent.accent(ColorScheme::Light), accent.accent_strong(ColorScheme::Light));
+            assert_ne!(
+                accent.accent(ColorScheme::Dark),
+                accent.accent(ColorScheme::Light)
+            );
+            assert_eq!(
+                accent.accent(ColorScheme::Light),
+                accent.accent_strong(ColorScheme::Light)
+            );
         }
     }
 
@@ -1051,7 +1063,13 @@ mod tests {
 
     #[test]
     fn invalid_custom_hexes_fall_back_to_scheme_defaults() {
-        let t = Theme::custom(ColorScheme::Dark, "not-a-hex", "#zzzzzz", Accent::Indigo, 100.0);
+        let t = Theme::custom(
+            ColorScheme::Dark,
+            "not-a-hex",
+            "#zzzzzz",
+            Accent::Indigo,
+            100.0,
+        );
         assert!((t.bg.l - parse_hex(DEFAULT_BG_DARK).unwrap().l).abs() < 1e-6);
         assert!((t.text.l - parse_hex(DEFAULT_FG_DARK).unwrap().l).abs() < 1e-6);
     }

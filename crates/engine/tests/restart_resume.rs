@@ -124,8 +124,7 @@ impl Harness for RecordingHarness {
 fn assemble(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(harness));
-    EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles")
+    EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock).expect("engine core assembles")
 }
 
 fn queue_run(core: &EngineCore, prompt: &str, cwd: &str, message_id: &str) {
@@ -516,7 +515,7 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
     registry.register(Arc::new(PersistentHarness {
         runs_started: runs_started.clone(),
     }));
-    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock)
         .expect("engine core assembles");
     pre_title(&core);
 
@@ -797,7 +796,6 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
             &dir,
             Arc::new(comet_engine::default_registry()),
             HarnessId::ClaudeCode,
-            None,
         )
         .expect("engine core assembles")
     };

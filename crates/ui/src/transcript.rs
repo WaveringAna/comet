@@ -1741,7 +1741,7 @@ impl Transcript {
             return;
         };
         let local = self.state.read(cx).local_device_id.clone();
-        // Relay-forward only for a genuinely remote owner; the local device's
+        // Direct-peer-forward only for a genuinely remote owner; the local device's
         // files are served directly.
         let target = (local.as_deref() != Some(device_id.as_str())).then(|| device_id.clone());
         let key = (device_id.clone(), path.clone());
@@ -2374,6 +2374,13 @@ impl Transcript {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let target = {
+            let state = self.state.read(cx);
+            state.selected_chat_row().and_then(|chat| {
+                (state.local_device_id.as_deref() != Some(chat.device_id.as_str()))
+                    .then(|| chat.device_id.clone())
+            })
+        };
         for id in tool_ids {
             if self.tool_diffs.contains_key(id) || !self.tool_diff_loads.insert(id.clone()) {
                 continue;
@@ -2381,13 +2388,15 @@ impl Transcript {
             let chat_id = chat_id.clone();
             let tool_id = id.clone();
             let engine = engine.clone();
+            let target = target.clone();
             cx.spawn(async move |this, cx| {
+                let mut params = serde_json::json!({ "chatId": chat_id, "toolId": tool_id });
+                if let (Some(target), Some(params)) = (target, params.as_object_mut()) {
+                    params.insert("targetDeviceId".into(), target.into());
+                }
                 let reply = engine
                     .client()
-                    .call_as::<ToolDiffReply>(
-                        comet_rpc::methods::TOOL_DIFF,
-                        serde_json::json!({ "chatId": chat_id, "toolId": tool_id }),
-                    )
+                    .call_as::<ToolDiffReply>(comet_rpc::methods::TOOL_DIFF, params)
                     .await;
                 this.update(cx, |this, cx| {
                     this.tool_diff_loads.remove(&tool_id);

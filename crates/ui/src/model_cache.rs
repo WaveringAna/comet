@@ -160,7 +160,10 @@ mod tests {
         cache.store_models(HarnessId::Pi, "", vec![model("local", "Local")]);
         cache.store_models(HarnessId::Pi, "dev-2", vec![model("remote", "Remote")]);
         assert_eq!(cache.models_for(HarnessId::Pi, "").unwrap()[0].id, "local");
-        assert_eq!(cache.models_for(HarnessId::Pi, "dev-2").unwrap()[0].id, "remote");
+        assert_eq!(
+            cache.models_for(HarnessId::Pi, "dev-2").unwrap()[0].id,
+            "remote"
+        );
         // Distinct harnesses don't collide under the same device.
         assert!(cache.models_for(HarnessId::ClaudeCode, "").is_none());
     }
@@ -168,8 +171,14 @@ mod tests {
     #[test]
     fn missing_and_corrupt_files_yield_empty_cache() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(ModelCatalogCache::load(dir.path()), ModelCatalogCache::default());
+        assert_eq!(
+            ModelCatalogCache::load(dir.path()),
+            ModelCatalogCache::default()
+        );
         std::fs::write(ModelCatalogCache::path(dir.path()), "{nope").unwrap();
-        assert_eq!(ModelCatalogCache::load(dir.path()), ModelCatalogCache::default());
+        assert_eq!(
+            ModelCatalogCache::load(dir.path()),
+            ModelCatalogCache::default()
+        );
     }
 }

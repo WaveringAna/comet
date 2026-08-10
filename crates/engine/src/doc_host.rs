@@ -1,10 +1,10 @@
-//! DocHost — per-chat `SessionDoc` handles: snapshot persistence (debounced), edge room
-//! sync (offline-tolerant), and the HOST-ONLY durable command executor.
+//! DocHost — per-chat `SessionDoc` handles: snapshot persistence and the
+//! HOST-ONLY durable command executor. Peer convergence is owned by
+//! `peer_sync` and imports directly into these same Loro docs.
 //!
-//! Pragmatic port of comet's `session-docs.ts` + the `main.ts` executor (spec:
-//! feature-inventory §3.3, ARCHITECTURE §2 "command plane"):
-//! - the doc IS the outbox: commands and user entries commit locally and sync whenever a
-//!   room connection exists; the engine is fully functional with sync disabled;
+//! The document and command flow described in `ARCHITECTURE.md` section 5:
+//! - the doc IS the outbox: commands and user entries commit locally and sync to paired
+//!   Nova Engines without a hosted room;
 //! - on every doc change (local commit or remote import) the handle re-emits the joined
 //!   transcript to watchers, drains pending commands, and schedules a snapshot save;
 //! - command drain: evaluate via `evaluate_command` (with the DocsStore processed
@@ -13,12 +13,13 @@
 //!
 //! Chat ownership is gated on the workspace doc (`chats[chat_id].deviceId`), with
 //! claim-on-first-command for unknown chats. Queueing a command for a chat hosted on
-//! another device POSTs a durable nudge to that device's room (§7 cold-chat delivery);
-//! the host's relay receives it and warm-opens the doc, which drains the queue.
+//! another device is delivered by the direct peer-sync loop; importing it warm-opens
+//! the doc on the host and drains the queue.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
+use loro::{ExportMode, VersionVector};
 use tokio::sync::watch;
 
 use comet_doc::{
@@ -28,7 +29,7 @@ use comet_doc::{
     join_continuation_entries,
 };
 use comet_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
-use comet_sync::{DocsStore, RoomClient};
+use comet_sync::DocsStore;
 
 use crate::sessions::{SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
@@ -37,84 +38,11 @@ use crate::{EngineError, new_id, now_ms};
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
 
-/// Edge connection config. The bearer is a **provider**, never a snapshot:
-/// every room (re)connect and HTTP request re-reads it, so WorkOS access-token
-/// refreshes (~1h expiry) take effect without an engine restart. Dev bearers
-/// (which never expire) ride the same seam as a [`comet_rpc::StaticToken`].
-#[derive(Clone)]
-pub struct EdgeConfig {
-    /// Edge base URL (`http(s)://…`); rewritten to `ws(s)` for the room socket.
-    pub url: String,
-    /// Fresh-bearer provider (the relay's `TokenSource`), consulted per
-    /// connect/request. `None` from the provider = signed out.
-    pub token: Arc<dyn comet_rpc::TokenSource>,
-}
-
-impl std::fmt::Debug for EdgeConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EdgeConfig")
-            .field("url", &self.url)
-            .field("token", &"<provider>")
-            .finish()
-    }
-}
-
-impl EdgeConfig {
-    pub fn new(url: impl Into<String>, token: Arc<dyn comet_rpc::TokenSource>) -> Self {
-        Self {
-            url: url.into(),
-            token,
-        }
-    }
-
-    /// Fixed bearer — dev mode and tests, where tokens never expire.
-    pub fn with_static_token(url: impl Into<String>, token: impl Into<String>) -> Self {
-        Self::new(url, Arc::new(comet_rpc::StaticToken(token.into())))
-    }
-
-    /// The current bearer, refreshed by the provider if stale. `None` = signed out.
-    pub async fn bearer(&self) -> Option<String> {
-        self.token.token().await
-    }
-
-    /// A per-dial room URL provider for `path` (e.g. `/session/{chatId}/ws`):
-    /// the bearer is re-fetched before every connect, so reconnects after a
-    /// token expiry present a fresh `?token=` instead of the boot-time one.
-    pub fn room_url(&self, path: impl Into<String>) -> Arc<dyn comet_sync::UrlProvider> {
-        let ws_base = self.url.replacen("http", "ws", 1);
-        Arc::new(EdgeRoomUrl {
-            base: format!("{}{}", ws_base.trim_end_matches('/'), path.into()),
-            token: self.token.clone(),
-        })
-    }
-}
-
-struct EdgeRoomUrl {
-    base: String,
-    token: Arc<dyn comet_rpc::TokenSource>,
-}
-
-impl comet_sync::UrlProvider for EdgeRoomUrl {
-    fn url(&self) -> futures::future::BoxFuture<'static, Result<String, comet_sync::SyncError>> {
-        let token = self.token.clone();
-        let base = self.base.clone();
-        Box::pin(async move {
-            let token = token.token().await.ok_or_else(|| {
-                comet_sync::SyncError::Auth("no access token (signed out)".into())
-            })?;
-            Ok(format!("{base}?token={token}"))
-        })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct DocHostConfig {
     pub device_id: String,
     /// Harness for doc-command runs on chats without a workspace `config` row.
     pub default_harness: HarnessId,
-    /// When present, each opened chat joins its edge session room. `None` = fully
-    /// offline operation (local snapshots only).
-    pub edge: Option<EdgeConfig>,
 }
 
 struct DocHostInner {
@@ -134,13 +62,12 @@ pub struct DocHost {
     inner: Arc<DocHostInner>,
 }
 
-/// One open chat doc: the `SessionDoc`, its change plumbing, and the room client.
+/// One open chat doc and its change plumbing.
 pub struct ChatDocHandle {
     chat_id: String,
     device_id: String,
     doc: Arc<SessionDoc>,
     messages_tx: watch::Sender<Vec<SessionMessageEntry>>,
-    room: Mutex<Option<RoomClient>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
 }
@@ -161,10 +88,6 @@ impl ChatDocHandle {
     /// Joined transcript watch — re-sent on every doc change (WatchDocMessages).
     pub fn watch_messages(&self) -> watch::Receiver<Vec<SessionMessageEntry>> {
         self.messages_tx.subscribe()
-    }
-
-    pub fn connected(&self) -> bool {
-        lock(&self.room).is_some()
     }
 
     /// Write a complete user message entry, idempotent by id (the client-minted message
@@ -273,8 +196,51 @@ impl DocHost {
         &self.inner.config.device_id
     }
 
+    /// Chat ids currently represented by workspace rows or already-open local
+    /// handles. Peer sync uses the union so a just-created chat converges even
+    /// while the workspace change notification is still in flight.
+    pub fn sync_chat_ids(&self) -> Result<Vec<String>, EngineError> {
+        let mut ids: HashSet<String> = lock(&self.inner.handles).keys().cloned().collect();
+        if let Some(workspace) = self.workspace() {
+            ids.extend(workspace.sync_chat_ids()?);
+        }
+        let mut ids: Vec<_> = ids.into_iter().collect();
+        ids.sort();
+        Ok(ids)
+    }
+
+    pub fn sync_version(&self, chat_id: &str) -> Result<Vec<u8>, EngineError> {
+        Ok(self.open(chat_id)?.doc().doc().oplog_vv().encode())
+    }
+
+    pub fn sync_export(
+        &self,
+        chat_id: &str,
+        remote_version: &[u8],
+    ) -> Result<Vec<u8>, EngineError> {
+        let version = VersionVector::decode(remote_version)
+            .map_err(|error| EngineError::Other(format!("invalid chat sync head: {error}")))?;
+        self.open(chat_id)?
+            .doc()
+            .doc()
+            .export(ExportMode::updates(&version))
+            .map_err(|error| EngineError::Other(format!("chat sync export failed: {error}")))
+    }
+
+    pub fn sync_import(&self, chat_id: &str, update: &[u8]) -> Result<(), EngineError> {
+        if update.is_empty() {
+            return Ok(());
+        }
+        self.open(chat_id)?
+            .doc()
+            .doc()
+            .import(update)
+            .map_err(|error| EngineError::Other(format!("chat sync import failed: {error}")))?;
+        Ok(())
+    }
+
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
-    /// start the change-driven task, and join the edge room when configured.
+    /// start the change-driven task, and expose it to direct peer sync.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         if let Some(handle) = lock(&self.inner.handles).get(chat_id) {
             return Ok(handle.clone());
@@ -302,7 +268,6 @@ impl DocHost {
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
             messages_tx,
-            room: Mutex::new(None),
             _sub: sub,
         });
         {
@@ -311,27 +276,6 @@ impl DocHost {
                 return Ok(existing.clone()); // racing open — keep the first
             }
             handles.insert(chat_id.to_string(), handle.clone());
-        }
-
-        // Edge room join — offline-tolerant: a failed join logs and stays local-first.
-        if let Some(edge) = &self.inner.config.edge {
-            let url = edge.room_url(format!("/session/{chat_id}/ws"));
-            let room_doc = doc.doc().clone();
-            let chat = chat_id.to_string();
-            let weak = Arc::downgrade(&handle);
-            tokio::spawn(async move {
-                match RoomClient::connect_via(url, &chat, room_doc).await {
-                    Ok(client) => {
-                        if let Some(handle) = weak.upgrade() {
-                            *lock(&handle.room) = Some(client);
-                            tracing::info!(chat = %chat, "session room joined");
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(chat = %chat, error = %err, "session room join failed; staying offline");
-                    }
-                }
-            });
         }
 
         tokio::spawn(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
@@ -363,72 +307,12 @@ impl DocHost {
             status: SessionCommandStatus::Pending,
             resolution: None,
         })?;
-        // §7 durable delivery: when another device hosts this chat, nudge its device
-        // room so a cold host opens the doc and drains the queue. Fire-and-forget —
-        // the command is durable in the doc either way (a host that opens the chat
-        // for any other reason still executes it).
-        self.nudge_remote_host(chat_id);
         Ok(id)
     }
 
-    /// POST `{edge}/device/{host}/nudge {chatId}` when the chat's workspace row names
-    /// another device as host. Best-effort: offline/edge-less engines skip silently.
-    fn nudge_remote_host(&self, chat_id: &str) {
-        let Some(edge) = self.inner.config.edge.clone() else {
-            return;
-        };
-        let Some(workspace) = self.workspace() else {
-            return;
-        };
-        let host_device = match workspace.doc().chat(chat_id) {
-            Ok(Some(chat)) => chat.device_id,
-            // Unclaimed chat: whoever drains first claims it — nobody to nudge.
-            _ => return,
-        };
-        if host_device == self.inner.config.device_id {
-            return;
-        }
-        // Only meaningful inside a runtime (RPC handlers, executors); bare sync
-        // callers (unit tests) skip rather than panic.
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let url = format!(
-            "{}/device/{}/nudge",
-            edge.url.trim_end_matches('/'),
-            host_device
-        );
-        let chat = chat_id.to_string();
-        runtime.spawn(async move {
-            // Fresh bearer per request — never the boot-time snapshot.
-            let Some(bearer) = edge.bearer().await else {
-                tracing::warn!(chat = %chat, "nudge skipped: signed out");
-                return;
-            };
-            let send = reqwest::Client::new()
-                .post(&url)
-                .bearer_auth(&bearer)
-                .json(&serde_json::json!({ "chatId": chat }))
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await;
-            match send {
-                Ok(res) if res.status().is_success() => {
-                    tracing::info!(chat = %chat, device = %host_device, "host nudged");
-                }
-                Ok(res) => tracing::warn!(chat = %chat, device = %host_device,
-                    status = res.status().as_u16(), "nudge rejected"),
-                Err(err) => {
-                    tracing::warn!(chat = %chat, error = %err, "nudge failed (best-effort)")
-                }
-            }
-        });
-    }
-
-    /// §2.2 writer discipline: we host a chat iff its workspace row's `deviceId` is
+    /// We host a chat iff its workspace row's `deviceId` is
     /// ours; a chat with no row is claimable (claim-on-first-command). Without a
-    /// wired workspace host (bare-DocHost tests) every open chat is ours — M2's
-    /// behavior, now the degenerate case.
+    /// wired workspace host (bare-DocHost tests), every open chat is ours.
     fn is_host(&self, chat_id: &str) -> bool {
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
     }

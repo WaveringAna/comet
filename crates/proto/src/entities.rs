@@ -1,7 +1,5 @@
-//! Synced entity rows (workspace doc) and local projections.
-//!
-//! In comet these were synced Postgres rows; in comet-native they live in the per-org
-//! workspace Loro doc (see ARCHITECTURE.md §2.2) with the same field surface.
+//! Entity rows shared through the workspace Loro document and their local projections.
+//! See `ARCHITECTURE.md` section 5.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -143,7 +141,7 @@ impl Chat {
 }
 
 /// What a chat's last turn cost. Host-stamped onto the chat row once per turn
-/// (small, LWW, one write) so every viewport — local or relayed — reads the
+/// (small, LWW, one write) so every viewport — local or direct-peer — reads the
 /// same numbers as the host's own footer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -290,28 +288,6 @@ pub struct CheckoutDiff {
     pub truncated: bool,
     pub checksum: String,
     pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserProfile {
-    pub id: String,
-    pub email: String,
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "camelCase")]
-pub enum AuthState {
-    SignedOut,
-    NeedsOrganization {
-        user: UserProfile,
-    },
-    #[serde(rename_all = "camelCase")]
-    SignedIn {
-        user: UserProfile,
-        org_id: Option<String>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

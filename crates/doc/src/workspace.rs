@@ -1,6 +1,5 @@
-//! Workspace doc schema over `loro` — the per-org entity index that replaces comet's
-//! residual entity sync (ARCHITECTURE.md §2.2). Lives in its own DO room (same
-//! SessionRoom class, doc id `ws/{orgId}`).
+//! Workspace doc schema over `loro` — the device-local entity index that paired Nova
+//! Engines converge through version-vector delta exchange.
 //!
 //! Container layout — maps keyed by id, NOT lists: entity rows are LWW upserts, and a
 //! map-of-maps means concurrent writers to *different* rows never conflict while writes
@@ -15,11 +14,10 @@
 //!   updatedAt}
 //! - `meta`: LoroMap {schemaVersion} — in-band detection for future destructive changes
 //!
-//! Writer discipline (ARCHITECTURE §2.2): each device writes its own device row, its
+//! Writer discipline (`ARCHITECTURE.md` section 5): each device writes its own device row, its
 //! own session rows, and rows for chats it hosts; title/archived renames are LWW map
-//! sets from any device — matching comet's Mutate surface. Presence rides the room's
-//! `EphemeralStore` under keys `presence/{deviceId}` (an online timestamp), replacing
-//! comet's 15s heartbeat writes so liveness never grows the oplog.
+//! sets from any device — matching comet's Mutate surface. Live peer observations are
+//! overlaid by the engine in process memory so presence never grows the oplog.
 //!
 //! Timestamps are stored as epoch millis (the session-doc convention) and surface as
 //! `chrono::DateTime<Utc>` through the `comet_proto` entity types.
@@ -32,15 +30,9 @@ use comet_proto::{Chat, ChatConfig, ChatUsage, Device, Project, Session, Session
 
 use crate::schema::DocError;
 
-/// Workspace doc schema version. v2 = the projects overhaul (projects container,
-/// chat projectId/lastSeenAt) — a destructive break shipped via a fresh doc/room
-/// (`workspace2` / `ws2/{orgId}`), so no v1 reader exists.
+/// Workspace doc schema version. v2 introduced projects and chat
+/// `projectId`/`lastSeenAt`; v3 is the current local snapshot shape.
 pub const WORKSPACE_SCHEMA_VERSION: i64 = 3;
-
-/// Ephemeral presence key for a device (`presence/{deviceId}` → online timestamp).
-pub fn presence_key(device_id: &str) -> String {
-    format!("presence/{device_id}")
-}
 
 /// Everything in the workspace doc, materialized (`read_all`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,7 +113,7 @@ impl WorkspaceDoc {
     }
 
     /// Stamp `lastSeenAt` on an existing device row (boot/shutdown only — periodic
-    /// liveness rides ephemeral presence, never the oplog). `false` when no such row.
+    /// liveness is an engine-local overlay, never the oplog). `false` when no such row.
     pub fn set_device_last_seen(
         &self,
         device_id: &str,

@@ -37,9 +37,7 @@ ENV = dict(
     COMET_IPC_PORT=IPC,
     # The mock harness streams a canned reply, so no agent CLI is needed.
     COMET_HARNESS="mock",
-    # Empty client id forces dev-mode auth (apps/comet's documented escape
-    # hatch), so a detached daemon with no TTY doesn't need `comet login`.
-    COMET_WORKOS_CLIENT_ID="",
+    # Keep the detached test engine quiet; Nova has no hosted sign-in phase.
     RUST_LOG="warn",
     TERM="xterm-256color",
 )

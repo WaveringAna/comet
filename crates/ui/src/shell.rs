@@ -34,6 +34,7 @@ use crate::rail;
 use crate::settings::appearance::{AppearanceEvent, AppearancePage};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::developer::{DeveloperEvent, DeveloperPage};
+use crate::settings::nova::NovaPage;
 use crate::settings::pi::{PiSection, PiSettingsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
@@ -41,8 +42,7 @@ use crate::settings::{
     SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
 };
 use crate::state::{
-    AppState, ConnectionStatus, EngineBootConfig, GatePhase, Indicator, OrgRow, format_time_ago,
-    org_name_valid, parse_orgs, sort_memberships,
+    AppState, ConnectionStatus, EngineBootConfig, GatePhase, Indicator, format_time_ago,
 };
 use crate::terminal::panel::{
     TerminalPanel, TerminalPanelEvent, ToggleTerminal, clamp_terminal_height,
@@ -163,10 +163,11 @@ pub enum SettingsSection {
     PiAdvanced,
     Archived,
     Developer,
+    Nova,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 8] = [
+    pub const ALL: [SettingsSection; 9] = [
         SettingsSection::Appearance,
         SettingsSection::Shortcuts,
         SettingsSection::PiOverview,
@@ -175,6 +176,7 @@ impl SettingsSection {
         SettingsSection::PiAdvanced,
         SettingsSection::Archived,
         SettingsSection::Developer,
+        SettingsSection::Nova,
     ];
 
     /// Sidebar + header label (comet settings-sidebar.tsx SECTIONS / __root.tsx
@@ -189,6 +191,7 @@ impl SettingsSection {
             SettingsSection::PiAdvanced => "Pi advanced",
             SettingsSection::Archived => "Archived sessions",
             SettingsSection::Developer => "Developer",
+            SettingsSection::Nova => "Nova Engine",
         }
     }
 }
@@ -465,16 +468,6 @@ enum UpdateFlow {
     Failed(SharedString),
 }
 
-/// The "Create your workspace" gate (feature-inventory §1.2 OrgGate).
-struct OrgGateUi {
-    name_input: Entity<ComposerInput>,
-    orgs: Loadable<Vec<OrgRow>>,
-    submitting: bool,
-    error: Option<SharedString>,
-    task: Option<Task<()>>,
-    _events: Subscription,
-}
-
 pub struct Shell {
     state: Entity<AppState>,
     transcript: Entity<Transcript>,
@@ -492,6 +485,7 @@ pub struct Shell {
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     archived_page: Option<Entity<ArchivedPage>>,
+    nova_page: Option<Entity<NovaPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     appearance_sub: Option<Subscription>,
     developer_page: Option<Entity<DeveloperPage>>,
@@ -551,9 +545,7 @@ pub struct Shell {
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
     install: comet_update::InstallKind,
-    org: Option<OrgGateUi>,
     mutate_task: Option<Task<()>>,
-    auth_task: Option<Task<()>>,
     /// Kept for the failed-gate "Retry" action.
     boot: EngineBootConfig,
     data_dir: PathBuf,
@@ -702,6 +694,7 @@ impl Shell {
             Some("settings/pi/advanced") => Route::Settings(SettingsSection::PiAdvanced),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             Some("settings/developer") => Route::Settings(SettingsSection::Developer),
+            Some("settings/nova") => Route::Settings(SettingsSection::Nova),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {
                 state.update(cx, |s, _| s.auto_selected = true);
@@ -712,12 +705,9 @@ impl Shell {
         // More capture knobs of the same kind: `COMET_OPEN_DIALOG=rename|delete`
         // opens that dialog for the first chat once chats land; `=model` pops
         // the combined harness/model menu once the shell is Ready;
-        // `COMET_FORCE_GATE=signin|org|failed` renders that gate regardless of
-        // real auth state (display-only — for styling passes).
+        // `COMET_FORCE_GATE=failed` renders the engine failure gate for styling.
         let debug_dialog = std::env::var("COMET_OPEN_DIALOG").ok();
         let debug_gate = match std::env::var("COMET_FORCE_GATE").ok().as_deref() {
-            Some("signin") => Some(GatePhase::SignIn),
-            Some("org") => Some(GatePhase::OrgGate),
             Some("failed") => Some(GatePhase::Failed(
                 "Could not reach the comet engine on port 27901".into(),
             )),
@@ -738,6 +728,7 @@ impl Shell {
             route,
             nav,
             archived_page: None,
+            nova_page: None,
             appearance_page: None,
             appearance_sub: None,
             developer_page: None,
@@ -768,9 +759,7 @@ impl Shell {
             update_task: None,
             update_dismissed: None,
             install: comet_update::detect_install(),
-            org: None,
             mutate_task: None,
-            auth_task: None,
             boot,
             data_dir,
             settings,
@@ -1443,6 +1432,16 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::Nova => {
+                if self.nova_page.is_none() {
+                    let state = self.state.clone();
+                    self.nova_page = Some(cx.new(|cx| NovaPage::new(state, cx)));
+                }
+                match &self.nova_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
         }
     }
 
@@ -1535,165 +1534,6 @@ impl Shell {
             serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
             cx,
         );
-        cx.notify();
-    }
-
-    fn sign_out(&mut self, cx: &mut Context<Self>) {
-        self.user_menu_open = false;
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.auth_task = Some(cx.spawn(async move |this, cx| {
-            if let Err(err) = engine
-                .client()
-                .call(methods::SIGN_OUT, serde_json::json!({}))
-                .await
-            {
-                this.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(format!("Sign out failed: {err}").into());
-                    cx.notify();
-                })
-                .ok();
-            }
-        }));
-        cx.notify();
-    }
-
-    fn start_sign_in(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.auth_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SIGN_IN, serde_json::json!({}))
-                .await;
-            this.update(cx, |shell, cx| match result {
-                Ok(value) => {
-                    if let Some(url) = value.get("url").and_then(|u| u.as_str()) {
-                        cx.open_url(url);
-                    }
-                }
-                Err(err) => {
-                    shell.sidebar_notice = Some(format!("Sign in failed: {err}").into());
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
-    }
-
-    // ---- org gate ----
-
-    fn ensure_org_ui(&mut self, cx: &mut Context<Self>) {
-        if self.org.is_some() {
-            return;
-        }
-        let name_input = cx.new(|cx| ComposerInput::new("Workspace name", cx));
-        let events = cx.subscribe(&name_input, |this: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                this.create_org(cx);
-            }
-        });
-        self.org = Some(OrgGateUi {
-            name_input,
-            orgs: Loadable::Idle,
-            submitting: false,
-            error: None,
-            task: None,
-            _events: events,
-        });
-        self.load_orgs(cx);
-    }
-
-    fn load_orgs(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let Some(org) = self.org.as_mut() else { return };
-        org.orgs = Loadable::Loading;
-        org.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::LIST_ORGS, serde_json::json!({}))
-                .await;
-            this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
-                    org.orgs = match result {
-                        Ok(value) => Loadable::Ready(sort_memberships(parse_orgs(&value))),
-                        Err(err) => Loadable::Error(err.to_string()),
-                    };
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn create_org(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let Some(org) = self.org.as_mut() else { return };
-        if org.submitting {
-            return;
-        }
-        let name = org.name_input.read(cx).text().trim().to_string();
-        if !org_name_valid(&name) {
-            org.error = Some("Enter a workspace name".into());
-            cx.notify();
-            return;
-        }
-        org.submitting = true;
-        org.error = None;
-        org.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::CREATE_ORG, serde_json::json!({ "name": name }))
-                .await;
-            this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
-                    org.submitting = false;
-                    if let Err(err) = result {
-                        org.error = Some(format!("{err}").into());
-                    }
-                    // Success: the AuthStatus stream flips to SignedIn and the
-                    // gate falls away on its own.
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn select_org(&mut self, organization_id: String, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let Some(org) = self.org.as_mut() else { return };
-        org.submitting = true;
-        org.error = None;
-        org.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(
-                    methods::SELECT_ORG,
-                    serde_json::json!({ "organizationId": organization_id }),
-                )
-                .await;
-            this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
-                    org.submitting = false;
-                    if let Err(err) = result {
-                        org.error = Some(format!("{err}").into());
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
         cx.notify();
     }
 
@@ -1970,6 +1810,7 @@ impl Shell {
             SettingsSection::PiAdvanced => icons::SETTINGS_MINIMALISTIC,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
             SettingsSection::Developer => icons::TERMINAL,
+            SettingsSection::Nova => icons::GLOBAL,
         };
         let nav_row = |item: SettingsSection| {
             let selected = item == section;
@@ -2056,6 +1897,13 @@ impl Shell {
                             .into_iter()
                             .map(&nav_row),
                         ),
+                    )
+                    .child(nav_label("Nova", 12.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(nav_row(SettingsSection::Nova)),
                     )
                     .child(nav_label("Workspace", 12.0))
                     .child(
@@ -2293,7 +2141,15 @@ impl Shell {
     /// section (folder rows, add-project), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let user = self.state.read(cx).auth_user().cloned();
+        let (local_id, local_name) = {
+            let state = self.state.read(cx);
+            let local_id = state.local_device_id.clone();
+            let local_name = local_id
+                .as_deref()
+                .and_then(|id| state.devices.iter().find(|device| device.id == id))
+                .map(|device| device.name.clone());
+            (local_id, local_name)
+        };
 
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
@@ -2362,11 +2218,8 @@ impl Shell {
         let glass = Theme::GLASS_ALPHA < 1.0;
         let sidebar_fade = theme.surface;
 
-        let user_line: SharedString = user
-            .as_ref()
-            .map(|u| u.name.clone().unwrap_or_else(|| u.email.clone()).into())
-            .unwrap_or_else(|| SharedString::from("Not signed in"));
-        let user_email: Option<SharedString> = user.as_ref().map(|u| u.email.clone().into());
+        let user_line: SharedString = local_name.unwrap_or_else(|| "Nova Engine".into()).into();
+        let user_email: Option<SharedString> = local_id.map(Into::into);
         let user_menu = self.render_user_menu(user_line.clone(), user_email.clone(), theme, cx);
 
         let selected_project = self.state.read(cx).selected_project.clone();
@@ -2610,12 +2463,16 @@ impl Shell {
     /// Fetch the manifest and stage the new `Comet.app` under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
-        let edge_url = self.boot.edge_url.clone();
+        let Some(update_url) = self.boot.update_url.clone() else {
+            self.update_flow = UpdateFlow::Failed("no Nova update server configured".into());
+            cx.notify();
+            return;
+        };
         let data_dir = self.data_dir.clone();
         self.update_flow = UpdateFlow::Downloading;
         let download = Tokio::spawn(cx, async move {
-            let manifest = comet_update::fetch_latest(&edge_url).await?;
-            comet_update::stage_mac_app(&edge_url, &manifest, &data_dir).await
+            let manifest = comet_update::fetch_latest(&update_url).await?;
+            comet_update::stage_mac_app(&update_url, &manifest, &data_dir).await
         });
         self.update_task = Some(cx.spawn(async move |this, cx| {
             let outcome = match download.await {
@@ -2658,8 +2515,7 @@ impl Shell {
         }
     }
 
-    /// UserMenu (§1.6): name/email trigger row; menu with plan badge, Open
-    /// settings, Sign out.
+    /// Local Nova identity menu: device name/id and settings.
     fn render_user_menu(
         &mut self,
         user_line: SharedString,
@@ -2754,9 +2610,7 @@ impl Shell {
             // (exactly as wide as the trigger row — sidebar minus its p-2
             // gutters), `flex-col gap-0.5`, then: one small muted email line
             // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
-            // "Settings", separator, "Sign out". Both rows are plain
-            // `menuItem`s with muted 16px icons — sign-out carries NO
-            // destructive tone in the original.
+            // "Settings". Pairing and trust controls live in Nova settings.
             let menu = popover::popover_card(theme)
                 .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -2789,18 +2643,6 @@ impl Shell {
                                 .text_color(theme.text_muted),
                         )
                         .child(SharedString::from("Settings")),
-                )
-                .child(popover::menu_separator())
-                .child(
-                    popover::menu_row(theme, false, "user-menu-signout")
-                        .id("user-menu-signout")
-                        .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx)))
-                        .child(
-                            icon(icons::LOGOUT_2)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Sign out")),
                 )
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu_above("user-menu-popover", menu));
@@ -3644,65 +3486,7 @@ impl Shell {
                         .child(SharedString::from("Retry")),
                 )
                 .into_any_element(),
-            // Login card (comet App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Comet", copy, full-width white Log in button.
-            _ => div()
-                .w(px(360.0))
-                .px(px(32.0))
-                .py(px(40.0))
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface_raised)
-                .shadow_lg()
-                .flex()
-                .flex_col()
-                .items_center()
-                .text_center()
-                .child(
-                    icon(icons::COMET_LOGO)
-                        .w(px(31.4))
-                        .h(px(36.0))
-                        .text_color(theme.text),
-                )
-                .child(
-                    div()
-                        .mt(px(24.0))
-                        .text_size(px(18.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(SharedString::from("Log in to Comet")),
-                )
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .mb(px(24.0))
-                        .text_size(px(13.0))
-                        .line_height(px(19.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "This opens your browser to finish logging in — you'll come right back.",
-                        )),
-                )
-                .child(
-                    div()
-                        .id("sign-in")
-                        .w_full()
-                        .h(px(36.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .bg(theme.text)
-                        .text_size(px(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.bg)
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.9))
-                        .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
-                        .child(SharedString::from("Log in")),
-                )
-                .into_any_element(),
+            _ => Empty.into_any_element(),
         };
         div()
             .size_full()
@@ -3716,237 +3500,13 @@ impl Shell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    // Keyed per phase (comet App.tsx `<div key={phase}
-                    // className="animate-in">`): every gate swap replays the
-                    // 0.5s entrance instead of mutating one animated element.
-                    .child(motion::fade_in(
-                        match phase {
-                            GatePhase::SignIn => "gate-card-signin",
-                            _ => "gate-card-failed",
-                        },
-                        div().child(content),
-                    )),
-            )
-            .into_any_element()
-    }
-
-    /// The OrgGate ("Create your workspace"): name form + existing memberships
-    /// + "Use a different account" (feature-inventory §1.2).
-    fn render_org_gate(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.ensure_org_ui(cx);
-        let theme = Theme::of(cx).clone();
-        let Some(org) = self.org.as_ref() else {
-            return Empty.into_any_element();
-        };
-        let submitting = org.submitting;
-        let error = org.error.clone();
-        let name_input = org.name_input.clone();
-        let orgs = org.orgs.clone();
-
-        let email: Option<SharedString> = self
-            .state
-            .read(cx)
-            .auth_user()
-            .map(|u| u.email.clone().into());
-
-        let memberships: AnyElement =
-            match &orgs {
-                Loadable::Idle | Loadable::Loading => div()
-                    .mt(px(24.0))
-                    .child(popover::skeleton_rows("org-skeleton", &theme, 2))
-                    .into_any_element(),
-                Loadable::Error(message) => div()
-                    .mt(px(24.0))
-                    .child(
-                        popover::error_row(&theme, message).child(
-                            div()
-                                .id("orgs-retry")
-                                .px(px(Theme::SPACE_SM))
-                                .py(px(3.0))
-                                .rounded(px(Theme::CONTROL_RADIUS))
-                                .border_1()
-                                .border_color(theme.border)
-                                .text_color(theme.text)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.element_hover))
-                                .on_click(cx.listener(|this, _, _, cx| this.load_orgs(cx)))
-                                .child(SharedString::from("Retry")),
-                        ),
-                    )
-                    .into_any_element(),
-                Loadable::Ready(rows) if rows.is_empty() => Empty.into_any_element(),
-                Loadable::Ready(rows) => div()
-                    .mt(px(24.0))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .pb(px(8.0))
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from(
-                                "Or continue in a workspace you belong to",
-                            )),
-                    )
-                    .child(div().flex().flex_col().gap(px(4.0)).children(
-                        rows.iter().enumerate().map(|(ix, row)| {
-                            let org_id = row.organization_id.clone();
-                            div()
-                                .id(("org-row", ix))
-                                .px(px(12.0))
-                                .py(px(8.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.bg)
-                                .text_size(px(13.0))
-                                .text_color(theme.text)
-                                .when(submitting, |el| el.opacity(0.5))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(crate::theme::wash(0.11)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select_org(org_id.clone(), cx);
-                                }))
-                                .child(SharedString::from(row.name.clone()))
-                        }),
-                    ))
-                    .into_any_element(),
-            };
-
-        // comet App.tsx OrgGate: w-400 card on the grid — logo, headline,
-        // explainer (+ signed-in email), name form with a white Create button,
-        // then existing memberships and the account escape hatch.
-        let blurb: SharedString = match email {
-            Some(email) => format!(
-                "Comet is organized around workspaces — create one for yourself or your team. Signed in as {email}."
-            )
-            .into(),
-            None => {
-                "Comet is organized around workspaces — create one for yourself or your team."
-                    .into()
-            }
-        };
-        let card = div()
-            .w(px(400.0))
-            .px(px(32.0))
-            .py(px(36.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .child(
-                icon(icons::COMET_LOGO)
-                    .w(px(24.4))
-                    .h(px(28.0))
-                    .text_color(theme.text),
-            )
-            .child(
-                div()
-                    .mt(px(20.0))
-                    .text_size(px(18.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from("Create your workspace")),
-            )
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .mb(px(24.0))
-                    .text_size(px(13.0))
-                    .line_height(px(19.0))
-                    .text_color(theme.text_muted)
-                    .child(blurb),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(36.0))
-                            .flex()
-                            .items_center()
-                            .px(px(12.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg)
-                            .text_size(px(13.0))
-                            .child(name_input),
-                    )
-                    .child(
-                        div()
-                            .id("create-org")
-                            .h(px(36.0))
-                            .px(px(16.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.0))
-                            .bg(theme.text)
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.bg)
-                            .when(submitting, |el| el.opacity(0.5))
-                            .cursor_pointer()
-                            .hover(|s| s.opacity(0.9))
-                            .on_click(cx.listener(|this, _, _, cx| this.create_org(cx)))
-                            .child(SharedString::from(if submitting {
-                                "Creating…"
-                            } else {
-                                "Create"
-                            })),
-                    ),
-            )
-            .child(memberships)
-            .when_some(error, |el, message| {
-                el.child(
-                    div()
-                        .mt(px(16.0))
-                        .text_size(px(12.0))
-                        .line_height(px(17.0))
-                        .text_color(crate::theme::oklch(0.81, 0.108, 19.6).opacity(0.9)) // red-300
-                        .child(message),
-                )
-            })
-            .child(
-                div().mt(px(24.0)).flex().flex_row().child(
-                    div()
-                        .id("org-signout")
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted.opacity(0.6))
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.text))
-                        .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx)))
-                        .child(SharedString::from("Use a different account")),
-                ),
-            );
-
-        div()
-            .size_full()
-            .relative()
-            .bg(theme.bg)
-            .child(grid_backdrop(&theme))
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(motion::fade_in("org-gate-card", card)),
+                    .child(motion::fade_in("gate-card-failed", div().child(content))),
             )
             .into_any_element()
     }
 }
 
-/// The sign-in gate's faint grid backdrop (comet styles.css `.bg-grid`):
+/// The failed-engine gate's faint grid backdrop:
 /// 44px hairlines at white 3.5%, with the radial mask approximated by edge
 /// gradients back into the page background (gpui has no mask-image).
 fn grid_backdrop(theme: &Theme) -> AnyElement {
@@ -4429,11 +3989,7 @@ impl Render for Shell {
                     .child(motion::fade_in("phase-app", page))
             }
             GatePhase::Loading => root, // splash overlay covers boot
-            GatePhase::OrgGate => {
-                let card = self.render_org_gate(cx);
-                root.child(card)
-            }
-            phase @ (GatePhase::Failed(_) | GatePhase::SignIn) => {
+            phase @ GatePhase::Failed(_) => {
                 let card = self.render_gate_card(phase, cx);
                 root.child(card)
             }

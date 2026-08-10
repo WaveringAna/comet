@@ -1,5 +1,5 @@
-//! Generates a session-doc snapshot fixture for the cross-language compat check
-//! (`edge/scripts/compat-check.mjs`). Usage: `cargo run -p comet-doc --example gen_fixture -- <out>`
+//! Generates a deterministic session-doc snapshot fixture for schema inspection.
+//! Usage: `cargo run -p comet-doc --example gen_fixture -- <out>`
 
 use comet_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,

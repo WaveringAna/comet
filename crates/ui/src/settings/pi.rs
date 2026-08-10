@@ -3,7 +3,7 @@
 //!
 //! The page always names both relevant contexts: the device that launches Pi
 //! and the native Pi scope (global or the selected project). Mutations travel
-//! through relay-forwardable engine RPCs; the viewport never reads dotfiles or
+//! through device-routable Nova RPCs; the viewport never reads dotfiles or
 //! receives credential material.
 
 use std::time::{Duration, Instant};

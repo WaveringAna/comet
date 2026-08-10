@@ -8,7 +8,7 @@
 use chrono::Utc;
 use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use comet_proto::view::ConnectionStatus;
-use comet_proto::{AuthState, Chat, Project, UserProfile};
+use comet_proto::{Chat, Project};
 use comet_tui::app::App;
 use comet_tui::link::Update;
 use comet_tui::render;
@@ -73,14 +73,6 @@ fn entry(id: &str, role: MessageRole, parts: Vec<MessagePart>) -> SessionMessage
 fn scene() -> App {
     let mut app = App::with_theme(Theme::dark());
     app.apply(Update::Connection(ConnectionStatus::Ready));
-    app.apply(Update::Auth(Box::new(AuthState::SignedIn {
-        user: UserProfile {
-            id: "u1".into(),
-            email: "imisterlee@gmail.com".into(),
-            name: Some("Wing Lee".into()),
-        },
-        org_id: Some("org".into()),
-    })));
     app.apply(Update::Projects(vec![
         project("s1", "/home/w/comet-native"),
         project("s2", "/home/w/website"),

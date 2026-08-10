@@ -47,7 +47,6 @@ ENV = dict(
     COMET_DATA_DIR=DATA_DIR,
     COMET_IPC_PORT=IPC,
     COMET_HARNESS="mock",
-    COMET_WORKOS_CLIENT_ID="",
     # Pace the mock stream so a mid-run frame is catchable.
     COMET_MOCK_DELAY_MS="420",
     RUST_LOG="warn",
