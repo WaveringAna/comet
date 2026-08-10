@@ -11,13 +11,13 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use comet_doc::SessionCommandPayload;
+use comet_doc::{MessagePart, SessionCommandPayload};
 use comet_engine::peer_sync::PeerSync;
 use comet_engine::{EngineCore, HarnessRegistry};
 use comet_harness::{Harness, HarnessError, RunControls};
 use comet_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
+    SessionStatus, SteeringMode,
 };
 use comet_rpc::methods;
 
@@ -122,6 +122,17 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     std::fs::create_dir_all(dir).expect("create data dir");
     std::fs::write(dir.join("device-id"), device_id).expect("write device id");
     EngineCore::assemble_on_port(dir, registry(), HarnessId::Mock, 0).expect("engine assembles")
+}
+
+async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !predicate() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +374,103 @@ async fn paired_engines_converge_workspace_and_chat_docs_directly() {
                 .any(|entry| entry.id == "message-b")
         );
     }
+
+    // The UI workflow originates on A but picks B in the add-project palette:
+    // A writes a B-owned project/chat and queues the first run locally. One
+    // direct sync delivers the workspace row before the command doc, so only B
+    // executes it; the next exchange carries transcript and session status back.
+    core_a
+        .workspace
+        .create_project("project-on-b", "device-b", "/tmp", None, false)
+        .expect("remote-hosted project created from A");
+    core_a
+        .workspace
+        .create_chat("chat-on-b", "project-on-b", None, None)
+        .expect("remote-hosted chat created from A");
+    core_a
+        .doc_host
+        .queue_command(
+            "chat-on-b",
+            SessionCommandPayload::Run {
+                request: RunRequest {
+                    prompt: "start on B".into(),
+                    model: None,
+                    reasoning: None,
+                    model_options: serde_json::Map::new(),
+                    cwd: "/tmp".into(),
+                    sandbox: SandboxLevel::WorkspaceWrite,
+                    auto_approve: true,
+                    attachments: Vec::new(),
+                    resume: None,
+                },
+                message_id: "message-on-b".into(),
+            },
+        )
+        .expect("queue remote-hosted run from A");
+
+    PeerSync::new(
+        core_a.nova.clone(),
+        core_a.workspace.clone(),
+        core_a.doc_host.clone(),
+    )
+    .sync_peer("device-b")
+    .await
+    .expect("deliver remote-hosted run to B");
+
+    wait_for(
+        || {
+            core_b
+                .doc_host
+                .open("chat-on-b")
+                .expect("B chat")
+                .doc()
+                .read_entries()
+                .unwrap_or_default()
+                .iter()
+                .flat_map(|entry| &entry.parts)
+                .any(
+                    |part| matches!(part, MessagePart::Text { text, .. } if text == "remote reply"),
+                )
+        },
+        "remote run on B",
+    )
+    .await;
+
+    PeerSync::new(
+        core_a.nova.clone(),
+        core_a.workspace.clone(),
+        core_a.doc_host.clone(),
+    )
+    .sync_peer("device-b")
+    .await
+    .expect("sync B's result back to A");
+    assert!(
+        core_a
+            .doc_host
+            .open("chat-on-b")
+            .expect("A chat")
+            .doc()
+            .read_entries()
+            .expect("A transcript")
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .any(|part| matches!(part, MessagePart::Text { text, .. } if text == "remote reply")),
+        "A must observe B's transcript"
+    );
+    assert!(
+        core_a
+            .workspace
+            .doc()
+            .read_sessions()
+            .expect("A session rows")
+            .iter()
+            .any(|session| {
+                session.chat_id == "chat-on-b"
+                    && session.device_id == "device-b"
+                    && session.status == SessionStatus::Idle
+            }),
+        "A must observe B's final session status"
+    );
 
     listener_a.abort();
     listener_b.abort();

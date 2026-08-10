@@ -63,12 +63,13 @@ impl Render for ProjectGhost {
     }
 }
 
-/// The add-project palette (a command-K surface, summoned by ⌘K): search bar,
-/// local folder browser, and kbd-hint footer.
+/// The add-project palette (a command-K surface, summoned by ⌘K): device
+/// picker, folder browser on that Nova, and kbd-hint footer.
 pub(super) struct CreateProjectFlow {
-    /// The local device id is retained internally for project compatibility;
-    /// it is not a picker choice or a visible concept in this flow.
+    /// The Nova whose filesystem is being browsed and which will host sessions
+    /// for the resulting project.
     device: Option<Device>,
+    device_menu_open: bool,
     /// Filter input; the right arrow descends into the highlighted folder and
     /// Enter chooses the folder currently shown in the breadcrumbs.
     search: Entity<ComposerInput>,
@@ -666,6 +667,7 @@ impl Shell {
         let has_device = device.is_some();
         self.add_project = Some(CreateProjectFlow {
             device,
+            device_menu_open: false,
             search,
             browser: Loadable::Idle,
             browser_path: None,
@@ -738,12 +740,32 @@ impl Shell {
         self.load_project_folders(Some(full), cx);
     }
 
-    /// ListFolders on the local engine.
+    /// Select the Nova whose filesystem backs the project, then browse its home.
+    fn set_add_project_device(&mut self, device: Device, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_project.as_mut() else {
+            return;
+        };
+        flow.device = Some(device);
+        flow.device_menu_open = false;
+        flow.browser_path = None;
+        flow.home = None;
+        flow.browser_repo = false;
+        flow.error = None;
+        let search = flow.search.clone();
+        search.update(cx, |input, cx| input.set_text("", cx));
+        self.load_project_folders(None, cx);
+    }
+
+    /// ListFolders on the Nova selected in the project picker.
     pub(super) fn load_project_folders(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let local_device_id = self.state.read(cx).local_device_id.clone();
         let Some(flow) = self.add_project.as_mut() else {
+            return;
+        };
+        let Some(device_id) = flow.device.as_ref().map(|device| device.id.clone()) else {
             return;
         };
         let went_home = path.is_none();
@@ -756,12 +778,25 @@ impl Shell {
             if let Some(p) = &path {
                 params.insert("path".into(), serde_json::Value::String(p.clone()));
             }
+            if local_device_id.as_deref() != Some(device_id.as_str()) {
+                params.insert(
+                    "targetDeviceId".into(),
+                    serde_json::Value::String(device_id.clone()),
+                );
+            }
             let result = engine
                 .client()
                 .call(methods::LIST_FOLDERS, serde_json::Value::Object(params))
                 .await;
             this.update(cx, |shell, cx| {
                 if let Some(flow) = shell.add_project.as_mut() {
+                    // A slower reply from the previously selected Nova must not
+                    // replace the new device's folder listing.
+                    if flow.device.as_ref().map(|device| device.id.as_str())
+                        != Some(device_id.as_str())
+                    {
+                        return;
+                    }
                     flow.browser = match result {
                         Ok(value) => match serde_json::from_value::<FolderListing>(value) {
                             Ok(listing) => {
@@ -954,8 +989,8 @@ impl Shell {
         }
     }
 
-    /// The palette card: ⌘K search bar (with the ⌘⏎ add / esc chips), local
-    /// breadcrumbs, folder list, and kbd-hint footer.
+    /// The palette card: ⌘K search bar (with the ⌘⏎ add / esc chips), Nova
+    /// picker, breadcrumbs, folder list, and kbd-hint footer.
     pub(super) fn render_add_project_overlay(
         &mut self,
         viewport: gpui::Size<Pixels>,
@@ -981,6 +1016,8 @@ impl Shell {
             focus,
             list_scroll,
             home,
+            selected_device,
+            device_menu_open,
         ) = {
             let flow = self.add_project.as_ref()?;
             (
@@ -994,8 +1031,19 @@ impl Shell {
                 flow.focus.clone(),
                 flow.list_scroll.clone(),
                 flow.home.clone(),
+                flow.device.clone(),
+                flow.device_menu_open,
             )
         };
+        let (mut devices, local_device_id) = {
+            let state = self.state.read(cx);
+            (state.devices.clone(), state.local_device_id.clone())
+        };
+        devices.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         let rows = self.add_project_filtered(cx);
         let query_empty = search.read(cx).is_empty();
         let hairline = crate::theme::white_alpha(0.06);
@@ -1016,6 +1064,112 @@ impl Shell {
                 .font_family(theme.font_mono.clone())
                 .text_color(theme.text_muted.opacity(0.7))
         };
+
+        let platform_glyph = |platform: &str| match platform {
+            "macos" | "darwin" => icons::LAPTOP,
+            "ios" | "android" => icons::SMARTPHONE,
+            _ => icons::MONITOR,
+        };
+        let selected_device_name: SharedString = selected_device
+            .as_ref()
+            .map(|device| device.name.clone().into())
+            .unwrap_or_else(|| SharedString::from("Choose a Nova"));
+        let selected_device_glyph = platform_glyph(
+            selected_device
+                .as_ref()
+                .map(|device| device.platform.as_str())
+                .unwrap_or_default(),
+        );
+        let mut device_trigger = div()
+            .id("add-project-device-trigger")
+            .relative()
+            .h(px(28.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .bg(if device_menu_open {
+                crate::theme::white_alpha(0.07)
+            } else {
+                crate::theme::white_alpha(0.04)
+            })
+            .hover(|s| s.bg(crate::theme::white_alpha(0.08)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                if let Some(flow) = this.add_project.as_mut() {
+                    flow.device_menu_open = !flow.device_menu_open;
+                }
+                cx.notify();
+            }))
+            .child(
+                icon(selected_device_glyph)
+                    .size(px(15.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .max_w(px(120.0))
+                    .truncate()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(selected_device_name),
+            )
+            .child(
+                icon(icons::ALT_ARROW_DOWN)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted.opacity(0.6)),
+            );
+        if device_menu_open {
+            let menu = popover::popover_card(&theme)
+                .w(px(240.0))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if let Some(flow) = this.add_project.as_mut() {
+                        flow.device_menu_open = false;
+                    }
+                    cx.notify();
+                }))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(popover::menu_heading(&theme, "Run sessions on"))
+                .children(devices.into_iter().enumerate().map(|(ix, device)| {
+                    let selected = selected_device.as_ref().is_some_and(|d| d.id == device.id);
+                    let is_local = local_device_id.as_deref() == Some(device.id.as_str());
+                    let glyph = platform_glyph(&device.platform);
+                    let name: SharedString = device.name.clone().into();
+                    let picked = device.clone();
+                    popover::menu_row(&theme, selected, format!("add-project-device-{ix}"))
+                        .id(("add-project-device", ix))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_add_project_device(picked.clone(), cx)
+                        }))
+                        .child(
+                            icon(glyph)
+                                .size(px(15.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(div().flex_1().min_w_0().truncate().child(name))
+                        .when(is_local, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.text_muted.opacity(0.45))
+                                    .child(SharedString::from("This Mac")),
+                            )
+                        })
+                        .when(selected, |el| el.child(popover::menu_check(&theme)))
+                }));
+            device_trigger = device_trigger.child(popover::anchored_menu(
+                "add-project-device-menu",
+                menu.into_any_element(),
+            ));
+        }
 
         // ── search bar (the ⌘K bar): summon chip · input · use-this-folder
         //    action · esc. Keep the shortcut visible, but name the action so
@@ -1081,6 +1235,7 @@ impl Shell {
                     .text_size(px(14.0))
                     .child(search.clone().into_any_element()),
             )
+            .child(device_trigger)
             .child(submit_chip)
             .child(
                 key_chip(&theme)
@@ -1297,7 +1452,7 @@ impl Shell {
                 .into_any_element()
         };
 
-        // ── body: local folder column (crumbs + list).
+        // ── body: selected Nova's folder column (crumbs + list).
         //    FIXED height — sparse folders and loading skeletons must not
         //    resize the card (the list fills and scrolls).
         let body = div().h(px(330.0)).flex().flex_row().items_stretch().child(

@@ -2868,13 +2868,20 @@ impl Shell {
 
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let has_projects = !self.state.read(cx).projects.is_empty();
-        let project_name: SharedString = self
-            .state
-            .read(cx)
-            .selected_project_row()
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_default()
-            .into();
+        let (project_name, project_device): (SharedString, SharedString) = {
+            let state = self.state.read(cx);
+            match state.selected_project_row() {
+                Some(project) => (
+                    project.display_name().to_string().into(),
+                    state
+                        .device_name(&project.device_id)
+                        .unwrap_or("Unknown Nova")
+                        .to_string()
+                        .into(),
+                ),
+                None => (SharedString::default(), SharedString::default()),
+            }
+        };
 
         // Content outlet: selected chat → transcript; nothing selected → the
         // "Send a message to start" canvas with a watermark; no projects at all
@@ -2935,7 +2942,8 @@ impl Shell {
             let helper: SharedString = if project_name.is_empty() {
                 "Send a message to start a new session.".into()
             } else {
-                format!("Send a message to start a session in {project_name}.").into()
+                format!("Send a message to start a session in {project_name} on {project_device}.")
+                    .into()
             };
             div()
                 .size_full()
