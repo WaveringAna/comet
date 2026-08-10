@@ -50,7 +50,7 @@ use serde::Deserialize;
 use tokio::sync::watch;
 
 use comet_doc::SessionCommandPayload;
-use comet_proto::{ChatConfig, HarnessId, PiSettingsScope};
+use comet_proto::{ChatConfig, CollaborationControlRequest, HarnessId, PiSettingsScope};
 use comet_rpc::{RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
@@ -613,6 +613,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_MODELS
             | methods::QUEUE_COMMAND
             | methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_COLLABORATIONS
+            | methods::COLLABORATION_CONTROL
             // Repos/worktrees/folders are device-local filesystem state.
             | methods::LIST_REPOS
             | methods::ADD_REPO
@@ -668,6 +670,7 @@ fn is_stream_method(method: &str) -> bool {
     matches!(
         method,
         methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_COLLABORATIONS
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::UPDATE_STATUS
@@ -808,6 +811,18 @@ impl RpcService for EngineRpc {
                     .workspace
                     .merged_sessions_watch(self.sessions.watch_sessions());
                 Ok(RpcReply::Stream(watch_stream(merged)))
+            }
+            methods::WATCH_COLLABORATIONS => Ok(RpcReply::Stream(watch_stream(
+                self.sessions.watch_collaborations(),
+            ))),
+            methods::COLLABORATION_CONTROL => {
+                let request: CollaborationControlRequest = parse_params(params)?;
+                let reply = self
+                    .sessions
+                    .collaboration_control(request)
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&reply)
             }
             methods::LOCAL_DEVICE => {
                 RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))

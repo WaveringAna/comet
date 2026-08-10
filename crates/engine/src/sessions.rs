@@ -22,16 +22,22 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
 use futures::StreamExt;
+use serde::Deserialize as _;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use comet_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     fold_event_into_parts, sanitize_tool_call,
 };
-use comet_harness::{CancellationToken, Harness, RunControls, SteerMessage};
+use comet_harness::{
+    CancellationToken, CollaborationBridgeEvent, CollaborationCommand, Harness, RunControls,
+    SteerMessage,
+};
 use comet_proto::{
-    AgentEvent, ChatUsage, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, ToolCall,
-    UserInputAnswer, UserInputQuestion,
+    AgentEvent, ChatUsage, ChildAgent, ChildAgentStatus, CollaborationAction,
+    CollaborationControlReply, CollaborationControlRequest, CollaborationMessage,
+    CollaborationSession, CollaborationSpeaker, DoneStatus, HarnessId, RunRequest, Session,
+    SessionStatus, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -79,6 +85,7 @@ struct RunHandle {
     cancel: watch::Sender<bool>,
     engine_tx: mpsc::UnboundedSender<AgentEvent>,
     pending_inputs: PendingInputs,
+    collaboration_tx: mpsc::Sender<CollaborationCommand>,
 }
 
 struct Inner {
@@ -93,6 +100,8 @@ struct Inner {
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
+    collaborations: Mutex<HashMap<String, CollaborationSession>>,
+    collaborations_tx: watch::Sender<Vec<CollaborationSession>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -122,6 +131,7 @@ impl SessionsEngine {
         ephemeral_diffs: Arc<EphemeralDiffStore>,
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
+        let (collaborations_tx, _) = watch::channel(Vec::new());
         Self {
             inner: Arc::new(Inner {
                 device_id,
@@ -133,6 +143,8 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
+                collaborations: Mutex::new(HashMap::new()),
+                collaborations_tx,
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -163,6 +175,289 @@ impl SessionsEngine {
     /// Status watch: the full session list, re-sent on every transition.
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
         self.inner.sessions_tx.subscribe()
+    }
+
+    /// Process-local collaboration snapshots. They intentionally do not ride
+    /// the workspace document: control ids and child output belong to the host.
+    pub fn watch_collaborations(&self) -> watch::Receiver<Vec<CollaborationSession>> {
+        self.inner.collaborations_tx.subscribe()
+    }
+
+    pub async fn collaboration_control(
+        &self,
+        request: CollaborationControlRequest,
+    ) -> Result<CollaborationControlReply, EngineError> {
+        let message = request.message.as_deref().unwrap_or("").trim().to_owned();
+        let message_for_room = message.clone();
+        let requested_agent = request.agent.clone().unwrap_or_else(|| "worker".into());
+        let requested_child = request.child_id.clone();
+        if matches!(
+            request.action,
+            CollaborationAction::Spawn
+                | CollaborationAction::Steer
+                | CollaborationAction::FollowUp
+                | CollaborationAction::Resume
+                | CollaborationAction::Room
+        ) && message.is_empty()
+        {
+            return Err(EngineError::Other(
+                "collaboration message cannot be empty".into(),
+            ));
+        }
+
+        if request.action == CollaborationAction::Room {
+            let child_id = request.child_id.clone().ok_or_else(|| {
+                EngineError::Other("choose a child before sending to the room".into())
+            })?;
+            let revive = lock(&self.inner.collaborations)
+                .get(&request.chat_id)
+                .and_then(|state| state.children.iter().find(|child| child.id == child_id))
+                .is_some_and(|child| {
+                    !matches!(
+                        child.status,
+                        ChildAgentStatus::Starting
+                            | ChildAgentStatus::Working
+                            | ChildAgentStatus::NeedsAttention
+                    )
+                });
+            self.inner.push_collaboration_message(
+                &request.chat_id,
+                CollaborationSpeaker::You,
+                Some(child_id.clone()),
+                &message,
+            );
+            let child_reply = if revive {
+                self.bridge_request(
+                    &request.chat_id,
+                    "resume",
+                    serde_json::json!({ "id": child_id, "message": message }),
+                )
+                .await?
+            } else {
+                self.bridge_request(
+                    &request.chat_id,
+                    "steer",
+                    serde_json::json!({ "id": child_id, "message": message, "mode": "auto" }),
+                )
+                .await?
+            };
+            let effective_child_id = child_reply
+                .get("details")
+                .and_then(|details| details.get("asyncId"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&child_id)
+                .to_owned();
+            if revive {
+                let now = now_ms();
+                self.inner.update_collaboration(&request.chat_id, |state| {
+                    let started_row = (effective_child_id != child_id)
+                        .then(|| {
+                            state
+                                .children
+                                .iter()
+                                .find(|child| child.id == effective_child_id)
+                                .cloned()
+                        })
+                        .flatten();
+                    let revived_index =
+                        state.children.iter().position(|child| child.id == child_id);
+                    if let Some(child) =
+                        revived_index.and_then(|index| state.children.get_mut(index))
+                    {
+                        child.id = effective_child_id.clone();
+                        if let Some(started) = started_row {
+                            child.cwd = started.cwd.or_else(|| child.cwd.take());
+                            child.model = started.model.or_else(|| child.model.take());
+                            child.effort = started.effort.or_else(|| child.effort.take());
+                            child.status = started.status;
+                            child.activity = started.activity;
+                            child.summary = started.summary;
+                            child.updated_at = started.updated_at.max(now);
+                        } else {
+                            child.status = ChildAgentStatus::Working;
+                            child.activity = Some("resuming".into());
+                            child.updated_at = now;
+                        }
+                    }
+                    if let Some(revived_index) = revived_index {
+                        let mut index = 0;
+                        state.children.retain(|child| {
+                            let keep = child.id != effective_child_id || index == revived_index;
+                            index += 1;
+                            keep
+                        });
+                    }
+                    for room_message in &mut state.messages {
+                        if room_message.child_id.as_deref() == Some(&child_id) {
+                            room_message.child_id = Some(effective_child_id.clone());
+                        }
+                    }
+                });
+            }
+            let parent_prompt = format!(
+                "[nova collaboration room · {effective_child_id}] the user said: {message}\n\nrespond to the user and coordinate with this child as needed."
+            );
+            let _ = self
+                .steer(&request.chat_id, &parent_prompt, Some(new_id()))
+                .await?;
+            self.inner.push_collaboration_message(
+                &request.chat_id,
+                CollaborationSpeaker::System,
+                Some(effective_child_id),
+                "delivered to parent and child",
+            );
+            return Ok(CollaborationControlReply {
+                ok: true,
+                message: "delivered to parent and child".into(),
+                data: None,
+            });
+        }
+
+        let (method, params) = match request.action {
+            CollaborationAction::Spawn => {
+                let agent = request.agent.as_deref().unwrap_or("worker");
+                let script = format!(
+                    "return runs.run(\"nova\", {{ agent: {}, task: {} }})",
+                    serde_json::to_string(agent).unwrap_or_else(|_| "\"worker\"".into()),
+                    serde_json::to_string(&message).unwrap_or_else(|_| "\"\"".into()),
+                );
+                (
+                    "spawn",
+                    serde_json::json!({ "workflowScript": script, "context": "fork" }),
+                )
+            }
+            CollaborationAction::Steer | CollaborationAction::FollowUp => {
+                let id = request
+                    .child_id
+                    .ok_or_else(|| EngineError::Other("choose a child to steer".into()))?;
+                let mode = if request.action == CollaborationAction::FollowUp {
+                    "follow_up"
+                } else {
+                    "steer"
+                };
+                (
+                    "steer",
+                    serde_json::json!({ "id": id, "message": message, "mode": mode }),
+                )
+            }
+            CollaborationAction::Resume => {
+                let id = request
+                    .child_id
+                    .ok_or_else(|| EngineError::Other("choose a child to resume".into()))?;
+                (
+                    "resume",
+                    serde_json::json!({ "id": id, "message": message }),
+                )
+            }
+            CollaborationAction::Stop => {
+                let id = request
+                    .child_id
+                    .ok_or_else(|| EngineError::Other("choose a child to stop".into()))?;
+                ("stop", serde_json::json!({ "id": id }))
+            }
+            CollaborationAction::Interrupt => {
+                let id = request
+                    .child_id
+                    .ok_or_else(|| EngineError::Other("choose a child to interrupt".into()))?;
+                ("interrupt", serde_json::json!({ "id": id }))
+            }
+            CollaborationAction::Refresh => ("status", serde_json::json!({})),
+            CollaborationAction::Room => unreachable!(),
+        };
+        let data = self
+            .bridge_request(&request.chat_id, method, params)
+            .await?;
+        if request.action == CollaborationAction::Spawn {
+            let id = data
+                .get("details")
+                .and_then(|details| details.get("asyncId"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| data.get("runId").and_then(serde_json::Value::as_str))
+                .unwrap_or("starting")
+                .to_owned();
+            let now = now_ms();
+            self.inner.update_collaboration(&request.chat_id, |state| {
+                state.available = true;
+                if !state.children.iter().any(|child| child.id == id) {
+                    state.children.push(ChildAgent {
+                        id: id.clone(),
+                        agent: requested_agent.clone(),
+                        role: None,
+                        goal: Some(message_for_room.clone()),
+                        cwd: None,
+                        model: None,
+                        effort: None,
+                        status: ChildAgentStatus::Working,
+                        started_at: now,
+                        updated_at: now,
+                        activity: Some("starting".into()),
+                        summary: None,
+                    });
+                    state.messages.push(CollaborationMessage {
+                        id: new_id(),
+                        speaker: CollaborationSpeaker::System,
+                        child_id: Some(id),
+                        body: format!("{requested_agent} joined the room"),
+                        created_at: now,
+                    });
+                }
+            });
+        } else if matches!(
+            request.action,
+            CollaborationAction::Steer
+                | CollaborationAction::FollowUp
+                | CollaborationAction::Resume
+        ) {
+            self.inner.push_collaboration_message(
+                &request.chat_id,
+                CollaborationSpeaker::You,
+                requested_child,
+                &message_for_room,
+            );
+        }
+        let label = match request.action {
+            CollaborationAction::Spawn => "child started",
+            CollaborationAction::Steer => "steer delivered",
+            CollaborationAction::FollowUp => "follow-up queued",
+            CollaborationAction::Resume => "child resumed",
+            CollaborationAction::Stop => "stop requested",
+            CollaborationAction::Interrupt => "interrupt requested",
+            CollaborationAction::Refresh => "fleet refreshed",
+            CollaborationAction::Room => unreachable!(),
+        };
+        Ok(CollaborationControlReply {
+            ok: true,
+            message: label.into(),
+            data: Some(data),
+        })
+    }
+
+    async fn bridge_request(
+        &self,
+        chat_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, EngineError> {
+        let target = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|run| run.collaboration_tx.clone())
+            .ok_or_else(|| EngineError::Other("start a Pi session before collaborating".into()))?;
+        let (tx, rx) = oneshot::channel();
+        let command = CollaborationCommand {
+            request_id: new_id(),
+            method: method.to_owned(),
+            params,
+            respond_to: tx,
+        };
+        target
+            .send(command)
+            .await
+            .map_err(|_| EngineError::Other("pi collaboration bridge is closed".into()))?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), rx)
+            .await
+            .map_err(|_| EngineError::Other("pi-subagents did not acknowledge the request".into()))?
+            .map_err(|_| EngineError::Other("pi collaboration reply was dropped".into()))?
+            .map_err(EngineError::Other)
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
@@ -339,6 +634,9 @@ impl SessionsEngine {
         let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (collaboration_tx, collaboration_rx) = mpsc::channel::<CollaborationCommand>(32);
+        let (collaboration_event_tx, collaboration_event_rx) =
+            mpsc::unbounded_channel::<CollaborationBridgeEvent>();
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
 
         // Input bridge: the harness asks questions; we mint the request id, park the
@@ -362,6 +660,8 @@ impl SessionsEngine {
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            collaboration: Some(collaboration_rx),
+            collaboration_events: Some(collaboration_event_tx),
         };
 
         lock(&self.inner.runs).insert(
@@ -374,8 +674,15 @@ impl SessionsEngine {
                 cancel: cancel_tx,
                 engine_tx,
                 pending_inputs,
+                collaboration_tx,
             },
         );
+        self.inner.set_parent_working(chat_id, true);
+        tokio::spawn(drive_collaboration_events(
+            self.inner.clone(),
+            chat_id.to_string(),
+            collaboration_event_rx,
+        ));
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -646,6 +953,49 @@ impl SessionsEngine {
 }
 
 impl Inner {
+    fn update_collaboration(&self, chat_id: &str, update: impl FnOnce(&mut CollaborationSession)) {
+        let mut states = lock(&self.collaborations);
+        let state = states
+            .entry(chat_id.to_owned())
+            .or_insert_with(|| CollaborationSession {
+                chat_id: chat_id.to_owned(),
+                available: false,
+                parent_working: false,
+                children: Vec::new(),
+                messages: Vec::new(),
+                error: None,
+            });
+        update(state);
+        let mut snapshot: Vec<_> = states.values().cloned().collect();
+        snapshot.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+        self.collaborations_tx.send_replace(snapshot);
+    }
+
+    fn set_parent_working(&self, chat_id: &str, working: bool) {
+        self.update_collaboration(chat_id, |state| state.parent_working = working);
+    }
+
+    fn push_collaboration_message(
+        &self,
+        chat_id: &str,
+        speaker: CollaborationSpeaker,
+        child_id: Option<String>,
+        body: &str,
+    ) {
+        self.update_collaboration(chat_id, |state| {
+            state.messages.push(CollaborationMessage {
+                id: new_id(),
+                speaker,
+                child_id,
+                body: body.to_owned(),
+                created_at: now_ms(),
+            });
+            if state.messages.len() > 200 {
+                state.messages.drain(..state.messages.len() - 200);
+            }
+        });
+    }
+
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
         let seq = match self.journal.append(chat_id, event) {
@@ -855,6 +1205,192 @@ impl Inner {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
+        }
+    }
+}
+
+fn text_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+}
+
+fn collaboration_completion_summary(data: &serde_json::Value) -> Option<String> {
+    if let Some(text) = data
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|result| text_field(result, &["output", "summary", "result", "text"]))
+    {
+        return Some(text.chars().take(800).collect());
+    }
+    let summary = text_field(data, &["summary", "result", "text"])?;
+    if let Some(json) = summary.split_once("Return:").map(|(_, json)| json.trim()) {
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        if let Ok(value) = serde_json::Value::deserialize(&mut deserializer)
+            && let Some(output) = text_field(&value, &["output", "summary", "result", "text"])
+        {
+            return Some(output.chars().take(800).collect());
+        }
+    }
+    Some(summary.chars().take(320).collect())
+}
+
+async fn drive_collaboration_events(
+    inner: Arc<Inner>,
+    chat_id: String,
+    mut events: mpsc::UnboundedReceiver<CollaborationBridgeEvent>,
+) {
+    while let Some(frame) = events.recv().await {
+        match frame.event.as_str() {
+            "subagents:rpc:v1:ready" | "bridge:ping" => {
+                let available = frame.event == "subagents:rpc:v1:ready"
+                    || frame
+                        .data
+                        .get("success")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true);
+                inner.update_collaboration(&chat_id, |state| {
+                    state.available = available;
+                    if available {
+                        state.error = None;
+                    }
+                });
+            }
+            "subagent:async-started" => {
+                let Some(id) = text_field(&frame.data, &["id", "runId"]) else {
+                    continue;
+                };
+                let now = now_ms();
+                let agent = text_field(&frame.data, &["agent"]).unwrap_or_else(|| "child".into());
+                let goal = text_field(&frame.data, &["goal", "task"]);
+                let cwd = text_field(&frame.data, &["cwd"]);
+                let model = text_field(&frame.data, &["model"]);
+                let effort = text_field(&frame.data, &["effort", "thinking"]);
+                inner.update_collaboration(&chat_id, |state| {
+                    state.available = true;
+                    if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
+                        child.status = ChildAgentStatus::Working;
+                        child.updated_at = now;
+                    } else {
+                        state.children.push(ChildAgent {
+                            id: id.clone(),
+                            agent: agent.clone(),
+                            role: None,
+                            goal: goal.clone(),
+                            cwd,
+                            model,
+                            effort,
+                            status: ChildAgentStatus::Working,
+                            started_at: frame
+                                .data
+                                .get("startedAt")
+                                .and_then(serde_json::Value::as_i64)
+                                .unwrap_or(now),
+                            updated_at: now,
+                            activity: Some("starting".into()),
+                            summary: None,
+                        });
+                    }
+                    state.messages.push(CollaborationMessage {
+                        id: new_id(),
+                        speaker: CollaborationSpeaker::System,
+                        child_id: Some(id.clone()),
+                        body: format!("{agent} joined the room"),
+                        created_at: now,
+                    });
+                });
+            }
+            "subagent:async-complete" => {
+                let Some(id) = text_field(&frame.data, &["runId", "id"]) else {
+                    continue;
+                };
+                let failed = frame
+                    .data
+                    .get("isError")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    || matches!(
+                        frame.data.get("status").and_then(serde_json::Value::as_str),
+                        Some("failed" | "errored" | "error")
+                    );
+                let summary = collaboration_completion_summary(&frame.data);
+                let now = now_ms();
+                inner.update_collaboration(&chat_id, |state| {
+                    if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
+                        child.status = if failed {
+                            ChildAgentStatus::Failed
+                        } else {
+                            ChildAgentStatus::Completed
+                        };
+                        child.updated_at = now;
+                        child.activity = None;
+                        child.summary = summary.clone();
+                    }
+                    state.messages.push(CollaborationMessage {
+                        id: new_id(),
+                        speaker: CollaborationSpeaker::Child,
+                        child_id: Some(id),
+                        body: summary.unwrap_or_else(|| {
+                            if failed {
+                                "run failed".into()
+                            } else {
+                                "work complete".into()
+                            }
+                        }),
+                        created_at: now,
+                    });
+                });
+            }
+            "subagent:control-event" | "subagent:steering-notice" => {
+                let event = frame.data.get("event").unwrap_or(&frame.data);
+                let id = text_field(event, &["runId", "id"])
+                    .or_else(|| text_field(&frame.data, &["runId", "id"]));
+                let message = text_field(&frame.data, &["noticeText", "message"])
+                    .or_else(|| text_field(event, &["message", "type"]));
+                if let Some(message) = message {
+                    let now = now_ms();
+                    inner.update_collaboration(&chat_id, |state| {
+                        if let Some(child) = id
+                            .as_deref()
+                            .and_then(|id| state.children.iter_mut().find(|child| child.id == id))
+                        {
+                            child.updated_at = now;
+                            child.activity = Some(message.clone());
+                            if message.contains("supervisor") || message.contains("attention") {
+                                child.status = ChildAgentStatus::NeedsAttention;
+                            }
+                        }
+                        state.messages.push(CollaborationMessage {
+                            id: new_id(),
+                            speaker: CollaborationSpeaker::System,
+                            child_id: id.clone(),
+                            body: message,
+                            created_at: now,
+                        });
+                    });
+                }
+            }
+            "subagent:process-terminal" => {
+                let Some(id) = text_field(&frame.data, &["runId", "id"]) else {
+                    continue;
+                };
+                inner.update_collaboration(&chat_id, |state| {
+                    if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
+                        if matches!(
+                            child.status,
+                            ChildAgentStatus::Working | ChildAgentStatus::Starting
+                        ) {
+                            child.status = ChildAgentStatus::Stopped;
+                            child.activity = None;
+                            child.updated_at = now_ms();
+                        }
+                    }
+                });
+            }
+            _ => {}
         }
     }
 }
@@ -1302,6 +1838,7 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
+            inner.set_parent_working(&chat_id, false);
             let message_status = match status {
                 DoneStatus::Interrupted => MessageStatus::Aborted,
                 DoneStatus::Completed | DoneStatus::Errored => MessageStatus::Complete,
@@ -1394,4 +1931,32 @@ async fn drive_run(
 
     inner.remove_run(&chat_id, &run_id);
     inner.set_status(&chat_id, final_status, false);
+}
+
+#[cfg(test)]
+mod collaboration_tests {
+    use super::collaboration_completion_summary;
+
+    #[test]
+    fn workflow_completion_shows_child_output_not_protocol_dump() {
+        let data = serde_json::json!({
+            "summary": "Workflow completed with 1 child run(s). Return: {\n  \"key\": \"nova\",\n  \"ok\": true,\n  \"output\": \"review complete\",\n  \"artifactPaths\": [\"/private/session.jsonl\"]\n}\nTrace: 2 event(s)."
+        });
+        assert_eq!(
+            collaboration_completion_summary(&data).as_deref(),
+            Some("review complete")
+        );
+    }
+
+    #[test]
+    fn structured_result_output_wins() {
+        let data = serde_json::json!({
+            "summary": "large fallback",
+            "results": [{ "agent": "worker", "output": "focused result" }]
+        });
+        assert_eq!(
+            collaboration_completion_summary(&data).as_deref(),
+            Some("focused result")
+        );
+    }
 }

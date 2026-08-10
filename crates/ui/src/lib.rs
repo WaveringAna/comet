@@ -15,6 +15,7 @@
 pub mod app_menus;
 pub mod attachments;
 pub mod changes;
+pub mod collaboration;
 pub mod composer;
 pub mod edge_fade;
 pub mod frost;

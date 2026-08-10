@@ -25,6 +25,7 @@ use comet_rpc::methods;
 use gpui_tokio::Tokio;
 
 use crate::changes::Changes;
+use crate::collaboration::CollaborationPanel;
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::loaders;
@@ -206,6 +207,7 @@ pub enum Route {
 /// The tool selected in the right panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightPanelTab {
+    Agents,
     Review,
     Terminal,
 }
@@ -480,6 +482,7 @@ pub struct Shell {
     bottom_terminal: Option<Entity<TerminalPanel>>,
     right_terminal: Option<Entity<TerminalPanel>>,
     changes: Option<Entity<Changes>>,
+    collaboration: Option<Entity<CollaborationPanel>>,
     /// Chat outlet vs settings pages.
     route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
@@ -568,6 +571,8 @@ pub struct Shell {
     /// [`Shell::new`].
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
+    /// Capture/testing knob: open one right-panel tool after chat selection.
+    debug_right_panel: Option<RightPanelTab>,
     sidebar_tween: Option<WidthTween>,
     /// Edge peek: with the column collapsed, the window's left edge is a hot
     /// strip — hovering it floats the sidebar OVER the card instead of pushing
@@ -713,6 +718,12 @@ impl Shell {
             )),
             _ => None,
         };
+        let debug_right_panel = match std::env::var("COMET_OPEN_RIGHT_PANEL").ok().as_deref() {
+            Some("agents") => Some(RightPanelTab::Agents),
+            Some("review") => Some(RightPanelTab::Review),
+            Some("terminal") => Some(RightPanelTab::Terminal),
+            _ => None,
+        };
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
@@ -725,6 +736,7 @@ impl Shell {
             bottom_terminal: None,
             right_terminal: None,
             changes: None,
+            collaboration: None,
             route,
             nav,
             archived_page: None,
@@ -771,6 +783,7 @@ impl Shell {
             resort_epoch: 0,
             debug_dialog,
             debug_gate,
+            debug_right_panel,
             sidebar_tween: None,
             sidebar_peek_edge: false,
             sidebar_peek_panel: false,
@@ -869,6 +882,12 @@ impl Shell {
             }
             self.right_tween = None;
             self.terminal_tween = None;
+            if !self.active_chat.is_empty()
+                && let Some(tab) = self.debug_right_panel.take()
+            {
+                let key = self.active_chat.clone();
+                self.panels.select_right_panel_tab(&key, tab);
+            }
             let panels = self.panels.get(&self.panel_key(cx));
             if panels.right_panel_open
                 && panels.right_panel_tab == Some(RightPanelTab::Review)
@@ -1067,6 +1086,15 @@ impl Shell {
         let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
         self.changes = Some(changes.clone());
         changes
+    }
+
+    fn collaboration_pane(&mut self, cx: &mut Context<Self>) -> Entity<CollaborationPanel> {
+        if let Some(panel) = &self.collaboration {
+            return panel.clone();
+        }
+        let panel = cx.new(|cx| CollaborationPanel::new(self.state.clone(), cx));
+        self.collaboration = Some(panel.clone());
+        panel
     }
 
     fn bottom_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
@@ -3296,6 +3324,13 @@ impl Shell {
     }
 
     fn render_right_panel_launcher(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let agents = self.render_right_panel_launcher_button(
+            "right-panel-agents-launcher",
+            RightPanelTab::Agents,
+            icons::CHAT_ROUND_LINE,
+            "Agents",
+            cx,
+        );
         let review = self.render_right_panel_launcher_button(
             "right-panel-review-launcher",
             RightPanelTab::Review,
@@ -3323,6 +3358,7 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
+                    .child(agents)
                     .child(review)
                     .child(terminal),
             )
@@ -3335,41 +3371,48 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let buttons = [RightPanelTab::Review, RightPanelTab::Terminal]
-            .into_iter()
-            .map(|tab| {
-                let (id, icon_path, label) = match tab {
-                    RightPanelTab::Review => ("right-panel-review-tab", icons::CHECKLIST, "Review"),
-                    RightPanelTab::Terminal => {
-                        ("right-panel-terminal-tab", icons::TERMINAL, "Terminal")
-                    }
-                };
-                let selected = tab == active;
-                div()
-                    .id(id)
-                    .h(px(30.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(7.0))
-                    .px(px(10.0))
-                    .rounded(px(7.0))
-                    .when(selected, |el| el.bg(crate::theme::wash(0.08)))
-                    .text_size(px(12.0))
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_right_panel_tab(tab, window, cx);
-                    }))
-                    .child(icon(icon_path).size(px(15.0)).text_color(theme.text_muted))
-                    .child(SharedString::from(label))
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
+        let buttons = [
+            RightPanelTab::Agents,
+            RightPanelTab::Review,
+            RightPanelTab::Terminal,
+        ]
+        .into_iter()
+        .map(|tab| {
+            let (id, icon_path, label) = match tab {
+                RightPanelTab::Agents => {
+                    ("right-panel-agents-tab", icons::CHAT_ROUND_LINE, "Agents")
+                }
+                RightPanelTab::Review => ("right-panel-review-tab", icons::CHECKLIST, "Review"),
+                RightPanelTab::Terminal => {
+                    ("right-panel-terminal-tab", icons::TERMINAL, "Terminal")
+                }
+            };
+            let selected = tab == active;
+            div()
+                .id(id)
+                .h(px(30.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(7.0))
+                .px(px(10.0))
+                .rounded(px(7.0))
+                .when(selected, |el| el.bg(crate::theme::wash(0.08)))
+                .text_size(px(12.0))
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_right_panel_tab(tab, window, cx);
+                }))
+                .child(icon(icon_path).size(px(15.0)).text_color(theme.text_muted))
+                .child(SharedString::from(label))
+                .into_any_element()
+        })
+        .collect::<Vec<_>>();
 
         div()
             .h(px(44.0))
@@ -3410,6 +3453,7 @@ impl Shell {
         let active = self.right_panel_tab(cx);
         let content = match active {
             None => self.render_right_panel_launcher(cx),
+            Some(RightPanelTab::Agents) => self.collaboration_pane(cx).into_any_element(),
             Some(RightPanelTab::Review) => self.render_right_review(cx),
             Some(RightPanelTab::Terminal) => {
                 self.sync_terminal_panels(cx);

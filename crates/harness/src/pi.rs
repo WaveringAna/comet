@@ -6,7 +6,7 @@
 //! translates only the stable RPC events the frontend needs; pi remains the
 //! owner of model context, tools, compaction, and session persistence.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -17,6 +17,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
@@ -25,7 +27,39 @@ use comet_proto::{
     TOOL_OUTPUT_MAX_BYTES, ToolCall, UserInputQuestion,
 };
 
-use crate::{Harness, HarnessError, RunControls, SteerMessage};
+use crate::{
+    CollaborationBridgeEvent, CollaborationCommand, Harness, HarnessError, RunControls,
+    SteerMessage,
+};
+
+const COLLABORATION_BRIDGE_SOURCE: &str = include_str!("pi_collaboration_bridge.mjs");
+
+struct CollaborationEndpoint {
+    listener: TcpListener,
+    address: String,
+    token: String,
+    extension: PathBuf,
+}
+
+fn prepare_collaboration_endpoint() -> Option<CollaborationEndpoint> {
+    let std_listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).ok()?;
+    std_listener.set_nonblocking(true).ok()?;
+    let address = std_listener.local_addr().ok()?.to_string();
+    let listener = TcpListener::from_std(std_listener).ok()?;
+    let extension =
+        std::env::temp_dir().join(format!("nova-pi-collaboration-{}.mjs", std::process::id()));
+    let rewrite =
+        std::fs::read_to_string(&extension).ok().as_deref() != Some(COLLABORATION_BRIDGE_SOURCE);
+    if rewrite && std::fs::write(&extension, COLLABORATION_BRIDGE_SOURCE).is_err() {
+        return None;
+    }
+    Some(CollaborationEndpoint {
+        listener,
+        address,
+        token: uuid::Uuid::new_v4().to_string(),
+        extension,
+    })
+}
 
 /// Resolve the Pi CLI exactly as the harness does. The engine's settings
 /// management surface reuses this so diagnostics and package actions never
@@ -201,16 +235,22 @@ impl Harness for PiHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let executable = self.resolve_executable()?;
-        let mut child = self
-            .command(&executable, &request)
-            .spawn()
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    HarnessError::NotInstalled(executable.display().to_string())
-                } else {
-                    HarnessError::Io(error)
-                }
-            })?;
+        let endpoint = prepare_collaboration_endpoint();
+        let mut command = self.command(&executable, &request);
+        if let Some(endpoint) = &endpoint {
+            command
+                .arg("--extension")
+                .arg(&endpoint.extension)
+                .env("NOVA_PI_COLLAB_ADDR", &endpoint.address)
+                .env("NOVA_PI_COLLAB_TOKEN", &endpoint.token);
+        }
+        let mut child = command.spawn().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                HarnessError::NotInstalled(executable.display().to_string())
+            } else {
+                HarnessError::Io(error)
+            }
+        })?;
         let stdin = child
             .stdin
             .take()
@@ -231,6 +271,11 @@ impl Harness for PiHarness {
             });
         }
 
+        let (collaboration_listener, collaboration_token) = if let Some(endpoint) = endpoint {
+            (Some(endpoint.listener), Some(endpoint.token))
+        } else {
+            (None, None)
+        };
         let (event_tx, event_rx) = mpsc::channel(256);
         tokio::spawn(run_session(PiSession {
             child,
@@ -241,6 +286,8 @@ impl Harness for PiHarness {
             event_tx,
             interrupt_grace: self.interrupt_grace,
             stderr_tail,
+            collaboration_listener,
+            collaboration_token,
         }));
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|event| (event, rx))
@@ -258,6 +305,8 @@ struct PiSession {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     interrupt_grace: Duration,
     stderr_tail: crate::StderrTail,
+    collaboration_listener: Option<TcpListener>,
+    collaboration_token: Option<String>,
 }
 
 async fn write_command(stdin: &mut ChildStdin, command: Value) -> Result<(), HarnessError> {
@@ -274,6 +323,25 @@ async fn send_event(
     event: AgentEvent,
 ) -> bool {
     tx.send(Ok(event)).await.is_ok()
+}
+
+async fn write_collaboration_request(
+    writer: &mut OwnedWriteHalf,
+    token: &str,
+    command: &CollaborationCommand,
+) -> Result<(), HarnessError> {
+    let mut line = serde_json::to_vec(&json!({
+        "token": token,
+        "type": "request",
+        "requestId": command.request_id,
+        "method": command.method,
+        "params": command.params,
+    }))
+    .map_err(|error| HarnessError::Protocol(format!("serialize collaboration request: {error}")))?;
+    line.push(b'\n');
+    writer.write_all(&line).await?;
+    writer.flush().await?;
+    Ok(())
 }
 
 /// Pi acknowledges a steer when it queues it, but the semantic turn boundary
@@ -308,12 +376,22 @@ async fn run_session(session: PiSession) {
         event_tx,
         interrupt_grace,
         stderr_tail,
+        mut collaboration_listener,
+        collaboration_token,
     } = session;
     let RunControls {
         request_input,
         mut steering,
         interrupt,
+        mut collaboration,
+        collaboration_events,
     } = controls;
+    let mut collaboration_lines: Option<tokio::io::Lines<BufReader<OwnedReadHalf>>> = None;
+    let mut collaboration_writer: Option<OwnedWriteHalf> = None;
+    let mut collaboration_replies: HashMap<
+        String,
+        tokio::sync::oneshot::Sender<Result<Value, String>>,
+    > = HashMap::new();
     let request_input = Arc::new(request_input);
     let state_id = "nova-state";
     let prompt_id = "nova-prompt";
@@ -348,6 +426,79 @@ async fn run_session(session: PiSession) {
     let mut assistant_started: Option<std::time::Instant> = None;
     'main: loop {
         tokio::select! {
+            accepted = async {
+                match collaboration_listener.as_ref() {
+                    Some(listener) => listener.accept().await,
+                    None => std::future::pending().await,
+                }
+            }, if collaboration_lines.is_none() => {
+                collaboration_listener = None;
+                if let Ok((stream, _)) = accepted {
+                    let (reader, writer) = stream.into_split();
+                    collaboration_lines = Some(BufReader::new(reader).lines());
+                    collaboration_writer = Some(writer);
+                }
+            },
+            bridge_line = async {
+                match collaboration_lines.as_mut() {
+                    Some(lines) => lines.next_line().await,
+                    None => std::future::pending::<std::io::Result<Option<String>>>().await,
+                }
+            } => match bridge_line {
+                Ok(Some(line)) => {
+                    let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue; };
+                    if frame.get("token").and_then(Value::as_str) != collaboration_token.as_deref() {
+                        continue;
+                    }
+                    match frame.get("type").and_then(Value::as_str).unwrap_or("") {
+                        "reply" => {
+                            let request_id = frame.get("requestId").and_then(Value::as_str).unwrap_or("");
+                            if let Some(reply) = collaboration_replies.remove(request_id) {
+                                let payload = frame.get("data").cloned().unwrap_or(Value::Null);
+                                let result = if payload.get("success").and_then(Value::as_bool) == Some(false) {
+                                    Err(payload.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("pi-subagents request failed").to_owned())
+                                } else {
+                                    Ok(payload.get("data").cloned().unwrap_or(payload))
+                                };
+                                let _ = reply.send(result);
+                            }
+                        }
+                        "event" => {
+                            if let Some(tx) = &collaboration_events {
+                                let _ = tx.send(CollaborationBridgeEvent {
+                                    event: frame.get("event").and_then(Value::as_str).unwrap_or("").to_owned(),
+                                    data: frame.get("data").cloned().unwrap_or(Value::Null),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    collaboration_lines = None;
+                    collaboration_writer = None;
+                    for (_, reply) in collaboration_replies.drain() {
+                        let _ = reply.send(Err("pi collaboration bridge disconnected".into()));
+                    }
+                }
+            },
+            command = async {
+                match collaboration.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending::<Option<CollaborationCommand>>().await,
+                }
+            } => if let Some(command) = command {
+                match (collaboration_writer.as_mut(), collaboration_token.as_deref()) {
+                    (Some(writer), Some(token)) => {
+                        if let Err(error) = write_collaboration_request(writer, token, &command).await {
+                            let _ = command.respond_to.send(Err(error.to_string()));
+                        } else {
+                            collaboration_replies.insert(command.request_id.clone(), command.respond_to);
+                        }
+                    }
+                    _ => { let _ = command.respond_to.send(Err("pi collaboration bridge unavailable".into())); }
+                }
+            },
             line = stdout.next_line() => match line {
                 Ok(Some(line)) => {
                     let line = line.trim_end_matches('\r');
@@ -432,7 +583,13 @@ async fn run_session(session: PiSession) {
                         "agent_settled" => {
                             let status = if interrupted { DoneStatus::Interrupted } else if last_error.is_some() { DoneStatus::Errored } else { DoneStatus::Completed };
                             if !send_event(&event_tx, AgentEvent::Done { status, result: None, error: last_error.take(), session_id: (!session_id.is_empty()).then_some(session_id.clone()) }).await { break 'main; }
-                            break 'main;
+                            // Pi RPC is a persistent session. Keep the process,
+                            // companion extension, and child-control channel
+                            // alive while the engine parks this completed turn;
+                            // a later prompt/steer begins the next turn without
+                            // losing async children or their room.
+                            streaming = false;
+                            assistant_text_emitted = false;
                         }
                         "message_start" => {
                             let message = value.get("message").unwrap_or(&Value::Null);

@@ -47,6 +47,8 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering: steer_rx,
         interrupt: interrupt.clone(),
+        collaboration: None,
+        collaboration_events: None,
     };
     (controls, steer_tx, interrupt)
 }

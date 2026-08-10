@@ -29,7 +29,9 @@ use serde::de::DeserializeOwned;
 
 use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use comet_engine::{Engine, EngineConfig, EngineRuntime};
-use comet_proto::{Chat, ChatIndicator, Device, HarnessId, Project, Session, SessionStatus};
+use comet_proto::{
+    Chat, ChatIndicator, CollaborationSession, Device, HarnessId, Project, Session, SessionStatus,
+};
 use comet_rpc::{RpcClient, connect_ws, memory_client, methods};
 
 // ---------------------------------------------------------------------------
@@ -266,6 +268,8 @@ pub struct AppState {
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
+    /// Host-local Pi parent/child collaboration snapshots.
+    pub collaborations: Vec<CollaborationSession>,
     /// The project whose tabs fill the main area. Healed by [`Self::apply_projects`]
     /// when the row vanishes; selecting a chat implies its project.
     pub selected_project: Option<String>,
@@ -317,6 +321,7 @@ impl AppState {
             chats: Vec::new(),
             working_since: None,
             sessions: Vec::new(),
+            collaborations: Vec::new(),
             selected_project: None,
             selected_chat: None,
             transcript: Vec::new(),
@@ -350,6 +355,10 @@ impl AppState {
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) {
         self.sessions = sessions;
         self.refresh_working_clock();
+    }
+
+    pub fn apply_collaborations(&mut self, collaborations: Vec<CollaborationSession>) {
+        self.collaborations = collaborations;
     }
 
     pub fn apply_projects(&mut self, mut projects: Vec<Project>) {
@@ -606,6 +615,13 @@ impl AppState {
         self.chats.iter().find(|c| c.id == id)
     }
 
+    pub fn selected_collaboration(&self) -> Option<&CollaborationSession> {
+        let chat_id = self.selected_chat.as_deref()?;
+        self.collaborations
+            .iter()
+            .find(|collaboration| collaboration.chat_id == chat_id)
+    }
+
     pub fn gate(&self) -> GatePhase {
         gate_phase(&self.connection)
     }
@@ -659,6 +675,12 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_SESSIONS,
                 AppState::apply_sessions,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_COLLABORATIONS,
+                AppState::apply_collaborations,
             ),
             spawn_chats_watch(cx, handle.clone()),
             spawn_watch(

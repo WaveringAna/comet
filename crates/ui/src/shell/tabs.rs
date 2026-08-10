@@ -577,6 +577,25 @@ impl Shell {
             .child(tab_region)
             .when(has_project && has_tabs, |el| el.child(new_tab))
             .child(div().flex_1())
+            // Collaboration is session chrome, not git chrome. Keep it in a
+            // stable titlebar slot on every selected chat so child activity is
+            // one click away even in plain folders.
+            .when(selected.is_some(), |el| {
+                el.child(header_icon_button(
+                    "toggle-agents",
+                    icons::CHAT_ROUND_LINE,
+                    &theme,
+                    cx.listener(|this, _, window, cx| {
+                        if this.right_pane_open(cx)
+                            && this.right_panel_tab(cx) == Some(RightPanelTab::Agents)
+                        {
+                            this.toggle_right_pane(cx);
+                        } else {
+                            this.select_right_panel_tab(RightPanelTab::Agents, window, cx);
+                        }
+                    }),
+                ))
+            })
             // Stable location: the toggle shows whether the pane is open or
             // not (the pane's own header is gone).
             .when(git, |el| {

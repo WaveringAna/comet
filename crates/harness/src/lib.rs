@@ -18,6 +18,21 @@ use comet_proto::{
     UserInputQuestion,
 };
 
+/// One exact pi-subagents RPC request from Nova's collaboration surface.
+pub struct CollaborationCommand {
+    pub request_id: String,
+    pub method: String,
+    pub params: serde_json::Value,
+    pub respond_to: oneshot::Sender<Result<serde_json::Value, String>>,
+}
+
+/// An out-of-band lifecycle frame from the Nova companion Pi extension.
+#[derive(Debug, Clone)]
+pub struct CollaborationBridgeEvent {
+    pub event: String,
+    pub data: serde_json::Value,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {
     #[error("harness binary not found: {0}")]
@@ -46,6 +61,9 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// Present for Pi runs. Other harnesses ignore the collaboration channel.
+    pub collaboration: Option<mpsc::Receiver<CollaborationCommand>>,
+    pub collaboration_events: Option<mpsc::UnboundedSender<CollaborationBridgeEvent>>,
 }
 
 #[async_trait]

@@ -34,6 +34,10 @@ pub mod methods {
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_DEVICES: &str = "WatchDevices";
     pub const WATCH_SESSIONS: &str = "WatchSessions";
+    /// Host-local Pi parent/child topology and room activity.
+    pub const WATCH_COLLABORATIONS: &str = "WatchCollaborations";
+    /// Exact pi-subagents spawn/steer/resume/stop controls.
+    pub const COLLABORATION_CONTROL: &str = "CollaborationControl";
     /// Projects registry (device+folder pairs) from the workspace doc.
     pub const WATCH_PROJECTS: &str = "WatchProjects";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
