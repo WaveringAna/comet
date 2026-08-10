@@ -15,6 +15,10 @@ use gpui::FocusHandle;
 /// plus the 2px column gap.
 const PROJECT_ROW_SLOT: f32 = 31.0;
 
+fn short_device_name(name: &str) -> &str {
+    name.strip_suffix(".local").unwrap_or(name)
+}
+
 /// Drag-reorder state for the projects list; `epoch` keys the 150ms slide
 /// animation restarts (the session-tab idiom, vertical).
 pub(super) struct ProjectDragState {
@@ -475,6 +479,14 @@ impl Shell {
     ) -> gpui::Stateful<gpui::Div> {
         let id = project.id.clone();
         let name: SharedString = project.display_name().to_string().into();
+        let device_label: Option<SharedString> = {
+            let state = self.state.read(cx);
+            (state.devices.len() > 1)
+                .then(|| state.device_name(&project.device_id))
+                .flatten()
+                .map(short_device_name)
+                .map(SharedString::from)
+        };
         let fade_key = format!("project-row-{id}");
         let rest_bg = if selected {
             crate::theme::glass_selected_bg()
@@ -552,6 +564,18 @@ impl Shell {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .child(name),
             )
+            .when_some(device_label, |el, label| {
+                el.child(
+                    div()
+                        .max_w(px(76.0))
+                        .truncate()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .line_height(px(14.0))
+                        .text_color(theme.text_muted.opacity(0.5))
+                        .child(label),
+                )
+            })
             .child(
                 div()
                     .id(SharedString::from(format!("new-session-project-{id}")))
@@ -587,14 +611,23 @@ impl Shell {
         let now = Utc::now();
         let rows: Vec<(ChatIndicator, comet_proto::Chat, String, Option<String>)> = {
             let state = self.state.read(cx);
+            let show_hosts = state.devices.len() > 1;
             state
                 .overview_chats(now)
                 .into_iter()
                 .map(|(status, chat)| {
                     let project = state.project_for_chat(chat);
-                    let folder = project
+                    let mut folder = project
                         .map(|s| s.display_name().to_string())
                         .unwrap_or_else(|| "?".to_string());
+                    if show_hosts
+                        && let Some(device) = project
+                            .and_then(|project| state.device_name(&project.device_id))
+                            .map(short_device_name)
+                    {
+                        folder.push_str(" · ");
+                        folder.push_str(device);
+                    }
                     // The branch shows whenever the engine has stamped one —
                     // main-checkout sessions included, not just worktrees.
                     let branch = chat
