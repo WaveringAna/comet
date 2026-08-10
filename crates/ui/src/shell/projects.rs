@@ -479,13 +479,16 @@ impl Shell {
     ) -> gpui::Stateful<gpui::Div> {
         let id = project.id.clone();
         let name: SharedString = project.display_name().to_string().into();
-        let device_label: Option<SharedString> = {
+        let (device_label, remote_project): (Option<SharedString>, bool) = {
             let state = self.state.read(cx);
-            (state.devices.len() > 1)
-                .then(|| state.device_name(&project.device_id))
-                .flatten()
-                .map(short_device_name)
-                .map(SharedString::from)
+            (
+                (state.devices.len() > 1)
+                    .then(|| state.device_name(&project.device_id))
+                    .flatten()
+                    .map(short_device_name)
+                    .map(SharedString::from),
+                state.local_device_id.as_deref() != Some(project.device_id.as_str()),
+            )
         };
         let fade_key = format!("project-row-{id}");
         let rest_bg = if selected {
@@ -586,7 +589,10 @@ impl Shell {
                     .justify_center()
                     .rounded(px(5.0))
                     .cursor_pointer()
-                    .opacity(0.0)
+                    // A remote project is already a ready-to-use entry point:
+                    // keep its new-session action visible instead of hiding the
+                    // only affordance until hover.
+                    .opacity(if remote_project { 0.55 } else { 0.0 })
                     .group_hover(group, |el| el.opacity(1.0))
                     .hover(|el| el.bg(crate::theme::wash(0.14)))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -679,10 +685,17 @@ impl Shell {
 
     pub(super) fn open_add_project(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
+        // Stay in the current Nova's context. On B, opening the palette while
+        // an A-hosted project is selected should browse A without another
+        // device-switch step; local remains the fallback.
+        let preferred_device_id = state
+            .selected_project_row()
+            .map(|project| project.device_id.as_str())
+            .or(state.local_device_id.as_deref());
         let device = state
-            .local_device_id
-            .as_deref()
-            .and_then(|local_id| state.devices.iter().find(|d| d.id == local_id))
+            .devices
+            .iter()
+            .find(|device| Some(device.id.as_str()) == preferred_device_id)
             .cloned();
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
         // bubble to the palette frame (`add_project_key`) instead of moving the
