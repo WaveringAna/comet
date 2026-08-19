@@ -318,7 +318,10 @@ impl TerminalElement {
 
 pub struct TerminalPrepaint {
     bg_quads: Vec<PaintQuad>,
-    lines: Vec<ShapedLine>,
+    /// Segments are pinned to their grid column so a fallback glyph cannot
+    /// shift the rest of its terminal row.
+    lines: Vec<Vec<(usize, ShapedLine)>>,
+    cell_w: Pixels,
     cursor: Option<PaintQuad>,
 }
 
@@ -364,7 +367,15 @@ impl gpui::Element for TerminalElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let theme = Theme::of(cx).clone();
-        let mono = font(theme.font_mono.clone());
+        // A terminal is a fixed grid. Geist Mono's discretionary/contextual
+        // ligatures can collapse `--`, `->`, etc. into fewer advances, while
+        // the PTY and cursor still use the true cell count.
+        let mut mono = font(theme.font_mono.clone());
+        mono.features = gpui::FontFeatures(std::sync::Arc::new(vec![
+            ("liga".into(), 0),
+            ("calt".into(), 0),
+            ("dlig".into(), 0),
+        ]));
         // Font probe: measure the actual advance of the resolved mono font so
         // cols/rows track real glyph metrics, not a guessed aspect ratio.
         let font_size = px(TERM_FONT_SIZE);
@@ -390,6 +401,7 @@ impl gpui::Element for TerminalElement {
             return TerminalPrepaint {
                 bg_quads: Vec::new(),
                 lines: Vec::new(),
+                cell_w,
                 cursor: None,
             };
         };
@@ -456,6 +468,7 @@ impl gpui::Element for TerminalElement {
         TerminalPrepaint {
             bg_quads,
             lines,
+            cell_w,
             cursor,
         }
     }
@@ -479,15 +492,18 @@ impl gpui::Element for TerminalElement {
             for quad in prepaint.bg_quads.drain(..) {
                 window.paint_quad(quad);
             }
-            for (ix, line) in prepaint.lines.iter().enumerate() {
-                let _ = line.paint(
-                    point(origin.x, origin.y + line_h * ix as f32),
-                    line_h,
-                    gpui::TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
+            for (ix, segments) in prepaint.lines.iter().enumerate() {
+                let y = origin.y + line_h * ix as f32;
+                for (col, line) in segments {
+                    let _ = line.paint(
+                        point(origin.x + prepaint.cell_w * *col as f32, y),
+                        line_h,
+                        gpui::TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
             }
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
@@ -496,22 +512,63 @@ impl gpui::Element for TerminalElement {
     }
 }
 
-/// Shape one grid row: wide-char spacers are skipped (the wide glyph covers
-/// both columns), attributes map to font weight/style, colors to run colors.
+/// Shape each ASCII run together, but pin fallback and wide glyphs to their
+/// source grid column. Shaped fallback glyphs do not necessarily have the
+/// terminal's cell advance; treating the whole row as one line makes every
+/// following cell drift.
 fn shape_row(
     row: &[CellSnapshot],
     theme: &Theme,
     mono: &gpui::Font,
     font_size: Pixels,
     window: &Window,
-) -> ShapedLine {
+) -> Vec<(usize, ShapedLine)> {
+    fn flush(
+        segments: &mut Vec<(usize, ShapedLine)>,
+        text: &mut String,
+        runs: &mut Vec<TextRun>,
+        column: usize,
+        font_size: Pixels,
+        window: &Window,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        segments.push((
+            column,
+            window.text_system().shape_line(
+                SharedString::from(std::mem::take(text)),
+                font_size,
+                runs,
+                None,
+            ),
+        ));
+        runs.clear();
+    }
+
+    let mut segments = Vec::new();
     let mut text = String::with_capacity(row.len());
     let mut runs: Vec<TextRun> = Vec::new();
-    for cell in row {
+    let mut segment_column = 0;
+    for (column, cell) in row.iter().enumerate() {
         if cell.wide_spacer {
             continue;
         }
         let ch = if cell.hidden { ' ' } else { cell.ch };
+        let pinned = !ch.is_ascii() || cell.wide;
+        if pinned {
+            flush(
+                &mut segments,
+                &mut text,
+                &mut runs,
+                segment_column,
+                font_size,
+                window,
+            );
+        }
+        if text.is_empty() {
+            segment_column = column;
+        }
         let (fg, _) = cell.display_colors();
         let mut color = resolve_color(fg, theme);
         if cell.dim {
@@ -550,10 +607,26 @@ fn shape_row(
                 strikethrough: None,
             }),
         }
+        if pinned {
+            flush(
+                &mut segments,
+                &mut text,
+                &mut runs,
+                segment_column,
+                font_size,
+                window,
+            );
+        }
     }
-    window
-        .text_system()
-        .shape_line(SharedString::from(text), font_size, &runs, None)
+    flush(
+        &mut segments,
+        &mut text,
+        &mut runs,
+        segment_column,
+        font_size,
+        window,
+    );
+    segments
 }
 
 #[cfg(test)]

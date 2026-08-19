@@ -100,6 +100,10 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
     pub additions: u32,
     pub deletions: u32,
+    /// Largest visible source line number on either side. Gutter width is
+    /// derived from it so large files never paint line numbers into the
+    /// change-marker column.
+    pub max_line: u32,
 }
 
 impl FileDiff {
@@ -113,8 +117,17 @@ impl FileDiff {
             hunks: Vec::new(),
             additions: 0,
             deletions: 0,
+            max_line: 0,
         }
     }
+}
+
+/// Width of one line-number column, fitted to the largest line number. The
+/// 6px left clearance keeps four-digit numbers from visually touching the
+/// accent bar; the historical 36px column remains the floor for short files.
+pub fn gutter_width(file: &FileDiff) -> f32 {
+    let digits = file.max_line.max(1).ilog10() + 1;
+    (digits as f32 * 6.6 + 14.0).max(GUTTER_WIDTH)
 }
 
 fn strip_git_prefix(path: &str) -> &str {
@@ -256,6 +269,10 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
             if let Some(line) = line
                 && let Some(hunk) = file.hunks.last_mut()
             {
+                file.max_line = file
+                    .max_line
+                    .max(line.old_no.unwrap_or(0))
+                    .max(line.new_no.unwrap_or(0));
                 hunk.lines.push(line);
                 continue;
             }
@@ -1335,6 +1352,7 @@ fn render_file_body(
     theme: &Theme,
 ) -> AnyElement {
     let mono = font(theme.font_mono.clone());
+    let gutter_px = gutter_width(file);
     let mut line_ix = 0usize;
     let mut children: Vec<AnyElement> = Vec::new();
 
@@ -1391,10 +1409,7 @@ fn render_file_body(
                         .flex_none()
                         .flex()
                         .items_center()
-                        .pl(px(ACCENT_BAR_WIDTH
-                            + 2.0 * GUTTER_WIDTH
-                            + MARKER_WIDTH
-                            + 12.0))
+                        .pl(px(ACCENT_BAR_WIDTH + 2.0 * gutter_px + MARKER_WIDTH + 12.0))
                         .text_size(px(10.5))
                         .text_color(theme.text_faint)
                         .italic()
@@ -1429,7 +1444,7 @@ fn render_file_body(
             };
             let gutter = |no: Option<u32>, color: gpui::Hsla| {
                 div()
-                    .w(px(GUTTER_WIDTH))
+                    .w(px(gutter_px))
                     .flex_none()
                     .font_family(theme.font_mono.clone())
                     .text_size(px(11.0))
@@ -1694,6 +1709,19 @@ rename to new_name.rs
         // Second hunk restarts numbering from its header.
         assert_eq!(main.hunks[1].lines[0].old_no, Some(10));
         assert_eq!(main.hunks[1].lines[0].new_no, Some(11));
+        assert_eq!(main.max_line, 12);
+    }
+
+    #[test]
+    fn gutters_expand_for_large_source_line_numbers() {
+        let mut file = parse_patch(PATCH).remove(0);
+        assert_eq!(gutter_width(&file), GUTTER_WIDTH);
+
+        file.max_line = 9_999;
+        let four_digits = gutter_width(&file);
+        assert!(four_digits > GUTTER_WIDTH);
+        file.max_line = 27_404;
+        assert!(gutter_width(&file) > four_digits);
     }
 
     #[test]

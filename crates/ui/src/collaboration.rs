@@ -261,16 +261,26 @@ impl CollaborationPanel {
             ChildAgentStatus::Stopped => "stopped",
         };
         let id = child.id.clone();
+        let running = matches!(
+            child.status,
+            ChildAgentStatus::Starting | ChildAgentStatus::Working
+        );
         div()
             .id(SharedString::from(format!("collaboration-child-{id}")))
             .w_full()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(10.0))
+            .gap(px(9.0))
             .px(px(10.0))
             .py(px(9.0))
             .rounded(px(9.0))
+            .border_1()
+            .border_color(if selected {
+                theme.accent.opacity(0.35)
+            } else {
+                theme.border.opacity(0.55)
+            })
             .when(selected, |el| el.bg(theme.element_active))
             .hover(|style| style.bg(theme.element_hover))
             .cursor_pointer()
@@ -281,7 +291,16 @@ impl CollaborationPanel {
                 }
                 cx.notify();
             }))
-            .child(div().size(px(7.0)).rounded_full().bg(status_color))
+            .child(
+                div()
+                    .size(px(24.0))
+                    .rounded(px(7.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(status_color.opacity(0.12))
+                    .child(icon(icons::BOT).size(px(14.0)).text_color(status_color)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -312,9 +331,21 @@ impl CollaborationPanel {
             )
             .child(
                 div()
-                    .text_size(px(10.0))
-                    .text_color(status_color)
-                    .child(SharedString::from(status)),
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(status_color)
+                            .child(SharedString::from(status)),
+                    )
+                    .when(running, |el| {
+                        el.child(crate::loaders::mini_gradient_spinner(
+                            SharedString::from(format!("collaboration-child-working-{}", child.id)),
+                            1.8,
+                        ))
+                    }),
             )
             .into_any_element()
     }
@@ -362,6 +393,15 @@ impl Render for CollaborationPanel {
             })
             .filter(|text| !text.trim().is_empty());
 
+        let working_children = children
+            .iter()
+            .filter(|child| {
+                matches!(
+                    child.status,
+                    ChildAgentStatus::Starting | ChildAgentStatus::Working
+                )
+            })
+            .count();
         let topology = div()
             .flex_none()
             .px(px(12.0))
@@ -372,12 +412,37 @@ impl Render for CollaborationPanel {
             .gap(px(5.0))
             .child(
                 div()
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_faint)
+                            .child("AGENTS"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(if working_children > 0 {
+                                theme.accent
+                            } else {
+                                theme.text_faint
+                            })
+                            .child(SharedString::from(format!("{} active", working_children))),
+                    ),
+            )
+            .child(
+                div()
                     .h(px(38.0))
                     .flex()
                     .items_center()
                     .gap(px(10.0))
                     .px(px(10.0))
-                    .child(icon(icons::PI_MARK).size(px(16.0)).text_color(theme.text))
+                    .child(icon(icons::BOT).size(px(16.0)).text_color(theme.text))
                     .child(
                         div()
                             .flex_1()

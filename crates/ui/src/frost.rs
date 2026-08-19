@@ -15,6 +15,11 @@ use gpui::{
 
 use crate::theme::Theme;
 
+/// Reference glass blur for menus and dialogs. A shallow blur leaves the
+/// backdrop visibly ghosting through rows; the thin glass tint needs a wider
+/// 44px blur to read as a stable surface.
+pub const MENU_BLUR: f32 = 44.0;
+
 /// Frost `child` (a popover card): backdrop-blurred on glass, pass-through on
 /// opaque platforms. `corner_radius` must match the card's rounding.
 pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) -> Frosted {

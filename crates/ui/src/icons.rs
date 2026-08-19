@@ -103,6 +103,9 @@ icon_assets![
     (INFO_CIRCLE, "info-circle"),
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
+    // Hand-drawn bot head in the Solar Linear style. Used for the native
+    // Pi collaboration surface so agent controls don't read as chat.
+    (BOT, "bot"),
     // Hand-drawn glyphs inherited from Comet (terminal-panel.tsx /
     // composer-actions.tsx / menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),

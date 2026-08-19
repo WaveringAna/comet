@@ -3331,7 +3331,7 @@ impl Shell {
         let agents = self.render_right_panel_launcher_button(
             "right-panel-agents-launcher",
             RightPanelTab::Agents,
-            icons::CHAT_ROUND_LINE,
+            icons::BOT,
             "Agents",
             cx,
         );
@@ -3383,9 +3383,7 @@ impl Shell {
         .into_iter()
         .map(|tab| {
             let (id, icon_path, label) = match tab {
-                RightPanelTab::Agents => {
-                    ("right-panel-agents-tab", icons::CHAT_ROUND_LINE, "Agents")
-                }
+                RightPanelTab::Agents => ("right-panel-agents-tab", icons::BOT, "Agents"),
                 RightPanelTab::Review => ("right-panel-review-tab", icons::CHECKLIST, "Review"),
                 RightPanelTab::Terminal => {
                     ("right-panel-terminal-tab", icons::TERMINAL, "Terminal")

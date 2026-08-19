@@ -194,7 +194,7 @@ fn anchored_menu_with_priority(
     content: AnyElement,
     priority: usize,
 ) -> AnyElement {
-    let content = crate::frost::frosted(12.0, 16.0, content).into_any_element();
+    let content = crate::frost::frosted(12.0, crate::frost::MENU_BLUR, content).into_any_element();
     pinned_layer(
         gpui::deferred(
             gpui::anchored()
@@ -225,7 +225,7 @@ pub fn anchored_menu_in_modal(id: impl Into<ElementId>, content: AnyElement) -> 
 /// user menu — anything anchored near the window bottom; Radix flips these
 /// automatically, gpui's `anchored` needs the side picked).
 pub fn anchored_menu_above(id: impl Into<ElementId>, content: AnyElement) -> AnyElement {
-    let content = crate::frost::frosted(12.0, 16.0, content).into_any_element();
+    let content = crate::frost::frosted(12.0, crate::frost::MENU_BLUR, content).into_any_element();
     pinned_layer(
         gpui::deferred(
             gpui::anchored()
@@ -245,7 +245,7 @@ pub fn anchored_menu_above(id: impl Into<ElementId>, content: AnyElement) -> Any
 /// ComboboxPopup `align="end"` — right-side triggers like the composer's ref
 /// picker open leftward instead of running off the window).
 pub fn anchored_menu_above_end(id: impl Into<ElementId>, content: AnyElement) -> AnyElement {
-    let content = crate::frost::frosted(12.0, 16.0, content).into_any_element();
+    let content = crate::frost::frosted(12.0, crate::frost::MENU_BLUR, content).into_any_element();
     div()
         .absolute()
         .top_0()
@@ -274,7 +274,7 @@ pub fn menu_at(
     position: Point<Pixels>,
     content: AnyElement,
 ) -> AnyElement {
-    let content = crate::frost::frosted(12.0, 16.0, content).into_any_element();
+    let content = crate::frost::frosted(12.0, crate::frost::MENU_BLUR, content).into_any_element();
     gpui::deferred(
         gpui::anchored()
             .position(position)
@@ -295,7 +295,7 @@ pub fn modal(
     viewport: gpui::Size<Pixels>,
     card: AnyElement,
 ) -> AnyElement {
-    let card = crate::frost::frosted(12.0, 16.0, card).into_any_element();
+    let card = crate::frost::frosted(12.0, crate::frost::MENU_BLUR, card).into_any_element();
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))

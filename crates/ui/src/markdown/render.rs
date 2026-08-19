@@ -715,6 +715,37 @@ fn selection_wash() -> Hsla {
     crate::theme::oklch(0.673, 0.182, 276.935).opacity(0.35) // indigo-400
 }
 
+/// Register a plain-text surface with the transcript's selection registry.
+/// User prompts are not markdown, but they should participate in the same
+/// drag selection and Cmd+C behavior as adjacent rendered markdown blocks.
+pub(crate) fn paint_text_selection(
+    window: &mut Window,
+    key: &std::sync::Arc<str>,
+    text: &SharedString,
+    layout: &gpui::TextLayout,
+) {
+    if let Some(range) = super::selection::wash_range(key) {
+        for rect in range_rects(layout, &range, 0.0, 0.0) {
+            window.paint_quad(quad(
+                rect,
+                px(0.0),
+                selection_wash(),
+                px(0.0),
+                gpui::transparent_black(),
+                BorderStyle::default(),
+            ));
+        }
+    }
+    REGISTRY.with(|r| {
+        r.borrow_mut().push(RegEntry {
+            key: key.clone(),
+            text: text.clone(),
+            layout: layout.clone(),
+        })
+    });
+    register_selection_listeners(window, key, text, layout);
+}
+
 /// One painted text element, registered per frame in document order — the
 /// continuity model that lets a drag span paragraphs/list items (Zed gets
 /// this for free from its single-element markdown; our tree rebuilds it).

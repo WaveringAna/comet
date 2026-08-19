@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, ClipboardItem, Context, Entity, EventEmitter, ListAlignment, ListScrollEvent,
-    ListState, ObjectFit, SharedString, StyledImage as _, Subscription, Task, Window, div, img,
-    list, prelude::*, px,
+    ListState, ObjectFit, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun,
+    Window, canvas, div, font, img, list, prelude::*, px,
 };
 
 use nova_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
@@ -1913,7 +1913,7 @@ impl Transcript {
                                 .line_height(px(22.0))
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
-                                .child(text),
+                                .child(Self::user_bubble_text(&row.id, text, &theme)),
                         ),
                     );
                 }
@@ -2100,6 +2100,38 @@ impl Transcript {
                     .child(inner)
                     .children(strip),
             )
+            .into_any_element()
+    }
+
+    /// Plain user prompts participate in the same document-ordered selection
+    /// registry as rendered markdown. That makes a drag over a prompt and an
+    /// adjacent reply behave as one native text selection, including Cmd+C.
+    fn user_bubble_text(row_id: &SharedString, text: SharedString, theme: &Theme) -> AnyElement {
+        let layout = StyledText::new(text.clone())
+            .with_runs(vec![TextRun {
+                len: text.len(),
+                font: font(theme.font_sans.clone()),
+                color: theme.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }])
+            .layout()
+            .clone();
+        let selection_key: Arc<str> = format!("{row_id}:user").into();
+        let selection_text = text.clone();
+        let underlay = canvas(
+            |_, _, _| (),
+            move |_, _, window, _| {
+                render::paint_text_selection(window, &selection_key, &selection_text, &layout);
+            },
+        )
+        .absolute()
+        .size_full();
+        div()
+            .relative()
+            .child(underlay)
+            .child(text)
             .into_any_element()
     }
 
